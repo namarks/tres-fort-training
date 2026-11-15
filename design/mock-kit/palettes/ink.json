@@ -1,0 +1,33 @@
+{
+  "name": "Ink (TestFlight 67, before navy and orange)",
+  "tabTint": "accent",
+  "light": {
+    "bgTop": "#fdfdfe",
+    "bg": "#f5f8fb",
+    "surface": "#fdfdfe",
+    "surface2": "#e9ebef",
+    "text": "#16191c",
+    "muted": "#565b62",
+    "dim": "#9ea2a7",
+    "accent": "#37577f",
+    "onAccent": "#ffffff",
+    "signal": "#c22d0c",
+    "signalFill": "#c22d0c",
+    "onSignal": "#ffffff"
+  },
+  "dark": {
+    "bgTop": "#1a1e25",
+    "bg": "#101419",
+    "surface": "#191d23",
+    "surface2": "#242930",
+    "text": "#f5f8fb",
+    "muted": "#acb2b9",
+    "dim": "#595e64",
+    "accent": "#83a4ce",
+    "onAccent": "#0e1927",
+    "signal": "#ee694f",
+    "signalFill": "#ee694f",
+    "onSignal": "#0e1927"
+  },
+  "heroCard": false
+}

@@ -1,0 +1,397 @@
+import Foundation
+
+// ────────────────────────────────────────────────────────────────────────
+// FROZEN PROJECTION ALGORITHM — must match the backend byte-for-byte.
+//
+// For a given calendar date, decide what (if anything) to show in the
+// month grid / agenda. This is the single source of truth on the client;
+// it is deliberately isolated here and over-commented so the lead can
+// diff it against the server's projection.
+//
+//   A 'discarded' session is treated as if it NEVER EXISTED (the user
+//   explicitly threw it away; its set_logs are soft-deleted server-side).
+//   It is dropped before the rule below, so the date falls through:
+//     date < today  → .none ;  date >= today → schedule/rest.
+//   This mirrors projectCalendar's byDate `discarded` carve-out in the
+//   backend byte-for-byte (test/calendar.test.ts is the contract).
+//
+//   date < today  → show a cell ONLY if a real cached session exists,
+//                    using that session's status — EXCEPT a past 'planned'
+//                    session, which never executed (logging flips it to
+//                    in_progress/completed) and so VANISHES like 'discarded'
+//                    (#48). A FUTURE 'planned' still wins.
+//   date >= today  → during a canTrainLight=false blackout, only a real
+//                     in_progress/completed session wins; planned/skipped/
+//                     other sessions are suppressed with schedule/endurance.
+//                     Outside a blackout, a real session WINS (planned /
+//                     in_progress / completed / skipped). Otherwise:
+//                       weekday(date) → schedule.week → workout_id
+//                       resolvable     → .projected(template)
+//                       null/missing/dangling → .rest
+//
+// "weekday" is derived from the YYYY-MM-DD date via Calendar (the
+// calendar rule, NOT a UTC offset).
+// ────────────────────────────────────────────────────────────────────────
+
+/// An availability / blackout range from `plans.meta.trips` (MULTISPORT.md
+/// §4.3). Byte-for-byte mirror of the backend `Trip` (src/types.ts) for the
+/// fields the composite projection consumes. `canTrainLight == false` blacks
+/// the range out (`.unavailable`); `true`/absent → `.light` (constrained).
+struct TripRange: Equatable {
+    let id: String
+    let start: String          // YYYY-MM-DD inclusive
+    let end: String            // YYYY-MM-DD inclusive
+    let type: String           // travel | rest | injury | other
+    let canTrainLight: Bool     // false → unavailable; default true
+
+    /// Inclusive civil-date containment (same zero-padded string compare the
+    /// backend `tripFor` uses — valid because YYYY-MM-DD sorts lexically).
+    func covers(_ ymd: String) -> Bool { ymd >= start && ymd <= end }
+}
+
+/// What a single day resolves to. `session` carries the real cached
+/// session when one exists; `template` carries the plan day for a
+/// planned/projected workout (so the agenda can show targets).
+///
+/// NOTE (M4): trip statuses are NEW. Endurance items (bricks/doubles) are
+/// NOT carried here — the day cell composes the strength projection with
+/// `SyncModel.rides(on:)`/`activities(on:)` to render the composite day, so
+/// `project` stays focused on the strength + trip status (the parity-critical
+/// truth table). See projectCalendar's CalendarCell.items on the backend.
+enum DayProjection: Equatable {
+    /// A real session exists for this date. `status` is its raw status
+    /// (`planned` / `in_progress` / `completed` / `skipped` / other).
+    /// `hardBlackoutTripType` stays non-nil when a logged in-progress or
+    /// completed session survives a canTrainLight=false trip. The strength
+    /// state remains visible, while composite consumers still suppress the
+    /// schedule and every endurance item just as the backend's `trip_type`
+    /// plus `items: []` result does.
+    case session(status: String, hardBlackoutTripType: String? = nil)
+    /// No real session; the weekly schedule projects this template here
+    /// (today or future only).
+    case projected(templateID: String)
+    /// Rest day — today/future with no session and no resolvable
+    /// schedule entry (null / missing / dangling id).
+    case rest
+    /// A trip covers this date with can_train_light=false — blacked out.
+    /// `tripType` is the trip.type. (today/future only)
+    case unavailable(tripType: String)
+    /// A trip covers this date with can_train_light=true — training is
+    /// possible but constrained. `tripType` is the trip.type. (today/future)
+    case light(tripType: String)
+    /// Nothing to show (a past day with no real session).
+    case none
+
+    /// Coarse visual/semantic bucket used by the grid + agenda.
+    enum Kind { case completed, inProgress, planned, projected, skipped, rest, unavailable, light, none }
+
+    var kind: Kind {
+        switch self {
+        case .session(let s, _):
+            switch s {
+            case "completed":   return .completed
+            case "in_progress": return .inProgress
+            case "planned":     return .planned
+            case "skipped":     return .skipped
+            default:            return .planned   // unknown → treat as planned
+            }
+        case .projected:   return .projected
+        case .rest:        return .rest
+        case .unavailable: return .unavailable
+        case .light:       return .light
+        case .none:        return .none
+        }
+    }
+
+    /// Hard blackout is orthogonal to the visible strength status. Both an
+    /// unavailable day and a real logged session that survives the blackout
+    /// must suppress schedule-derived detail and endurance composites.
+    var suppressesScheduleAndEndurance: Bool {
+        switch self {
+        case .session(_, .some), .unavailable:
+            return true
+        case .session(_, .none), .projected, .rest, .light, .none:
+            return false
+        }
+    }
+}
+
+enum CalendarProjection {
+
+    /// Shared with src/calendarProjection.ts. Every slot uses this rule.
+    static func sessionIsVisible(_ session: SessionRow, today: String, trips: [TripRange]) -> Bool {
+        guard session.status != "discarded" else { return false }
+        if session.date < today { return session.status != "planned" }
+        if let trip = trips.first(where: { $0.covers(session.date) }), !trip.canTrainLight {
+            return ["in_progress", "completed"].contains(session.status)
+        }
+        return true
+    }
+
+    static func visibleSessions(on date: String, today: String, sessions: [SessionRow], trips: [TripRange] = []) -> [SessionRow] {
+        sessions.filter { $0.date == date && sessionIsVisible($0, today: today, trips: trips) }
+            .sorted { ($0.slot ?? 0, $0.id) < ($1.slot ?? 0, $1.id) }
+    }
+
+    /// Gregorian / POSIX / device-tz calendar — identical rule to the
+    /// `YYYY-MM-DD` formatting used elsewhere in the app (SyncModel).
+    static let calendar: Calendar = {
+        var c = Calendar(identifier: .gregorian)
+        c.locale = Locale(identifier: "en_US_POSIX")
+        c.timeZone = .current
+        return c
+    }()
+
+    private static let isoFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        // Share the `calendar` static's tz (not an independent `.current`
+        // capture) so a system-tz change between the two lazy inits can't
+        // parse in one zone and read `.weekday` in another (1-day skew).
+        f.timeZone = calendar.timeZone
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    static func dateString(_ date: Date) -> String { isoFormatter.string(from: date) }
+    static func date(from ymd: String) -> Date? { isoFormatter.date(from: ymd) }
+
+    /// Days since 1970-01-01 for a `YYYY-MM-DD` string, by the same pure
+    /// civil-date rule as the server's `dayNumber` (Hinnant's
+    /// days_from_civil): no Date, no time zone, no DST.
+    static func dayNumber(_ ymd: String) -> Int? {
+        let parts = ymd.split(separator: "-")
+        guard parts.count == 3, let y = Int(parts[0]), let m = Int(parts[1]), let d = Int(parts[2]) else { return nil }
+        func floorDiv(_ a: Int, _ b: Int) -> Int { a >= 0 ? a / b : (a - b + 1) / b }
+        let yy = m <= 2 ? y - 1 : y
+        let era = floorDiv(yy, 400)
+        let yoe = yy - era * 400
+        let doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+        return era * 146097 + doe - 719468
+    }
+
+    /// Lowercase 3-letter weekday key for a `YYYY-MM-DD` string, derived
+    /// via Calendar (calendar rule, not UTC). Sunday-based component is
+    /// mapped to the contract's mon..sun keys.
+    static func weekdayKey(forDateString ymd: String) -> String? {
+        guard let d = date(from: ymd) else { return nil }
+        return weekdayKey(for: d)
+    }
+
+    static func weekdayKey(for date: Date) -> String {
+        // Calendar.weekday: 1 = Sunday … 7 = Saturday.
+        let wd = calendar.component(.weekday, from: date)
+        switch wd {
+        case 1:  return "sun"
+        case 2:  return "mon"
+        case 3:  return "tue"
+        case 4:  return "wed"
+        case 5:  return "thu"
+        case 6:  return "fri"
+        default: return "sat"   // 7
+        }
+    }
+
+    /// Resolve a single date.
+    ///
+    /// - Parameters:
+    ///   - dateString: the day to resolve, `YYYY-MM-DD`.
+    ///   - today: today's `YYYY-MM-DD` (injected so callers share one clock).
+    ///   - sessionByDate: real cached sessions keyed by `YYYY-MM-DD`. If
+    ///     several share a date, the caller passes the most relevant one.
+    ///   - schedule: parsed `meta.schedule`, or nil.
+    ///   - templateIDs: set of day_template ids that exist in the plan
+    ///     (used to detect dangling schedule references).
+    ///   - trips: parsed `meta.trips` availability ranges (default []).
+    ///     A covering trip drives the today+ status (MULTISPORT.md §6.1).
+    static func project(
+        dateString: String,
+        today: String,
+        sessionByDate: [String: SessionRow],
+        additionalSessions: [SessionRow] = [],
+        schedule: PlanSchedule?,
+        templateIDs: Set<String>,
+        trips: [TripRange] = []
+    ) -> DayProjection {
+        // A 'discarded' session is treated as if it never existed — the
+        // user explicitly threw it away (set_logs soft-deleted server
+        // side). Dropping it here (vs. returning .session) makes the date
+        // fall through to past=.none / today+=schedule — it VANISHES
+        // rather than showing as a skip. Byte-for-byte mirror of
+        // projectCalendar's `if (s.status === 'discarded') continue;`.
+        let real = sessionByDate[dateString].flatMap {
+            ($0.slot ?? 0) == 0 && sessionIsVisible($0, today: today, trips: trips) ? $0 : nil
+        }
+
+        if dateString < today {
+            // Past: only a real session is ever shown — EXCEPT a 'planned'
+            // one, which never executed (logging a set flips it to
+            // in_progress/completed), so a past 'planned' is a workout that
+            // did NOT happen and VANISHES, the same spirit as 'discarded'
+            // (#48). Byte-for-byte mirror of projectCalendar's
+            // `!(isPast && status === 'planned')` guard. (Past endurance
+            // actuals are composed at the view layer, not here.)
+            if let real, real.status != "planned" { return .session(status: real.status) }
+            return visibleSessions(on: dateString, today: today, sessions: additionalSessions, trips: trips).isEmpty ? .none : .rest
+        }
+
+        // TODAY or FUTURE. A covering trip is consulted first.
+        let trip = trips.first { $0.covers(dateString) }
+
+        // BLACKOUT TRUTH TABLE — keep byte-for-byte in backend and iOS:
+        //   real in_progress/completed → surface the real session;
+        //   real planned/skipped/other, or no real → unavailable.
+        // In every case the blackout suppresses schedule and endurance items.
+        if let trip, trip.canTrainLight == false {
+            if let real, real.status == "in_progress" || real.status == "completed" {
+                return .session(
+                    status: real.status,
+                    hardBlackoutTripType: trip.type)
+            }
+            return .unavailable(tripType: trip.type)
+        }
+
+        // Outside a hard blackout, a real session always wins (even during a
+        // light trip — a pinned session keeps its own status). Mirror of
+        // `if (real) status = ...`.
+        if let real { return .session(status: real.status) }
+
+        // No real session. Under a (light) trip the recurring schedule is
+        // blanked — Claude re-plans the week as explicit sessions — so the
+        // day is `.light`; otherwise consult the weekly schedule.
+        if let trip { return .light(tripType: trip.type) }
+
+        guard
+            let schedule,
+            let key = weekdayKey(forDateString: dateString),
+            let templateID = schedule.templateID(forWeekdayKey: key),
+            templateIDs.contains(templateID)        // dangling id → rest
+        else {
+            return .rest
+        }
+        return .projected(templateID: templateID)
+    }
+
+    /// EXTRAS RULE — byte-for-byte mirror of backend `scheduledExtras`
+    /// (src/calendarProjection.ts); the shared fixture is the contract.
+    ///   date < today             → [] (past shows only what was logged)
+    ///   any trip covers the date → [] (a trip blanks the recurring pattern)
+    ///   otherwise                → schedule extras for weekday(date),
+    ///                              keeping only live ids, in saved order
+    /// A real session on the date does not hide extras: they are separate
+    /// activities, logged on their own.
+    static func extras(
+        dateString: String,
+        today: String,
+        schedule: PlanSchedule?,
+        templateIDs: Set<String>,
+        trips: [TripRange] = []
+    ) -> [String] {
+        if dateString < today { return [] }
+        if trips.contains(where: { $0.covers(dateString) }) { return [] }
+        guard let schedule, let key = weekdayKey(forDateString: dateString) else { return [] }
+        return schedule.extraIDs(forWeekdayKey: key).filter { templateIDs.contains($0) }
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Scheduling heuristic mirrored by backend detectConflicts. Inputs are civil
+// lift dates and cached planned endurance load/duration. Fixed thresholds are
+// not individualized safety or interference advice. Missing data is unknown.
+
+enum RideConflict {
+
+    /// Conflict severity for a lift date. Ordered least→most severe; the
+    /// raw values are stable identifiers for cross-checking with the
+    /// backend ("none" / "brick" / "heavy-next-day" / "clash").
+    enum Severity: String {
+        case none          = "none"
+        /// Both recorded measures are below the fixed thresholds; not an easy-work claim.
+        case brick         = "brick"
+        case unknown       = "unknown"
+        case heavyNextDay  = "heavy-next-day"
+        case clash         = "clash"
+    }
+
+    /// Thresholds for a "hard" next-day event — mirror the backend
+    /// constants exactly. TSS (training_load) and seconds.
+    static let hardLoadThreshold = 150            // training_load >= 150
+    static let hardDurationSecThreshold = 9000    // planned_duration_sec >= 9000 (2h30m)
+
+    /// Does a projection represent a LIFT on that date?
+    ///
+    /// PARITY CONTRACT with the backend `getRideConflicts`/`detectConflicts`:
+    /// the lift-bearing set is EXACTLY {completed, inProgress, planned,
+    /// projected}. `.skipped` is INTENTIONALLY EXCLUDED — a skipped lift
+    /// was not performed, so it cannot conflict with a ride (lead's product
+    /// decision; backend lift states are projected|planned|in_progress|
+    /// completed). `.rest`/`.none` are not lifts. Keep this set byte-for-
+    /// byte aligned with the backend.
+    static func dateHasLift(_ proj: DayProjection) -> Bool {
+        // A hard blackout is orthogonal to the visible strength status. The
+        // backend excludes even a surviving real session from conflict input
+        // on that date; mirror its suppression discriminator here.
+        guard !proj.suppressesScheduleAndEndurance else { return false }
+        switch proj.kind {
+        case .completed, .inProgress, .planned, .projected:
+            return true
+        // .unavailable/.light are trip days, not lifts (a real session on a
+        // light day projects as .session, not .light) — exhaustive over Kind so
+        // the iOS target compiles (Codex #64 P1; -parse can't catch this).
+        case .skipped, .rest, .none, .unavailable, .light:
+            return false
+        }
+    }
+
+    /// True if a single (already non-deleted) event is a "hard" session
+    /// by the frozen thresholds.
+    static func isHard(_ e: ExternalEvent) -> Bool {
+        let load = e.training_load ?? 0
+        let dur = e.planned_duration_sec ?? 0
+        return load >= hardLoadThreshold || dur >= hardDurationSecThreshold
+    }
+
+    /// `YYYY-MM-DD` for the calendar day AFTER `ymd`, via the shared civil
+    /// calendar (same rule as CalendarProjection). nil if `ymd` is malformed.
+    static func nextDateString(after ymd: String) -> String? {
+        guard
+            let d = CalendarProjection.date(from: ymd),
+            let next = CalendarProjection.calendar.date(byAdding: .day, value: 1, to: d)
+        else { return nil }
+        return CalendarProjection.dateString(next)
+    }
+
+    /// Severity for a lift date.
+    ///
+    /// - Parameters:
+    ///   - liftDateString: the `YYYY-MM-DD` of the lift being evaluated.
+    ///   - hasLift: closure → is this date a lift date? (caller wires the
+    ///     CalendarProjection so this stays pure/diffable).
+    ///   - ridesOn: closure → non-deleted external events for a date.
+    static func severity(
+        forLiftDate liftDateString: String,
+        hasLift: (String) -> Bool,
+        ridesOn: (String) -> [ExternalEvent]
+    ) -> Severity {
+        // Conflicts only attach to LIFT dates. No lift → no conflict.
+        guard hasLift(liftDateString) else { return .none }
+
+        // Known threshold evidence wins; missing inputs never mean easy work.
+        let sameDay = ridesOn(liftDateString)
+        if !sameDay.isEmpty {
+            return sameDay.contains(where: isHard) ? .clash
+                : sameDay.contains { $0.training_load == nil || $0.planned_duration_sec == nil } ? .unknown : .brick
+        }
+
+        // (b) DAY-BEFORE-HARD — the lift is the day before a hard event.
+        if let next = nextDateString(after: liftDateString) {
+            let events = ridesOn(next)
+            if events.contains(where: isHard) { return .heavyNextDay }
+            if events.contains(where: { $0.training_load == nil || $0.planned_duration_sec == nil }) { return .unknown }
+        }
+
+        return .none
+    }
+}

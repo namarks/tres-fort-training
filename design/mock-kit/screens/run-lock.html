@@ -1,0 +1,38 @@
+<!-- The Lock Screen during a planned run (RunActivityWidget.lockScreenLayout): the step's time left, the pace against its target, the bar, what's next and the run's time and distance. The wallpaper and clock stand in for the system's. -->
+<style>
+body { background: linear-gradient(170deg, #5d7a9c, #2a3d55 75%) !important; color: #fff; }
+.lk-date { text-align: center; font-size: 21px; font-weight: 600; margin-top: 8px; opacity: .9; }
+.lk-clock { text-align: center; font-size: 104px; font-weight: 700; line-height: 1; letter-spacing: -2px; margin-top: 2px; opacity: .95; }
+.la { position: absolute; left: 12px; right: 12px; bottom: 120px; border-radius: 24px; background: #0D1826; padding: 16px; color: #fff; }
+.la .lbl { font-size: 11px; font-weight: 700; color: #a8b6c8; letter-spacing: .3px; }
+.la .big { font: 800 40px/1.05 -apple-system, 'SF Pro Rounded', Inter, sans-serif; color: #97BAE7; font-variant-numeric: tabular-nums; }
+.la .btn { display: inline-flex; padding: 6px 12px; border-radius: 10px; background: rgb(151 186 231 / .22); color: #97BAE7; font-size: 12px; font-weight: 700; }
+.lk-tools { position: absolute; bottom: 40px; left: 48px; right: 48px; display: flex; justify-content: space-between; }
+.lk-tools span { width: 50px; height: 50px; border-radius: 25px; background: rgb(255 255 255 / .16); }
+</style>
+{{status}}
+<div class="lk-date">Thursday, November 13</div>
+<div class="lk-clock">9:41</div>
+<style>
+.la2 { position: absolute; left: 12px; right: 12px; bottom: 112px; min-height: 160px; border-radius: 24px; background: #0D1826; padding: 14px 16px; color: #fff; display: flex; flex-direction: column; }
+.la2 .lbl { font-size: 11px; font-weight: 700; color: #a8b6c8; letter-spacing: .5px; }
+.la2 .kd { font-size: 12px; font-weight: 800; color: #EC7859; letter-spacing: 1px; }
+.la2 .rd { font: 800 40px/1 -apple-system, 'SF Pro Rounded', Inter, sans-serif; font-variant-numeric: tabular-nums; }
+.la2 .bar { height: 6px; border-radius: 3px; background: #2A4466; overflow: hidden; } .la2 .bar i { display: block; height: 100%; width: 43%; background: #EC7859; }
+.la2 .btn { display: inline-flex; padding: 6px 12px; border-radius: 10px; background: rgb(151 186 231 / .22); color: #97BAE7; font-size: 13px; font-weight: 700; }
+.la2 .ok { color: #82C38F; font-size: 12px; font-weight: 700; }
+.la2 .sub { font-size: 13px; color: #a8b6c8; font-variant-numeric: tabular-nums; }
+.la2 .sub b { color: #fff; font-weight: 600; }
+.island { position: absolute; top: 11px; left: 50%; transform: translateX(-50%); width: 200px; height: 37px; border-radius: 19px; background: #000; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; color: #97BAE7; font: 700 15px -apple-system, Inter, sans-serif; font-variant-numeric: tabular-nums; }
+</style><div class="la2">
+  <div class="row"><span class="kd">RUN · REP 2 OF 4</span><span class="spacer"></span><span class="btn">Pause</span></div>
+  <div class="row" style="margin-top:4px;align-items:flex-end">
+    <div><span class="rd" style="font-size:58px;color:#97BAE7">1:42</span><span class="lbl" style="margin-left:6px">LEFT</span></div>
+    <span class="spacer"></span>
+    <div style="text-align:right;padding-bottom:6px"><div class="rd" style="font-size:26px">6:08<span class="lbl" style="margin-left:3px">/MI</span></div><div class="ok">✓ 6:00–6:15</div></div>
+  </div>
+  <div class="bar" style="margin-top:10px"><i></i></div>
+  <div class="row" style="margin-top:9px"><span class="sub">Next <b>2 min recovery</b></span><span class="spacer"></span><span class="sub">18:18 · 2.31 mi</span></div>
+</div>
+<div class="lk-tools"><span></span><span></span></div>
+<div class="home-indicator" style="background:#fff"></div>

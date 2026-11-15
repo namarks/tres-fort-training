@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Sign in with Apple. Xcode's automatic signing maps this to the
+       "Sign in with Apple" capability + a provisioning profile when you
+       select your team on first device run. -->
+  <key>com.apple.developer.applesignin</key>
+  <array>
+    <string>Default</string>
+  </array>
+  <!-- Universal Links for group invites. iOS fetches
+       https://tres-fort.nmarkspdx.workers.dev/.well-known/apple-app-site-association
+       (served by the Worker, src/routes/invites.ts) and, when the appID matches,
+       opens https://…/join/<code> directly in the app instead of Safari.
+       Automatic signing adds the "Associated Domains" capability to the App ID
+       on the next device build. -->
+  <key>com.apple.developer.associated-domains</key>
+  <array>
+    <string>applinks:tres-fort.nmarkspdx.workers.dev</string>
+    <string>applinks:tresfort.app</string>
+  </array>
+  <!-- HealthKit: on-device read of HKWorkouts (+ HR / distance / energy),
+       pushed to the backend so the coach sees cardio (docs/MULTISOURCE-
+       INGESTION.md §2.5). Automatic signing adds the "HealthKit" capability to
+       the App ID on the next device build. background-delivery backs the
+       HKObserverQuery near-real-time path; foreground anchored sync is the
+       source of truth. NOTE: we intentionally do NOT add
+       com.apple.developer.healthkit.access (clinical health records) — that's a
+       different, heavier entitlement we don't need. -->
+  <!-- App Group shared with the widget extension: the app writes the Today
+       widget's display snapshot (Shared/TrainingAgenda.swift) and the widget
+       reads it. Automatic signing registers the group on the next device or
+       archive build. -->
+  <key>com.apple.security.application-groups</key>
+  <array>
+    <string>group.com.nmarkspdx.tresfort</string>
+  </array>
+  <key>com.apple.developer.healthkit</key>
+  <true/>
+  <key>com.apple.developer.healthkit.background-delivery</key>
+  <true/>
+</dict>
+</plist>

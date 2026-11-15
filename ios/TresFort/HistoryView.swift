@@ -1,0 +1,23 @@
+import SwiftUI
+
+/// The calendar owns workout dates and the recurring schedule. Today pushes it
+/// from its week strip; it owns no NavigationStack of its own.
+struct HistoryView: View {
+    @ObservedObject var sync: SyncModel
+    var onStartWorkout: (() -> Void)? = nil
+    @State private var showWeeklySchedule = false
+
+    var body: some View {
+        ZStack {
+            Theme.background
+            VStack(spacing: 0) {
+                if sync.isUsingCachedState { CachedStateBanner() }
+                CalendarMonthView(sync: sync,
+                                  onWeeklySchedule: { showWeeklySchedule = true }, onStartWorkout: onStartWorkout)
+            }
+        }
+        .navigationTitle("Calendar")
+        .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $showWeeklySchedule) { WeeklyScheduleView(sync: sync) }
+    }
+}

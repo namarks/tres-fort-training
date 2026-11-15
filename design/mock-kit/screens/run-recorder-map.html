@@ -1,0 +1,53 @@
+<!-- The run recorder's Map page during a planned run (RunLapStrip over the map): the step's time left stays in a strip on top. -->
+<style>
+.rr { padding: 0 16px 16px; height: 814px; display: flex; flex-direction: column; gap: 16px; }
+.rr .hdr { display: flex; align-items: center; padding-top: 8px; }
+.rr .hdr .t { font-family: Bebas, sans-serif; font-size: 34px; line-height: 1; }
+.rr .ib { width: 44px; height: 44px; display: grid; place-items: center; color: var(--muted); }
+.rr .ib.on { color: var(--accent); }
+.rr .banner { background: var(--surface); border-radius: 12px; padding: 12px; display: flex; align-items: center; gap: 12px; }
+.rr .banner .pos { font-size: 11px; font-weight: 700; letter-spacing: 1px; color: var(--accent); }
+.rr .banner .what { font-size: 17px; font-weight: 700; margin-top: 3px; }
+.rr .banner .left { font-size: 13px; margin-top: 3px; font-variant-numeric: tabular-nums; }
+.rr .skip { min-height: 44px; padding: 0 14px; border-radius: 10px; display: grid; place-items: center; font-size: 14px; font-weight: 700;
+  background: color-mix(in srgb, var(--text) 10%, transparent); }
+.rr .mapbox { flex: 1; border-radius: 16px; overflow: hidden; min-height: 0; }
+.rr .mapbox svg { height: 100%; width: 100%; display: block; }
+.rr .stats2 { display: flex; } .rr .stats2 > div { flex: 1; text-align: center; }
+.rr .v { font-family: JetBrainsMono, monospace; font-weight: 700; font-variant-numeric: tabular-nums; }
+.rr .k { font-size: 11px; color: var(--muted); letter-spacing: .3px; text-transform: uppercase; margin-top: 2px; }
+.rr .ctl { display: flex; gap: 12px; }
+.rr .ctl > div { flex: 1; min-height: 56px; border-radius: 14px; display: flex; align-items: center; justify-content: center; gap: 8px;
+  font-family: Bebas, sans-serif; font-size: 26px; }
+.rr .ctl .sec { background: color-mix(in srgb, var(--text) 10%, transparent); }
+.rr .ctl .pri { background: var(--accent); color: var(--on-accent); }
+</style><style>
+.rr .hero { padding: 16px; border-radius: 16px; }
+.rr .kind { font-size: 12px; font-weight: 700; letter-spacing: 1.5px; color: var(--signal); background: none; width: auto; height: auto; display: inline; }
+.rr .pos2 { font-size: 12px; font-weight: 600; color: var(--muted); }
+.rr .count { font-family: JetBrainsMono, monospace; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; letter-spacing: -2px; }
+.rr .bar { height: 8px; border-radius: 4px; background: var(--hero-raised, var(--surface2)); overflow: hidden; }
+.rr .bar i { display: block; height: 100%; background: var(--signal); border-radius: 4px; }
+.rr .ok { color: var(--done); font-size: 13px; font-weight: 700; }
+.rr .pages { display: flex; justify-content: center; gap: 18px; font-size: 12px; font-weight: 700; letter-spacing: 1px; color: var(--muted); }
+.rr .pages span { padding-bottom: 4px; }
+.rr .pages .on { color: var(--text); box-shadow: inset 0 -2px 0 var(--signal); }
+.rr .dots { display: flex; justify-content: center; gap: 8px; } .rr .dots i { width: 7px; height: 7px; border-radius: 4px; background: var(--dim); } .rr .dots i.on { background: var(--text); }
+.rr .tile { flex: 1; background: var(--surface); border-radius: 14px; padding: 10px 6px; text-align: center; display: flex; flex-direction: column; justify-content: center; }
+.rr .skipbtn { font-size: 13px; font-weight: 700; padding: 6px 12px; border-radius: 9px; background: var(--hero-raised, var(--surface2)); }
+.rr .next { font-size: 15px; } .rr .next b { font-size: 11px; letter-spacing: 1.5px; color: var(--muted); margin-right: 8px; }
+</style>
+{{status}}
+<div class="rr">
+  <div class="hdr"><span class="t">Running</span><span class="spacer"></span>
+    <span class="ib on"><svg width="22" height="20" viewBox="0 0 22 20" fill="currentColor"><path d="M2 7h4l5-4v14l-5-4H2z"/><path d="M14 6.5a5 5 0 0 1 0 7M16.5 4a8.5 8.5 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+  </div>
+  <div class="pages"><span class="">STEP</span><span class="">NUMBERS</span><span class="on">MAP</span><span class="">PLAN</span></div>
+  <div class="hero" style="padding:12px 16px;display:flex;align-items:center;gap:12px">
+    <div class="count" style="font-size:44px;letter-spacing:-1px">1:42</div>
+    <div style="flex:1"><div class="kind">RUN · REP 2 OF 4</div><div class="footnote muted" style="margin-top:3px">left · Next 2 min recovery</div></div>
+    <div style="text-align:right"><div class="count" style="font-size:22px;letter-spacing:0">6:08</div><div class="ok" style="font-size:11px">✓ PACE</div></div>
+  </div>
+  <div class="mapbox">{{map}}</div>
+  <div class="ctl"><div class="sec">❚❚ Pause</div><div class="pri">■ End</div></div>
+</div>

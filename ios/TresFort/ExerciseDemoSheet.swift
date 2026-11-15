@@ -1,0 +1,218 @@
+import SwiftUI
+
+/// Modal sheet showing a 2-frame crossfade demo for an exercise.
+///
+/// Triggered by a small (i) button next to the exercise name in TodayView,
+/// the swap-exercise picker, and history detail — anywhere the user might
+/// want to confirm "what does this lift actually look like?".
+///
+/// Renders:
+///   - exercise name + primary/secondary muscle map
+///   - laterality + load-mode badges (so "per side / each hand" semantics
+///     are explicit without forcing the user to a separate doc)
+///   - 2-frame auto-cycling animation (~1.4s/frame, tap to pause), with
+///     license credit under bundled line drawings
+///   - cue card fallback when the catalog row has no demo_slug or both
+///     loader calls miss
+struct ExerciseDemoSheet: View {
+    let exerciseID: String
+    let name: String
+    let primaryMuscle: String
+    let secondaryMuscles: [String]
+    let modality: String
+    let laterality: String          // "bilateral" | "unilateral"
+    let loadMode: String            // "total" | "per_hand"
+    let demoSlug: String?
+    let jwt: String?
+
+    var timed: Bool? = nil
+    var cues: String? = nil
+
+    @ReduceMotion private var reduceMotion
+    @StateObject private var loader = DemoImageLoader()
+    @State private var showSecondFrame = false
+    @State private var isPaused = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text(name.uppercased())
+                    .font(Theme.display(28))
+                    .foregroundStyle(Theme.text)
+                    .padding(.top, 4)
+
+                demoFrame
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 240)
+                    .background(Theme.surface)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                    .onTapGesture { isPaused.toggle() }
+
+                if loader.showsDrawing && !loader.isLoading {
+                    drawingCredit
+                }
+
+                badgesRow
+                muscleSection
+
+                if let cues, !cues.isEmpty {
+                    Text(cues).font(.body).foregroundStyle(Theme.text)
+                }
+                if timed ?? ["timed", "cardio"].contains(modality) {
+                    Text("Log time in seconds.")
+                        .font(Theme.mono(12)).foregroundStyle(Theme.muted)
+                } else if laterality == "unilateral" {
+                    Text("Log one set with the per-side numbers — the app counts both legs/arms automatically.")
+                        .font(Theme.mono(12))
+                        .foregroundStyle(Theme.muted)
+                        .padding(.top, 4)
+                }
+                if loadMode == "per_hand" {
+                    Text("Weight is one dumbbell. Both hands hold the same load.")
+                        .font(Theme.mono(12))
+                        .foregroundStyle(Theme.muted)
+                }
+
+                if ["bw", "timed"].contains(modality) {
+                    Text("Zero load means bodyweight; positive load is added weight and negative load is assistance.")
+                        .font(Theme.mono(12)).foregroundStyle(Theme.muted)
+                }
+
+                Spacer(minLength: 0)
+            }
+            .padding(16)
+        }
+        .background(Theme.background)
+        .task {
+            await loader.load(exerciseID: exerciseID,
+                              demoSlug: demoSlug, jwt: jwt)
+        }
+        .task(id: loader.frames.compactMap { $0 }.count) {
+            // Only crossfade when BOTH frames loaded — single-frame demos
+            // render static (see demoFrame); ticking showSecondFrame on
+            // them would just spin the animation without a visible effect.
+            guard loader.frames.compactMap({ $0 }).count == 2 else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_400_000_000)
+                if !isPaused && !reduceMotion && !Task.isCancelled {
+                    await MainActor.run {
+                        withAnimation(.easeInOut(duration: 0.45)) {
+                            showSecondFrame.toggle()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var demoFrame: some View {
+        if loader.isLoading {
+            ProgressView()
+        } else {
+            let f0 = loader.frames.indices.contains(0) ? loader.frames[0] : nil
+            let f1 = loader.frames.indices.contains(1) ? loader.frames[1] : nil
+            switch (f0, f1) {
+            case (nil, nil):
+                cueCardFallback
+            case (let img?, nil), (nil, let img?):
+                // Single frame available — show it static (no crossfade).
+                // Without this, `showSecondFrame` toggling every 1.4s would
+                // hide the only available frame on alternating cycles and
+                // flicker between image + blank, since `opacity(showSecondFrame ? 0 : 1)`
+                // assumes the other frame is there to replace it.
+                Image(uiImage: img)
+                    .demoImage(isDrawing: loader.showsDrawing)
+            case (let img0?, let img1?):
+                ZStack {
+                    Image(uiImage: img0)
+                        .demoImage(isDrawing: loader.showsDrawing)
+                        .opacity(showSecondFrame ? 0 : 1)
+                    Image(uiImage: img1)
+                        .demoImage(isDrawing: loader.showsDrawing)
+                        .opacity(showSecondFrame ? 1 : 0)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var cueCardFallback: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "figure.strengthtraining.traditional")
+                .font(.system(size: 56, weight: .light))
+                .foregroundStyle(Theme.muted)
+            Text("No demo available yet")
+                .font(Theme.mono(12))
+                .foregroundStyle(Theme.muted)
+        }
+    }
+
+    /// Workout Guide drawings are CC BY-SA 4.0: credit the artist and the
+    /// Everkinetic source, say they were cropped, and link both the source
+    /// material and the license (Section 3(a)(1)).
+    private var drawingCredit: some View {
+        Text("Drawing by Bryl Lim ([Workout Guide](https://github.com/bryllim/workout-guide)), after Everkinetic, cropped. [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/)")
+            .font(Theme.mono(10))
+            .foregroundStyle(Theme.muted)
+            .tint(Theme.accent)
+            .multilineTextAlignment(.leading)
+            .accessibilityIdentifier("exerciseDemo.drawingCredit")
+    }
+
+    private var badgesRow: some View {
+        HStack(spacing: 6) {
+            badge(modality.uppercased())
+            badge(laterality == "unilateral" ? "PER SIDE" : "BILATERAL",
+                  tint: laterality == "unilateral" ? Theme.accent : Theme.muted)
+            if loadMode == "per_hand" {
+                badge("EACH HAND", tint: Theme.accent)
+            }
+            Spacer()
+        }
+    }
+
+    private func badge(_ text: String, tint: Color = Theme.muted) -> some View {
+        Text(text)
+            .font(Theme.mono(10, .bold)).tracking(1)
+            .foregroundStyle(tint)
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(tint.opacity(0.5), lineWidth: 1)
+            )
+    }
+
+    private var muscleSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("MUSCLES")
+                .font(Theme.mono(11, .bold)).tracking(1.5)
+                .foregroundStyle(Theme.muted)
+            Text(primaryMuscle.capitalized + (
+                secondaryMuscles.isEmpty
+                    ? ""
+                    : "  ·  " + secondaryMuscles.map { $0.capitalized }
+                        .joined(separator: ", ")
+            ))
+            .font(.system(size: 15))
+            .foregroundStyle(Theme.text)
+        }
+    }
+}
+
+/// Compact tap target — a circled (i) glyph rendered to the right of the
+/// exercise name. Opens technique and history without changing selection.
+struct ExerciseInfoButton: View {
+    var exerciseName: String? = nil
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            Image(systemName: "info.circle")
+                .font(.system(size: 18, weight: .regular))
+                .foregroundStyle(Theme.muted)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(exerciseName.map { "Exercise information for " + $0 } ?? "Exercise information")
+    }
+}

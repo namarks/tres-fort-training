@@ -1,0 +1,1706 @@
+import CoreLocation
+import Foundation
+import XCTest
+@testable import TresFort
+
+@MainActor
+private final class FakeRunEngine: RunWorkoutEngine {
+    var onMetrics: ((RunWorkoutMetrics) -> Void)?
+    var onFailure: ((String) -> Void)?
+    private(set) var calls: [String] = []
+    private(set) var route: [CLLocation] = []
+    private(set) var heartRates: [RecordedRun.HeartRateSample] = []
+    var finalMetrics = RunWorkoutMetrics(distanceMeters: 0, movingSeconds: 0, heartRate: nil)
+    var endError: Error?
+    /// False when Health saved the workout but not all of it, such as the route.
+    var savedAll = true
+    var recovery: RunWorkoutRecovery?
+    /// Holds `recover` until `releaseRecovery()`, like a slow Health query.
+    var holdRecovery = false
+    private var heldRecovery: CheckedContinuation<Void, Never>?
+
+    func releaseRecovery() {
+        heldRecovery?.resume()
+        heldRecovery = nil
+    }
+
+    func requestAuthorization() async throws { calls.append("authorize") }
+    func start(at date: Date, recordingID: UUID) async throws { calls.append("start") }
+    func pause() { calls.append("pause") }
+    func resume() { calls.append("resume") }
+    func addRoute(_ locations: [CLLocation]) { route += locations }
+    func addHeartRate(_ sample: RecordedRun.HeartRateSample) { heartRates.append(sample) }
+    private(set) var elevationAscended: Double?
+    func setElevationAscended(_ meters: Double) { elevationAscended = meters }
+    func end(at date: Date) async throws -> RunWorkoutEnd {
+        calls.append("end")
+        if let endError { throw endError }
+        return RunWorkoutEnd(metrics: finalMetrics, savedAll: savedAll)
+    }
+    func discard() { calls.append("discard") }
+    func recover(route: [CLLocation]) async -> RunWorkoutRecovery? {
+        calls.append("recover")
+        if holdRecovery {
+            await withCheckedContinuation { heldRecovery = $0 }
+        }
+        if recovery != nil { self.route = route }
+        return recovery
+    }
+}
+
+@MainActor
+private final class FakeLocationSource: RunLocationSource {
+    var onLocations: (([CLLocation]) -> Void)?
+    var access: RunLocationAccess = .granted
+    private(set) var running = false
+    private(set) var warm = false
+
+    func requestAccess() async -> RunLocationAccess { access }
+    func warmUp() { warm = true }
+    func start() { running = true }
+    func stop() {
+        running = false
+        warm = false
+    }
+}
+
+@MainActor
+private final class FakeAltimeter: RunAltimeter {
+    var onAltitude: ((RecordedRun.AltitudeSample) -> Void)?
+    private(set) var calls: [String] = []
+
+    func requestAccess() async { calls.append("access") }
+    func start() { calls.append("start") }
+    func stop() { calls.append("stop") }
+}
+
+@MainActor
+private final class FakeMotion: RunMotionSource {
+    var onMotion: ((RunMotionSample) -> Void)?
+    private(set) var calls: [String] = []
+
+    func start() { calls.append("start") }
+    func stop() { calls.append("stop") }
+}
+
+@MainActor
+private final class FakeLiveActivity: RunLiveActivityPresenting {
+    private(set) var shown: [RunActivityAttributes.ContentState] = []
+    private(set) var recordingIDs: [String] = []
+    private(set) var endCount = 0
+
+    func show(recordingID: String, state: RunActivityAttributes.ContentState) {
+        recordingIDs.append(recordingID)
+        shown.append(state)
+    }
+    func endAll() { endCount += 1 }
+}
+
+@MainActor
+private final class FakeSpeaker: RunSplitSpeaking {
+    private(set) var spoken: [String] = []
+    func speak(_ text: String) { spoken.append(text) }
+}
+
+private final class RecorderUploadStub: RecordingUploadAPI {
+    var error: Error?
+    /// The server's `intervals.status`; nil for an older Worker.
+    var intervalsStatus: String?
+    private(set) var uploaded: [RecordedRun] = []
+
+    func uploadRecording(_ run: RecordedRun, jwt: String) async throws -> RecordingUploadResult {
+        if let error { throw error }
+        uploaded.append(run)
+        return RecordingUploadResult(ok: true, deduplicated: false, recording_id: run.uploadID,
+                                     intervals_activity_id: "i1",
+                                     intervals: intervalsStatus.map(RecordingUploadResult.IntervalsCopy.init(status:)))
+    }
+}
+
+@MainActor
+final class RunRecorderTests: XCTestCase {
+    private var base: URL!
+    private var clock = Date(timeIntervalSince1970: 1_793_000_000)
+    private var engine: FakeRunEngine!
+    private var location: FakeLocationSource!
+    private var altimeter: FakeAltimeter!
+    private var motion: FakeMotion!
+    /// What `GET /api/me/thresholds` answers; nil fails.
+    private var thresholdRows: [AthleteThreshold]? = []
+    /// Runs while the thresholds request is out.
+    private var duringThresholdsLoad: (() -> Void)?
+    /// The account signed out or was deleted.
+    private var signedOut = false
+    private var api: RecorderUploadStub!
+    private var liveActivity: FakeLiveActivity!
+    private var speaker: FakeSpeaker!
+    private var central: FakeHeartRateCentral!
+    private var defaults: UserDefaults!
+    private var defaultsSuite: String!
+    private var unauthorized = 0
+    private var locationsMade = 0
+    private var uploads = 0
+    /// "slot date seconds" for each saved planned run the plan was told about.
+    private var plannedRunsLogged: [String] = []
+    private var plannedRunAccepted = true
+
+    override func setUp() async throws {
+        base = FileManager.default.temporaryDirectory.appendingPathComponent("run-recorder-\(UUID())")
+        engine = FakeRunEngine()
+        location = FakeLocationSource()
+        altimeter = FakeAltimeter()
+        motion = FakeMotion()
+        thresholdRows = []
+        duringThresholdsLoad = nil
+        signedOut = false
+        api = RecorderUploadStub()
+        liveActivity = FakeLiveActivity()
+        speaker = FakeSpeaker()
+        central = FakeHeartRateCentral()
+        defaultsSuite = "run-recorder-\(UUID())"
+        defaults = UserDefaults(suiteName: defaultsSuite)
+    }
+
+    override func tearDown() async throws {
+        try? FileManager.default.removeItem(at: base)
+        defaults.removePersistentDomain(forName: defaultsSuite)
+        RunRecorderControl.handler = nil
+    }
+
+    private func makeModel(jwt: String? = "jwt") -> RunRecorderModel {
+        RunRecorderModel(
+            accountID: "user-a", baseURL: base, api: api,
+            jwt: { [unowned self] in self.signedOut ? nil : jwt },
+            onUnauthorized: { [unowned self] in self.unauthorized += 1 },
+            onUploaded: { [unowned self] in self.uploads += 1 },
+            onPlannedRunSaved: { [unowned self] slot, date, seconds in
+                self.plannedRunsLogged.append("\(slot) \(date) \(seconds)")
+                return self.plannedRunAccepted
+            },
+            makeEngine: { [unowned self] in self.engine },
+            makeLocation: { [unowned self] in
+                self.locationsMade += 1
+                return self.location
+            },
+            makeAltimeter: { [unowned self] in self.altimeter },
+            makeMotion: { [unowned self] in self.motion },
+            loadThresholds: { [unowned self] _ in
+                self.duringThresholdsLoad?()
+                guard let rows = self.thresholdRows else { throw URLError(.notConnectedToInternet) }
+                return rows
+            },
+            now: { [unowned self] in self.clock },
+            defaults: defaults,
+            liveActivity: liveActivity,
+            makeSpeaker: { [unowned self] in self.speaker },
+            heartRateMonitor: HeartRateMonitor(defaults: defaults,
+                                               makeCentral: { [unowned self] in self.central },
+                                               now: { [unowned self] in self.clock }))
+    }
+
+    private let strap = HeartRateMonitor.Strap(id: UUID(), name: "Polar H10")
+
+    private func saveStrap() {
+        defaults.set(try? JSONEncoder().encode(strap), forKey: HeartRateMonitor.savedKey)
+    }
+
+    private func store() throws -> RunRecordingStore {
+        try RunRecordingStore(accountID: "user-a", baseURL: base)
+    }
+
+    /// About 30 m north of Pioneer Square per step.
+    /// A negative speed means the fix carried none.
+    private func fix(_ step: Int, seconds: TimeInterval, accuracy: CLLocationAccuracy = 5,
+                     speed: CLLocationSpeed = -1) -> CLLocation {
+        CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 45.5190 + Double(step) * 0.00027, longitude: -122.6793),
+            altitude: 15, horizontalAccuracy: accuracy, verticalAccuracy: 3,
+            course: -1, speed: speed,
+            timestamp: clock.addingTimeInterval(seconds))
+    }
+
+    /// Enough distance from the builder, and time, for a run worth saving.
+    private func coverGround(seconds: TimeInterval = 90) {
+        engine.onMetrics?(.init(distanceMeters: 300, movingSeconds: 0, heartRate: nil))
+        clock = clock.addingTimeInterval(seconds)
+    }
+
+    private func point(_ step: Int, seconds: TimeInterval, accuracy: Double = 5,
+                       from start: Date) -> RecordedRun.RoutePoint {
+        .init(timestamp: start.addingTimeInterval(seconds), latitude: 45.5190 + Double(step) * 0.00027,
+              longitude: -122.6793, altitude: nil, horizontalAccuracy: accuracy)
+    }
+
+    // MARK: - Pure helpers
+
+    func testLocationFilterDropsImpreciseStaleAndImpossibleFixes() {
+        let start = clock
+        let first = point(0, seconds: 0, from: start)
+        XCTAssertTrue(RunLocationFilter.accepts(first, after: nil, startedAt: start))
+        XCTAssertFalse(RunLocationFilter.accepts(point(0, seconds: 0, accuracy: 65, from: start),
+                                                 after: nil, startedAt: start))
+        XCTAssertFalse(RunLocationFilter.accepts(point(0, seconds: 0, accuracy: -1, from: start),
+                                                 after: nil, startedAt: start))
+        // A cached fix from before the start.
+        XCTAssertFalse(RunLocationFilter.accepts(point(0, seconds: -5, from: start), after: nil, startedAt: start))
+        // 30 m in 10 s is a run; the same fix again, or 300 m in 10 s, is not.
+        XCTAssertTrue(RunLocationFilter.accepts(point(1, seconds: 10, from: start), after: first, startedAt: start))
+        XCTAssertFalse(RunLocationFilter.accepts(point(0, seconds: 0, from: start), after: first, startedAt: start))
+        XCTAssertFalse(RunLocationFilter.accepts(point(10, seconds: 10, from: start), after: first, startedAt: start))
+    }
+
+    func testFormattingAndAveragePace() {
+        XCTAssertEqual(RunFormat.duration(65.9), "1:05")
+        XCTAssertEqual(RunFormat.duration(3725), "1:02:05")
+        XCTAssertEqual(RunFormat.miles(1_609.344 * 3.1), "3.10")
+        XCTAssertEqual(RunFormat.pace(485), "8:05")
+        XCTAssertEqual(RunFormat.pace(nil), "–")
+        XCTAssertEqual(RunFormat.pace(4000), "–")
+        XCTAssertEqual(try XCTUnwrap(RunPace.average(movingSeconds: 1940, meters: 1_609.344 * 4)), 485, accuracy: 0.001)
+        XCTAssertNil(RunPace.average(movingSeconds: 30, meters: 5))
+    }
+
+    func testCurrentPaceUsesTheLastThirtySecondsSinceThePause() throws {
+        var run = RecordedRun(startedAt: clock)
+        run.points = (0...6).map { point($0, seconds: Double($0) * 10, from: clock) }
+        // Three 30 m steps in 30 s: 3 m/s is about 8:56 per mile.
+        XCTAssertEqual(try XCTUnwrap(RunPace.current(run)), 536, accuracy: 2)
+
+        // A pause that just started has no current pace.
+        run.pauses = [.init(start: clock.addingTimeInterval(61), end: nil)]
+        XCTAssertNil(RunPace.current(run))
+        // After resuming, only the new segment counts, and one point isn't enough.
+        run.pauses[0].end = clock.addingTimeInterval(120)
+        run.points.append(point(7, seconds: 125, from: clock))
+        XCTAssertNil(RunPace.current(run))
+    }
+
+    func testActiveSecondsExcludePauses() {
+        var run = RecordedRun(startedAt: clock)
+        run.pauses = [.init(start: clock.addingTimeInterval(100), end: clock.addingTimeInterval(160))]
+        XCTAssertEqual(run.activeSeconds(at: clock.addingTimeInterval(300)), 240)
+        run.pauses.append(.init(start: clock.addingTimeInterval(250), end: nil))
+        XCTAssertTrue(run.isPaused)
+        XCTAssertEqual(run.activeSeconds(at: clock.addingTimeInterval(300)), 190)
+        run.closePause(at: clock.addingTimeInterval(280))
+        run.endedAt = clock.addingTimeInterval(400)
+        XCTAssertEqual(run.activeSeconds(at: clock.addingTimeInterval(999)), 310)
+    }
+
+    func testKilometersConvertDistanceAndPace() throws {
+        XCTAssertEqual(RunFormat.distance(5_000, in: .kilometers), "5.00")
+        XCTAssertEqual(RunFormat.distance(5_000, in: .miles), "3.11")
+        XCTAssertEqual(try XCTUnwrap(RunPace.average(movingSeconds: 1500, meters: 5_000, unit: .kilometers)), 300,
+                       accuracy: 0.001)
+        var run = RecordedRun(startedAt: clock)
+        run.points = (0...3).map { point($0, seconds: Double($0) * 10, from: clock) }
+        let perMile = try XCTUnwrap(RunPace.current(run))
+        XCTAssertEqual(try XCTUnwrap(RunPace.current(run, unit: .kilometers)), perMile / 1.609344, accuracy: 0.001)
+    }
+
+    func testSplitTrackerReportsEachWholeUnit() {
+        var miles = RunSplitTracker(unit: .miles)
+        XCTAssertNil(miles.update(meters: 1_500, movingSeconds: 450))
+        XCTAssertEqual(miles.update(meters: 1_610, movingSeconds: 480),
+                       RunSplit(number: 1, unit: .miles, seconds: 480, averagePace: 480 / (1_610 / 1_609.344)))
+        XCTAssertNil(miles.update(meters: 1_700, movingSeconds: 500))
+        XCTAssertEqual(miles.update(meters: 3_219, movingSeconds: 950)?.seconds, 470)
+        // A jump over two units reports the latest, sharing out the time.
+        let jump = miles.update(meters: 6_438, movingSeconds: 1_950)
+        XCTAssertEqual(jump?.number, 4)
+        XCTAssertEqual(jump?.seconds, 500)
+
+        var kilometers = RunSplitTracker(unit: .kilometers)
+        XCTAssertEqual(kilometers.update(meters: 1_000, movingSeconds: 300)?.number, 1)
+    }
+
+    func testARecoveredTrackerSkipsSplitsAlreadyRun() throws {
+        // 2.5 miles in 25 minutes: two splits done, about 20 minutes in.
+        var tracker = RunSplitTracker(unit: .miles, meters: 1_609.344 * 2.5, movingSeconds: 1_500)
+        XCTAssertEqual(tracker.completed, 2)
+        XCTAssertNil(tracker.update(meters: 1_609.344 * 2.9, movingSeconds: 1_740))
+        let third = tracker.update(meters: 1_609.344 * 3.01, movingSeconds: 1_800)
+        XCTAssertEqual(third?.number, 3)
+        XCTAssertEqual(try XCTUnwrap(third?.seconds), 600, accuracy: 0.001)
+    }
+
+    func testSplitAnnouncementReadsAsWords() {
+        let split = RunSplit(number: 3, unit: .miles, seconds: 512, averagePace: 521)
+        XCTAssertEqual(split.spokenText,
+                       "Mile 3. Split 8 32. Average pace 8 41 a mile.")
+        XCTAssertEqual(RunSplit(number: 1, unit: .kilometers, seconds: 300, averagePace: 300).spokenText,
+                       "Kilometer 1. Split 5 minutes. Average pace 5 minutes a kilometer.")
+        XCTAssertEqual(RunSplit.spokenPace(390), "6 30")
+        XCTAssertEqual(RunSplit.spokenPace(365), "6 oh 5")
+        XCTAssertEqual(RunSplit.spokenPace(60), "1 minute")
+        XCTAssertEqual(RunSplit.spokenPace(45), "45 seconds")
+        XCTAssertEqual(RunSplit.spokenPace(3_661), "1 hour 1 minute 1 second")
+        XCTAssertEqual(RunSplit.spoken(3_661), "1 hour 1 minute 1 second")
+        XCTAssertEqual(RunSplit.spoken(0.2), "0 seconds")
+    }
+
+    func testHealthWorkoutCarriesTheUploadExternalID() {
+        let id = UUID()
+        XCTAssertEqual(RunRecordingHealthTag.externalID(for: id), "tresfort:recording:" + id.uuidString.lowercased())
+    }
+
+    // MARK: - Recorder
+
+    func testRecordsCheckpointsAndUploadsWhenTheRunEnds() async throws {
+        let model = makeModel()
+        await model.start()
+        XCTAssertEqual(model.phase, .running)
+        XCTAssertEqual(engine.calls, ["authorize", "start"])
+        XCTAssertTrue(location.running)
+        let id = try XCTUnwrap(model.run?.id)
+        XCTAssertEqual(try store().unfinished()?.id, id)
+
+        location.onLocations?([fix(0, seconds: 1), fix(1, seconds: 11), fix(2, seconds: 21, accuracy: 80)])
+        XCTAssertEqual(model.run?.points.count, 2)
+        XCTAssertEqual(engine.route.count, 2)
+        engine.onMetrics?(.init(distanceMeters: 310, movingSeconds: 11,
+                                heartRate: .init(timestamp: clock.addingTimeInterval(11), beatsPerMinute: 150)))
+        XCTAssertEqual(model.run?.distanceMeters, 310)
+        XCTAssertEqual(model.latestHeartRate?.beatsPerMinute, 150)
+
+        clock = clock.addingTimeInterval(30)
+        model.pause()
+        XCTAssertEqual(model.phase, .paused)
+        // Fixes while paused don't join the route.
+        location.onLocations?([fix(3, seconds: 35)])
+        XCTAssertEqual(model.run?.points.count, 2)
+        XCTAssertTrue(try XCTUnwrap(store().load(id: id)).isPaused)
+        clock = clock.addingTimeInterval(20)
+        model.resume()
+        XCTAssertEqual(model.phase, .running)
+
+        engine.finalMetrics = .init(distanceMeters: 640, movingSeconds: 70, heartRate: nil)
+        clock = clock.addingTimeInterval(40)
+        await model.end()
+
+        XCTAssertEqual(model.phase, .finished)
+        XCTAssertEqual(engine.calls, ["authorize", "start", "pause", "resume", "end"])
+        XCTAssertFalse(location.running)
+        let uploaded = try XCTUnwrap(api.uploaded.first)
+        XCTAssertEqual(uploaded.id, id)
+        XCTAssertEqual(uploaded.distanceMeters, 640)
+        XCTAssertEqual(uploaded.movingSeconds, 70)
+        XCTAssertEqual(uploaded.endedAt, clock)
+        XCTAssertEqual(uploaded.pauses.count, 1)
+        XCTAssertEqual(uploaded.heartRates.count, 1)
+        XCTAssertEqual(model.uploadStatus, .uploaded)
+        XCTAssertEqual(uploads, 1)
+        XCTAssertEqual(try store().all(), [])
+    }
+
+    func testLiveActivityFollowsTheRunAndEndsWithIt() async throws {
+        let model = makeModel()
+        await model.start()
+        let id = try XCTUnwrap(model.run?.uploadID)
+        XCTAssertEqual(liveActivity.recordingIDs, [id])
+        XCTAssertEqual(liveActivity.shown.last?.clockStart, clock)
+        XCTAssertEqual(liveActivity.shown.last?.isPaused, false)
+        XCTAssertEqual(liveActivity.shown.last?.unit, .miles)
+
+        // Distance updates wait five seconds between Lock Screen updates.
+        clock = clock.addingTimeInterval(2)
+        engine.onMetrics?(.init(distanceMeters: 8, movingSeconds: 2, heartRate: nil))
+        XCTAssertEqual(liveActivity.shown.count, 1)
+        clock = clock.addingTimeInterval(4)
+        engine.onMetrics?(.init(distanceMeters: 20, movingSeconds: 6, heartRate: nil))
+        XCTAssertEqual(liveActivity.shown.count, 2)
+        XCTAssertEqual(liveActivity.shown.last?.meters, 20)
+
+        // Pause shows at once with the clock stopped; resume moves the clock
+        // start later by the pause.
+        model.pause()
+        XCTAssertEqual(liveActivity.shown.last?.pausedSeconds, 6)
+        clock = clock.addingTimeInterval(30)
+        model.resume()
+        XCTAssertNil(liveActivity.shown.last?.pausedSeconds)
+        XCTAssertEqual(liveActivity.shown.last?.clockStart, clock.addingTimeInterval(-6))
+
+        location.onLocations?([fix(0, seconds: 1), fix(1, seconds: 11)])
+        clock = clock.addingTimeInterval(20)
+        await model.end()
+        XCTAssertEqual(liveActivity.endCount, 1)
+        XCTAssertEqual(Set(liveActivity.recordingIDs), [id])
+    }
+
+    func testDiscardAndAnUnfinishedLaunchEndTheLiveActivity() async throws {
+        let model = makeModel()
+        await model.start()
+        model.discard()
+        XCTAssertEqual(liveActivity.endCount, 1)
+        // At launch with nothing recording, a leftover activity ends.
+        let recording = await makeModel().recover()
+        XCTAssertFalse(recording)
+        XCTAssertEqual(liveActivity.endCount, 2)
+    }
+
+    func testLockScreenControlsPauseResumeAndFinishOnlyThisRun() async throws {
+        let model = makeModel()
+        await model.start()
+        let id = try XCTUnwrap(model.run?.uploadID)
+        location.onLocations?([fix(0, seconds: 1), fix(1, seconds: 11)])
+        let handler = try XCTUnwrap(RunRecorderControl.handler)
+
+        let otherRun = await handler(UUID().uuidString.lowercased(), "pause")
+        XCTAssertFalse(otherRun)
+        XCTAssertEqual(model.phase, .running)
+        let unknown = await handler(id, "stop")
+        XCTAssertFalse(unknown)
+
+        let paused = await handler(id, "pause")
+        XCTAssertTrue(paused)
+        XCTAssertEqual(model.phase, .paused)
+        let pausedAgain = await handler(id, "pause")
+        XCTAssertTrue(pausedAgain, "A repeated tap that already happened counts as done")
+        clock = clock.addingTimeInterval(20)
+        let resumed = await handler(id, "resume")
+        XCTAssertTrue(resumed)
+        XCTAssertEqual(model.phase, .running)
+
+        coverGround(seconds: 60)
+        let finished = await handler(id, "finish")
+        XCTAssertTrue(finished)
+        XCTAssertEqual(model.phase, .finished)
+        XCTAssertEqual(api.uploaded.map(\.uploadID), [id])
+        XCTAssertNil(RunRecorderControl.handler, "A finished run stops answering the Lock Screen")
+    }
+
+    func testSplitsAreSpokenOnlyWhenTurnedOnAndPreferencesPersist() async throws {
+        let model = makeModel()
+        XCTAssertEqual(model.unit, .miles)
+        XCTAssertFalse(model.announcesSplits)
+        await model.start()
+        clock = clock.addingTimeInterval(480)
+        engine.onMetrics?(.init(distanceMeters: 1_610, movingSeconds: 480, heartRate: nil))
+        XCTAssertEqual(speaker.spoken, [], "Announcements start off")
+
+        model.announcesSplits = true
+        clock = clock.addingTimeInterval(470)
+        engine.onMetrics?(.init(distanceMeters: 3_219, movingSeconds: 950, heartRate: nil))
+        XCTAssertEqual(speaker.spoken.count, 1)
+        XCTAssertTrue(speaker.spoken[0].hasPrefix("Mile 2. Split 7 50."))
+
+        // Nothing is spoken while paused, even if the distance settles.
+        model.pause()
+        engine.onMetrics?(.init(distanceMeters: 4_830, movingSeconds: 950, heartRate: nil))
+        XCTAssertEqual(speaker.spoken.count, 1)
+        model.discard()
+
+        model.unit = .kilometers
+        let reopened = makeModel()
+        XCTAssertEqual(reopened.unit, .kilometers)
+        XCTAssertTrue(reopened.announcesSplits)
+    }
+
+    func testGPSWarmsUpWhenTheRecorderOpensAndCarriesIntoTheRun() async throws {
+        let model = makeModel()
+        await model.warmUpGPS()
+        XCTAssertTrue(location.warm)
+        XCTAssertFalse(model.gpsReady)
+        location.onLocations?([fix(0, seconds: -20, accuracy: 35)])
+        XCTAssertEqual(model.gpsAccuracy, 35)
+        XCTAssertFalse(model.gpsReady)
+        location.onLocations?([fix(0, seconds: -10, accuracy: 8)])
+        XCTAssertTrue(model.gpsReady)
+        XCTAssertNil(model.run, "Fixes before the start record nothing")
+
+        await model.start()
+        XCTAssertEqual(model.phase, .running)
+        XCTAssertEqual(locationsMade, 1, "The run keeps the GPS that was already on")
+        XCTAssertTrue(location.running)
+        location.onLocations?([fix(0, seconds: 1), fix(1, seconds: 11)])
+        XCTAssertEqual(model.run?.points.count, 2)
+        // Closing the screen mid-run doesn't stop the run's GPS.
+        model.coolDownGPS()
+        XCTAssertTrue(location.running)
+    }
+
+    func testClosingTheRecorderStopsAWarmGPS() async throws {
+        let model = makeModel()
+        await model.warmUpGPS()
+        location.onLocations?([fix(0, seconds: 0, accuracy: 8)])
+        model.coolDownGPS()
+        XCTAssertFalse(location.warm)
+        XCTAssertNil(model.gpsAccuracy)
+        XCTAssertNil(location.onLocations)
+    }
+
+    func testDiscardingARunCanWarmGPSUpAgain() async throws {
+        let model = makeModel()
+        await model.warmUpGPS()
+        await model.start()
+        model.discard()
+        XCTAssertFalse(location.running)
+        XCTAssertNil(model.gpsAccuracy)
+        await model.warmUpGPS()
+        XCTAssertTrue(location.warm, "Back on the start screen, GPS is found again for the next run")
+        location.onLocations?([fix(0, seconds: 0, accuracy: 6)])
+        XCTAssertTrue(model.gpsReady)
+    }
+
+    func testStrapReadingsJoinTheRunAndTheHealthWorkout() async throws {
+        saveStrap()
+        let model = makeModel()
+        model.opened()
+        central.send(.bluetooth(.on))
+        central.send(.connected(strap.id))
+        central.send(.heartRate(strap.id, 88))
+        XCTAssertEqual(model.heartRateMonitor.status, "Polar H10 · 88 bpm")
+        XCTAssertNil(model.run, "Readings before the start record nothing")
+
+        await model.start()
+        clock = clock.addingTimeInterval(5)
+        central.send(.heartRate(strap.id, 141))
+        XCTAssertEqual(model.run?.heartRates.map(\.beatsPerMinute), [141])
+        XCTAssertEqual(model.latestHeartRate?.beatsPerMinute, 141)
+        XCTAssertEqual(engine.heartRates.map(\.beatsPerMinute), [141])
+
+        // The builder reports the same reading back; it isn't counted twice.
+        engine.onMetrics?(.init(distanceMeters: 20, movingSeconds: 5,
+                                heartRate: .init(timestamp: clock, beatsPerMinute: 141)))
+        XCTAssertEqual(model.run?.heartRates.count, 1)
+
+        model.pause()
+        clock = clock.addingTimeInterval(1)
+        central.send(.heartRate(strap.id, 135))
+        XCTAssertEqual(model.run?.heartRates.count, 2, "Heart rate keeps recording while paused")
+
+        await model.end()
+        central.send(.heartRate(strap.id, 120))
+        XCTAssertEqual(model.run?.heartRates.count, 2, "A finished run takes no more readings")
+        XCTAssertTrue(model.heartRateMonitor.isConnected, "The strap stays on while the recorder is open")
+    }
+
+    func testTheStrapWinsOverHealthsHeartRateAndTheScreenNamesTheSource() async throws {
+        saveStrap()
+        let model = makeModel()
+        model.opened()
+        central.send(.bluetooth(.on))
+        central.send(.connected(strap.id))
+        await model.start()
+
+        // Headphones read through Health while the strap is quiet.
+        clock = clock.addingTimeInterval(5)
+        engine.onMetrics?(.init(distanceMeters: 20, movingSeconds: 5,
+                                heartRate: .init(timestamp: clock, beatsPerMinute: 160),
+                                heartRateDevice: "AirPods Pro"))
+        XCTAssertEqual(model.run?.heartRates.map(\.beatsPerMinute), [160])
+        XCTAssertEqual(model.heartRateSourceLabel(at: clock), "AirPods Pro")
+        XCTAssertEqual(RunRecorderView.heartRateTitle(model.heartRateSourceLabel(at: clock)), "HR · AirPods Pro")
+
+        // The strap starts streaming and wins: Health's readings stop counting.
+        clock = clock.addingTimeInterval(1)
+        central.send(.heartRate(strap.id, 150))
+        XCTAssertEqual(model.heartRateSourceLabel(at: clock), "Polar H10")
+        clock = clock.addingTimeInterval(1)
+        engine.onMetrics?(.init(distanceMeters: 25, movingSeconds: 7,
+                                heartRate: .init(timestamp: clock, beatsPerMinute: 162),
+                                heartRateDevice: "AirPods Pro"))
+        XCTAssertEqual(model.run?.heartRates.map(\.beatsPerMinute), [160, 150])
+        XCTAssertEqual(model.latestHeartRate?.beatsPerMinute, 150)
+        XCTAssertEqual(model.heartRateSourceLabel(at: clock), "Polar H10")
+
+        // The strap drops, and Health's readings take over again.
+        central.send(.disconnected(strap.id))
+        clock = clock.addingTimeInterval(2)
+        engine.onMetrics?(.init(distanceMeters: 30, movingSeconds: 9,
+                                heartRate: .init(timestamp: clock, beatsPerMinute: 158)))
+        XCTAssertEqual(model.run?.heartRates.map(\.beatsPerMinute), [160, 150, 158])
+        XCTAssertEqual(model.heartRateSourceLabel(at: clock), "Apple Health",
+                       "Without a device from Health, the label names Health")
+
+        // A stale reading shows no source.
+        XCTAssertNil(model.heartRateSourceLabel(at: clock.addingTimeInterval(20)))
+        XCTAssertEqual(RunRecorderView.heartRateTitle(nil), "Heart rate")
+    }
+
+    // MARK: - After the run (P7)
+
+    /// A run worth saving with the strap connected, ending at 165 bpm.
+    private func endRunWithStrap() async throws -> RunRecorderModel {
+        saveStrap()
+        let model = makeModel()
+        model.opened()
+        central.send(.bluetooth(.on))
+        central.send(.connected(strap.id))
+        await model.start()
+        coverGround()
+        central.send(.heartRate(strap.id, 150))
+        clock = clock.addingTimeInterval(1)
+        central.send(.heartRate(strap.id, 165))
+        await model.end()
+        XCTAssertEqual(model.phase, .finished)
+        return model
+    }
+
+    private func after(_ seconds: TimeInterval, from stop: Date, bpm: Int) {
+        clock = stop.addingTimeInterval(seconds)
+        central.send(.heartRate(strap.id, bpm))
+    }
+
+    /// The upload a finished cool-down starts runs on its own task.
+    private func waitForUpload(count: Int = 1) async {
+        var tries = 0
+        while api.uploaded.count < count && tries < 200 {
+            tries += 1
+            await Task.yield()
+        }
+    }
+
+    // MARK: - Load and climb (P7)
+
+    private func threshold(_ metric: ThresholdMetric, _ value: Double, from date: String = "2026-01-01",
+                           sport: ThresholdSport = .run) -> AthleteThreshold {
+        AthleteThreshold(id: UUID().uuidString, sport: sport.rawValue, metric: metric.rawValue, value: value,
+                         effective_date: date, source: "member", created_at: 0)
+    }
+
+    func testTheSummaryScoresTheRunFromTheRunThresholdsAndKeepsThemForOfflineRuns() async throws {
+        let ride = threshold(.heartRate, 150, sport: .ride)
+        thresholdRows = [ride]
+        let model = makeModel()
+        await model.start()
+        let start = clock
+        location.onLocations?([fix(0, seconds: 0), fix(1, seconds: 10)])
+        model.record(.init(timestamp: start, beatsPerMinute: 150))
+        model.record(.init(timestamp: start.addingTimeInterval(10), beatsPerMinute: 166))
+        coverGround()
+        await model.end()
+        XCTAssertEqual(model.phase, .finished)
+        await model.refreshThresholds()
+        XCTAssertNil(model.load, "A cycling threshold never scores a run")
+        XCTAssertFalse(model.hasRunThresholds)
+        thresholdRows = [ride, threshold(.heartRate, 163)]
+        await model.refreshThresholds()
+        XCTAssertTrue(model.hasRunThresholds)
+        // Two readings cover too little, so 90 s at an average of 158 against 163.
+        XCTAssertEqual(model.load, RunLoad.Result(load: 2, method: .averageHeartRate))
+
+        // The next recorder on this iPhone has them before it reaches the server.
+        thresholdRows = nil
+        let offline = makeModel()
+        XCTAssertEqual(offline.thresholds.count, 2)
+        await offline.refreshThresholds()
+        XCTAssertEqual(offline.thresholds.count, 2, "A failed refresh keeps what it had")
+        XCTAssertNil(offline.load, "No saved run yet")
+    }
+
+    func testThresholdsThatArriveAfterTheAccountIsGoneAreDropped() async throws {
+        let model = makeModel()
+        thresholdRows = [threshold(.heartRate, 163)]
+        duringThresholdsLoad = { [unowned self] in self.signedOut = true }
+        await model.refreshThresholds()
+        XCTAssertTrue(model.thresholds.isEmpty)
+        XCTAssertNil(defaults.data(forKey: AccountLocalState.runThresholdsKey(userID: "user-a")))
+    }
+
+    func testTheBarometerRecordsTheClimbAndHealthGetsIt() async throws {
+        let model = makeModel()
+        await model.start()
+        XCTAssertEqual(altimeter.calls, ["access", "start"])
+        let start = clock
+        func reading(_ seconds: TimeInterval, _ meters: Double) {
+            altimeter.onAltitude?(.init(timestamp: start.addingTimeInterval(seconds), meters: meters))
+        }
+        reading(1, 0)
+        reading(10, 2)
+        reading(10, 50)
+        reading(20, 6)
+        clock = start.addingTimeInterval(25)
+        model.pause()
+        clock = start.addingTimeInterval(40)
+        reading(30, 30)
+        model.resume()
+        reading(41, 30)
+        reading(50, 33)
+        XCTAssertEqual(model.run?.altitudes?.map(\.meters), [0, 2, 6, 30, 30, 33],
+                       "Readings while paused are kept; a repeated time is not")
+        coverGround()
+        await model.end()
+        XCTAssertEqual(altimeter.calls.last, "stop")
+        // 6 m before the pause and 3 m after it; the 24 m while paused never counts.
+        XCTAssertEqual(engine.elevationAscended, 9)
+        let saved = try XCTUnwrap(api.uploaded.first)
+        XCTAssertEqual(RunAltitude.climb(saved), 9)
+        reading(60, 40)
+        XCTAssertEqual(model.run?.altitudes?.count, 6, "Nothing joins the run after it ends")
+    }
+
+    func testTheStrapStaysLiveAfterTheRunAndItsRecoveryIsSaved() async throws {
+        let model = try await endRunWithStrap()
+        let stop = clock
+        let saved = try XCTUnwrap(model.run)
+        XCTAssertTrue(model.isMeasuringRecovery)
+        XCTAssertEqual(model.recovery?.atStop, 165)
+        XCTAssertEqual(api.uploaded.count, 0, "The run waits for its cool-down")
+        await model.uploadPending()
+        XCTAssertEqual(api.uploaded.count, 0, "A foreground upload doesn't send it early either")
+
+        after(30, from: stop, bpm: 150)
+        XCTAssertEqual(model.liveHeartRate(at: clock), 150)
+        after(60, from: stop, bpm: 137)
+        after(121, from: stop, bpm: 121)
+        XCTAssertFalse(model.isMeasuringRecovery)
+        await waitForUpload()
+
+        let uploaded = try XCTUnwrap(api.uploaded.first)
+        XCTAssertEqual(uploaded.recovery, HeartRateRecovery(atStop: 165, after60s: 137, after120s: 121))
+        // The cool-down changes nothing about the run itself.
+        XCTAssertEqual(uploaded.heartRates, saved.heartRates)
+        XCTAssertEqual(uploaded.endedAt, stop)
+        XCTAssertEqual(uploaded.movingSeconds, saved.movingSeconds)
+        XCTAssertEqual(uploaded.distanceMeters, saved.distanceMeters)
+        XCTAssertEqual(engine.calls.last, "end")
+        XCTAssertEqual(engine.heartRates.count, 2, "Readings after the stop never reach the Health workout")
+
+        // The strap keeps showing live until five minutes after the stop.
+        after(200, from: stop, bpm: 112)
+        XCTAssertEqual(model.liveHeartRate(at: clock), 112)
+        clock = stop.addingTimeInterval(300)
+        XCTAssertNil(model.liveHeartRate(at: clock))
+    }
+
+    func testDoneDuringTheCoolDownSendsWhatItMeasured() async throws {
+        let model = try await endRunWithStrap()
+        let stop = clock
+        after(61, from: stop, bpm: 138)
+        XCTAssertTrue(model.isMeasuringRecovery)
+        model.reset()
+        await waitForUpload()
+        XCTAssertEqual(api.uploaded.first?.recovery, HeartRateRecovery(atStop: 165, after60s: 138, after120s: nil))
+        XCTAssertNil(model.recovery)
+        XCTAssertEqual(try store().all(), [])
+    }
+
+    func testADroppedStrapEndsTheCoolDownAndTheRunStillUploads() async throws {
+        let model = try await endRunWithStrap()
+        let stop = clock
+        after(20, from: stop, bpm: 152)
+        central.send(.disconnected(strap.id))
+        XCTAssertNil(model.liveHeartRate(at: clock), "The summary falls back to the run's own heart rate")
+        model.tickRecovery()
+        XCTAssertFalse(model.isMeasuringRecovery)
+        await waitForUpload()
+        let uploaded = try XCTUnwrap(api.uploaded.first)
+        XCTAssertNil(uploaded.recovery, "Nothing was read a minute after the stop")
+    }
+
+    func testWithoutAStrapTheRunUploadsAtOnce() async throws {
+        let model = makeModel()
+        await model.start()
+        coverGround()
+        engine.onMetrics?(.init(distanceMeters: 300, movingSeconds: 90,
+                                heartRate: .init(timestamp: clock, beatsPerMinute: 150)))
+        await model.end()
+        XCTAssertNil(model.recovery)
+        XCTAssertFalse(model.isMeasuringRecovery)
+        XCTAssertNil(model.liveHeartRate(at: clock))
+        XCTAssertEqual(api.uploaded.count, 1)
+    }
+
+    func testTheStrapConnectsWhileTheRecorderIsOpenOrARunRecords() async throws {
+        saveStrap()
+        let model = makeModel()
+        model.opened()
+        XCTAssertEqual(central.calls, ["connect"])
+        model.closed()
+        XCTAssertEqual(central.calls, ["connect", "disconnect"])
+
+        model.opened()
+        await model.start()
+        model.closed()
+        XCTAssertEqual(central.calls, ["connect", "disconnect", "connect", "connect"],
+                       "Starting asks again; closing mid-run keeps the strap")
+        model.discard()
+        XCTAssertEqual(central.calls.last, "disconnect",
+                       "A run that ends with the recorder closed lets the strap go")
+    }
+
+    func testAutoPausePausesWhenTheRunnerStopsAndResumesWhenTheyGo() async throws {
+        let model = makeModel()
+        XCTAssertTrue(model.autoPauses, "On by default")
+        model.announcesSplits = true
+        await model.start()
+        let started = clock
+        clock = started.addingTimeInterval(60)
+        func at(_ step: Int, _ second: TimeInterval, speed: CLLocationSpeed) -> CLLocation {
+            fix(step, seconds: second - 60, speed: speed)
+        }
+        location.onLocations?([at(0, 1, speed: 3), at(1, 2, speed: 3), at(2, 3, speed: 3), at(3, 4, speed: 3)])
+        // GPS speed winds down for a second or two after the stop.
+        location.onLocations?([at(4, 5, speed: 1.5), at(4, 6, speed: 0.3), at(4, 7, speed: 0.2)])
+        XCTAssertEqual(model.phase, .running, "The last three seconds still read as moving")
+        location.onLocations?([at(4, 8, speed: 0.1)])
+        XCTAssertEqual(model.phase, .paused, "Paused four seconds after the stop, not seven or more")
+        XCTAssertTrue(model.isAutoPaused)
+        XCTAssertEqual(engine.calls.last, "pause")
+        XCTAssertEqual(model.run?.pauses.count, 1)
+        XCTAssertEqual(model.run?.pauses.last?.start, started.addingTimeInterval(8),
+                       "Timed by the fix that paused it, as the Health workout is")
+
+        location.onLocations?([at(4, 30, speed: 2.5)])
+        XCTAssertEqual(model.phase, .paused, "One quick fix isn't enough")
+        location.onLocations?([at(5, 32, speed: 2.6)])
+        XCTAssertEqual(model.phase, .running)
+        XCTAssertFalse(model.isAutoPaused)
+        XCTAssertEqual(engine.calls.last, "resume")
+        XCTAssertEqual(speaker.spoken, ["Run paused.", "Run resumed."])
+    }
+
+    func testAutoPauseKeepsTheFixesRunBeforeItInTheSameBatch() async throws {
+        let model = makeModel()
+        await model.start()
+        location.onLocations?([fix(0, seconds: 1, speed: 3), fix(1, seconds: 11, speed: 3),
+                               fix(2, seconds: 21, speed: 0.3), fix(2, seconds: 22, speed: 0.2),
+                               fix(2, seconds: 23, speed: 0.1), fix(2, seconds: 25, speed: 0.1)])
+        XCTAssertEqual(model.phase, .paused)
+        XCTAssertEqual(model.run?.points.count, 5, "The fix taken after the pause stays out")
+        XCTAssertEqual(engine.route.count, 5)
+
+        location.onLocations?([fix(2, seconds: 40, speed: 2.5), fix(3, seconds: 42, speed: 2.6),
+                               fix(4, seconds: 50, speed: 3)])
+        XCTAssertEqual(model.phase, .running)
+        XCTAssertEqual(model.run?.points.count, 6, "Only the fix after the resume joins")
+        // Every fix's speed is kept for diagnosing the pause later, paused ones too (P5(e)).
+        XCTAssertEqual(model.run?.speeds?.count, 9)
+        XCTAssertEqual(model.run?.speeds?.map(\.metersPerSecond), [3, 3, 0.3, 0.2, 0.1, 0.1, 2.5, 2.6, 3])
+        XCTAssertEqual(model.run?.autoPauseOn, true)
+    }
+
+    func testAutomaticPausesAreTimedByTheFixesThatTriggerThem() async throws {
+        let model = makeModel()
+        await model.start()
+        let started = clock
+        // Fixes arrive in batches a few seconds after they were taken.
+        clock = started.addingTimeInterval(30)
+        location.onLocations?([fix(0, seconds: -29, speed: 3), fix(1, seconds: -16, speed: 0.2),
+                               fix(1, seconds: -15, speed: 0.1), fix(1, seconds: -14, speed: 0.1)])
+        XCTAssertEqual(model.phase, .paused)
+        XCTAssertEqual(model.run?.pauses.last?.start, started.addingTimeInterval(16))
+
+        clock = started.addingTimeInterval(60)
+        location.onLocations?([fix(2, seconds: -10, speed: 3), fix(3, seconds: -8, speed: 3),
+                               fix(4, seconds: -5, speed: 3)])
+        XCTAssertEqual(model.phase, .running)
+        XCTAssertEqual(model.run?.pauses.last?.end, started.addingTimeInterval(52))
+        let run = try XCTUnwrap(model.run)
+        XCTAssertEqual(run.points.last?.timestamp, started.addingTimeInterval(55))
+        XCTAssertEqual(RecordedRunTCX.segments(run).last?.last?.timestamp, started.addingTimeInterval(55),
+                       "The point kept after the resume counts as moving")
+    }
+
+    /// At a light the phone's speed jumps around; one stray reading no
+    /// longer restarts the wait, which kept a stop from ever pausing.
+    func testAStrayReadingWhileStandingDoesntHoldOffThePause() async throws {
+        let model = makeModel()
+        await model.start()
+        let started = clock
+        clock = started.addingTimeInterval(60)
+        func at(_ step: Int, _ second: TimeInterval, speed: CLLocationSpeed) -> CLLocation {
+            fix(step, seconds: second - 60, speed: speed)
+        }
+        location.onLocations?([at(0, 1, speed: 4), at(1, 2, speed: 4), at(2, 3, speed: 4),
+                               at(3, 4, speed: 0.4), at(3, 5, speed: 1.2), at(3, 6, speed: 0.3)])
+        XCTAssertEqual(model.phase, .running)
+        location.onLocations?([at(3, 7, speed: 0.2)])
+        XCTAssertEqual(model.phase, .paused)
+        XCTAssertEqual(model.run?.pauses.last?.start, started.addingTimeInterval(7))
+
+        location.onLocations?([at(3, 8, speed: 1.6), at(3, 9, speed: 0.3),
+                               at(3, 10, speed: 1.5), at(3, 11, speed: 0.2)])
+        XCTAssertEqual(model.phase, .paused, "Jumps while standing don't resume")
+    }
+
+    func testOneSlowReadingWhileRunningDoesntPause() async throws {
+        let model = makeModel()
+        await model.start()
+        location.onLocations?([fix(0, seconds: 1, speed: 3), fix(1, seconds: 2, speed: 0.1),
+                               fix(2, seconds: 3, speed: 3), fix(3, seconds: 4, speed: 3),
+                               fix(4, seconds: 5, speed: 0.2), fix(5, seconds: 6, speed: 0.1),
+                               fix(6, seconds: 7, speed: 3), fix(7, seconds: 8, speed: 3)])
+        XCTAssertEqual(model.phase, .running)
+        XCTAssertTrue(model.run?.pauses.isEmpty ?? false)
+    }
+
+    /// At a light on the owner's 2026-11-10 run the positions stayed put
+    /// for 27 seconds and the run never paused. Without speed readings the
+    /// positions alone pause and resume it.
+    func testAStopWithoutSpeedReadingsPausesAndResumesByPosition() async throws {
+        let model = makeModel()
+        await model.start()
+        location.onLocations?([fix(0, seconds: 1), fix(1, seconds: 2), fix(2, seconds: 3)])
+        location.onLocations?([fix(2, seconds: 4), fix(2, seconds: 5)])
+        XCTAssertEqual(model.phase, .running, "The last three seconds still cover ground")
+        location.onLocations?([fix(2, seconds: 6)])
+        XCTAssertEqual(model.phase, .paused)
+        XCTAssertTrue(model.isAutoPaused)
+
+        // About 10 m/s between fixes three seconds apart.
+        location.onLocations?([fix(2, seconds: 20), fix(3, seconds: 23)])
+        XCTAssertEqual(model.phase, .paused, "One fix that moved isn't enough")
+        location.onLocations?([fix(4, seconds: 26)])
+        XCTAssertEqual(model.phase, .running)
+    }
+
+    func testAGPSJumpWhileStoppedDoesntResume() async throws {
+        let model = makeModel()
+        await model.start()
+        location.onLocations?([fix(2, seconds: 1), fix(2, seconds: 2), fix(2, seconds: 3)])
+        XCTAssertEqual(model.phase, .paused)
+        // Fixes bouncing 30 m a second apart: bad fixes, not running.
+        location.onLocations?([fix(3, seconds: 4), fix(2, seconds: 5), fix(3, seconds: 6),
+                               fix(2, seconds: 7), fix(3, seconds: 8)])
+        XCTAssertEqual(model.phase, .paused)
+    }
+
+    func testLowSpeedReadingsWhileTheFixesCoverGroundDontPause() async throws {
+        let model = makeModel()
+        await model.start()
+        location.onLocations?([fix(0, seconds: 1, speed: 0.2), fix(1, seconds: 2, speed: 0.2),
+                               fix(2, seconds: 3, speed: 0.2), fix(3, seconds: 4, speed: 0.2)])
+        XCTAssertEqual(model.phase, .running)
+    }
+
+    func testImpreciseOrStaleFixesDontPauseOrResume() async throws {
+        let model = makeModel()
+        await model.start()
+        location.onLocations?([fix(0, seconds: 1, accuracy: 80, speed: 0),
+                               fix(0, seconds: 10, accuracy: 80, speed: 0)])
+        XCTAssertEqual(model.phase, .running, "Fixes the route rejects don't pause the run")
+        location.onLocations?([fix(0, seconds: 20, speed: 3), fix(0, seconds: 12, speed: 0),
+                               fix(0, seconds: 21, speed: 0)])
+        XCTAssertEqual(model.phase, .running, "An out-of-order fix doesn't backdate the stop")
+    }
+
+    func testARecoveredAutoPauseStillResumesWhenTheRunnerMoves() async throws {
+        var checkpoint = RecordedRun(startedAt: clock)
+        checkpoint.points = [point(0, seconds: 1, from: clock), point(1, seconds: 11, from: clock)]
+        checkpoint.pauses = [.init(start: clock.addingTimeInterval(20), end: nil, automatic: true)]
+        try store().save(checkpoint)
+        engine.recovery = .paused
+        clock = clock.addingTimeInterval(60)
+
+        let model = makeModel()
+        await model.recover()
+        XCTAssertEqual(model.phase, .paused)
+        XCTAssertTrue(model.isAutoPaused)
+        location.onLocations?([fix(2, seconds: 1, speed: 3), fix(3, seconds: 3, speed: 3)])
+        XCTAssertEqual(model.phase, .running)
+    }
+
+    func testAPauseTheRunnerAskedForWaitsForThem() async throws {
+        let model = makeModel()
+        await model.start()
+        model.pause()
+        location.onLocations?([fix(0, seconds: 1, speed: 3), fix(1, seconds: 5, speed: 3)])
+        XCTAssertEqual(model.phase, .paused)
+        XCTAssertFalse(model.isAutoPaused)
+    }
+
+    /// The phone's motion level, in g, from the second before each of
+    /// `seconds` after `start` (by default the clock).
+    private func shake(_ level: Double, at seconds: ClosedRange<Int>, after start: Date? = nil) {
+        for second in seconds {
+            let stamp = (start ?? clock).addingTimeInterval(TimeInterval(second))
+            motion.onMotion?(RunMotionSample(timestamp: stamp, level: level))
+        }
+    }
+
+    /// On the owner's 2026-11-12 intervals GPS read 0.4 to 0.7 m/s on
+    /// walked recoveries and the run paused mid-walk. Steps keep it going.
+    func testWhileThePhoneShowsStepsTheRunDoesntPause() async throws {
+        let model = makeModel()
+        await model.start()
+        XCTAssertEqual(motion.calls, ["start"])
+        shake(0.3, at: 1...8)
+        location.onLocations?([fix(0, seconds: 1, speed: 3), fix(1, seconds: 2, speed: 3)]
+                              + (3...8).map { fix(2, seconds: TimeInterval($0), speed: 0.2) })
+        XCTAssertEqual(model.phase, .running, "Steps, whatever GPS reads")
+        XCTAssertEqual(model.run?.speeds?.first?.motion ?? 0, 0.3, accuracy: 1e-9,
+                       "Each fix keeps the motion level for diagnosing a pause")
+
+        // Without motion readings GPS decides again.
+        location.onLocations?((9...11).map { fix(2, seconds: TimeInterval($0), speed: 0.2) })
+        XCTAssertEqual(model.phase, .paused)
+        model.discard()
+        XCTAssertEqual(motion.calls.last, "stop")
+    }
+
+    func testASlowWalkWithoutClearMotionDoesntPause() async throws {
+        let model = makeModel()
+        await model.start()
+        // A level between still and steps reads like no motion at all.
+        shake(0.08, at: 1...8)
+        location.onLocations?([fix(0, seconds: 1, speed: 3), fix(1, seconds: 2, speed: 1)]
+                              + zip(3...8, [0.6, 0.5, 0.7, 0.45, 0.6, 0.5]).map {
+                                  fix(1, seconds: TimeInterval($0), speed: $1)
+                              })
+        XCTAssertEqual(model.phase, .running, "Under walking pace, but not under 0.4 m/s")
+    }
+
+    func testAStillPhonePausesSoonerAndHoldsThePause() async throws {
+        let model = makeModel()
+        await model.start()
+        let started = clock
+        // Fixes arrive after they were taken, so none is in the future.
+        clock = started.addingTimeInterval(60)
+        func at(_ step: Int, _ second: TimeInterval, speed: CLLocationSpeed) -> CLLocation {
+            fix(step, seconds: second - 60, speed: speed)
+        }
+        shake(0.4, at: 1...4, after: started)
+        shake(0.02, at: 5...11, after: started)
+        location.onLocations?([at(0, 1, speed: 3), at(1, 2, speed: 3), at(2, 3, speed: 3), at(3, 4, speed: 3),
+                               at(4, 5, speed: 1.2), at(4, 6, speed: 0.7)])
+        XCTAssertEqual(model.phase, .running, "GPS still reads walking pace")
+        location.onLocations?([at(4, 7, speed: 0.6)])
+        XCTAssertEqual(model.phase, .paused, "Still, and two seconds of GPS under walking pace")
+        XCTAssertEqual(model.run?.pauses.last?.start, started.addingTimeInterval(7))
+
+        location.onLocations?((8...11).map { at(4, TimeInterval($0), speed: 3) })
+        XCTAssertEqual(model.phase, .paused, "GPS jumping while the phone is still doesn't resume")
+
+        shake(0.5, at: 12...13, after: started)
+        location.onLocations?([at(5, 13, speed: 2.5)])
+        XCTAssertEqual(model.phase, .running, "Steps and one fix over an easy walk resume")
+        XCTAssertEqual(model.run?.pauses.last?.end, started.addingTimeInterval(13))
+    }
+
+    func testAutoPauseCanBeTurnedOff() async throws {
+        let model = makeModel()
+        model.autoPauses = false
+        await model.start()
+        location.onLocations?([fix(0, seconds: 1, speed: 0), fix(0, seconds: 20, speed: 0)])
+        XCTAssertEqual(model.phase, .running)
+        XCTAssertFalse(makeModel().autoPauses, "The choice is kept on this iPhone")
+    }
+
+    func testARunTooShortToAnalyzeIsNotSaved() async throws {
+        let model = makeModel()
+        await model.start()
+        location.onLocations?([fix(0, seconds: 1), fix(1, seconds: 11)])
+        engine.onMetrics?(.init(distanceMeters: 40, movingSeconds: 0, heartRate: nil))
+        clock = clock.addingTimeInterval(90)
+        XCTAssertTrue(model.isTooShortToSave, "Under 100 m")
+        await model.end()
+        XCTAssertEqual(model.phase, .finished)
+        XCTAssertEqual(engine.calls, ["authorize", "start", "discard"], "No Health workout is saved")
+        XCTAssertEqual(api.uploaded.count, 0)
+        XCTAssertEqual(try store().all(), [])
+        XCTAssertEqual(liveActivity.endCount, 1)
+        XCTAssertNotNil(model.note)
+    }
+
+    func testTheRunningLayoutChoicesAreKept() {
+        let model = makeModel()
+        XCTAssertFalse(model.showsGlance)
+        XCTAssertEqual(model.glanceMetrics, RunMetric.glanceDefault)
+        model.showsGlance = true
+        model.glanceMetrics = [.heartRate, .time]
+        let reopened = makeModel()
+        XCTAssertTrue(reopened.showsGlance)
+        XCTAssertEqual(reopened.glanceMetrics, [.heartRate, .time])
+    }
+
+    func testRefusedLocationLeavesWarmUpToStartToExplain() async throws {
+        location.access = .denied
+        let model = makeModel()
+        await model.warmUpGPS()
+        XCTAssertFalse(location.warm)
+        XCTAssertEqual(model.phase, .idle)
+    }
+
+    func testDeniedOrApproximateLocationFailsBeforeHealth() async throws {
+        location.access = .denied
+        let model = makeModel()
+        await model.start()
+        guard case .failed(let message) = model.phase else { return XCTFail("expected a failure") }
+        XCTAssertTrue(message.contains("Allow location"))
+        location.access = .approximate
+        await model.start()
+        guard case .failed(let approximate) = model.phase else { return XCTFail("expected a failure") }
+        XCTAssertTrue(approximate.contains("Precise Location"))
+        XCTAssertEqual(engine.calls, [])
+        XCTAssertEqual(try store().all(), [])
+    }
+
+    func testHealthSaveFailureStillUploadsTheRun() async throws {
+        let model = makeModel()
+        await model.start()
+        location.onLocations?([fix(0, seconds: 1), fix(1, seconds: 11)])
+        engine.endError = RunWorkoutEngineError.notStarted
+        coverGround()
+        await model.end()
+        XCTAssertEqual(model.phase, .finished)
+        XCTAssertNotNil(model.note)
+        let uploaded = try XCTUnwrap(api.uploaded.first)
+        // No builder total: moving time falls back to the clock.
+        XCTAssertEqual(uploaded.movingSeconds, 90)
+    }
+
+    func testARunWithNoRouteLeavesNothingToUpload() async throws {
+        let model = makeModel()
+        await model.start()
+        clock = clock.addingTimeInterval(5)
+        await model.end()
+        XCTAssertEqual(model.phase, .finished)
+        XCTAssertEqual(api.uploaded.count, 0)
+        XCTAssertEqual(try store().all(), [])
+    }
+
+    func testFailedUploadKeepsTheRunAndARejectedBearerReauthenticates() async throws {
+        api.error = APIError.http(401, "expired")
+        let model = makeModel()
+        await model.start()
+        location.onLocations?([fix(0, seconds: 1), fix(1, seconds: 11)])
+        coverGround()
+        await model.end()
+        XCTAssertEqual(model.uploadStatus, .waiting)
+        XCTAssertEqual(unauthorized, 1)
+        XCTAssertEqual(try store().pendingUploads().count, 1)
+
+        api.error = nil
+        await model.uploadPending()
+        XCTAssertEqual(model.uploadStatus, .uploaded)
+        XCTAssertEqual(try store().all(), [])
+    }
+
+    func testWithoutIntervalsARunAppleHealthSavedLeavesTheQueue() async throws {
+        api.error = APIError.http(409, #"{"error":"intervals_not_connected","message":"Nothing was saved."}"#)
+        let model = makeModel()
+        await model.start()
+        location.onLocations?([fix(0, seconds: 1), fix(1, seconds: 11)])
+        coverGround()
+        await model.end()
+        XCTAssertEqual(model.uploadStatus, .notConnected)
+        XCTAssertEqual(try store().all(), [])
+        XCTAssertEqual(uploads, 0)
+    }
+
+    func testWithoutIntervalsARunAppleHealthDidNotSaveStaysOnThisIPhone() async throws {
+        api.error = APIError.http(409, #"{"error":"intervals_not_connected","message":"Nothing was saved."}"#)
+        let model = makeModel()
+        await model.start()
+        location.onLocations?([fix(0, seconds: 1), fix(1, seconds: 11)])
+        engine.endError = RunWorkoutEngineError.notStarted
+        coverGround()
+        await model.end()
+        XCTAssertEqual(model.uploadStatus, .waiting)
+        let kept = try XCTUnwrap(store().pendingUploads().first)
+        XCTAssertEqual(kept.savedToHealth, false)
+    }
+
+    func testWithoutIntervalsARunWhoseRouteHealthDroppedStaysOnThisIPhone() async throws {
+        api.error = APIError.http(409, #"{"error":"intervals_not_connected","message":"Nothing was saved."}"#)
+        let model = makeModel()
+        await model.start()
+        location.onLocations?([fix(0, seconds: 1), fix(1, seconds: 11)])
+        engine.savedAll = false
+        coverGround()
+        await model.end()
+        XCTAssertEqual(model.uploadStatus, .waiting)
+        XCTAssertEqual(model.note, "Apple Health didn’t keep the whole run. It stays on this iPhone until it uploads.")
+        let kept = try XCTUnwrap(store().pendingUploads().first)
+        XCTAssertEqual(kept.savedToHealth, false)
+        XCTAssertEqual(kept.points.count, 2, "The route this iPhone holds is the only copy")
+    }
+
+    func testTresFortKeepsARunWithoutAnIntervalsConnection() async throws {
+        api.intervalsStatus = "not_connected"
+        let model = makeModel()
+        await model.start()
+        location.onLocations?([fix(0, seconds: 1), fix(1, seconds: 11)])
+        coverGround()
+        await model.end()
+        XCTAssertEqual(model.uploadStatus, .keptInTresFort)
+        XCTAssertEqual(try store().all(), [])
+        XCTAssertEqual(uploads, 1)
+    }
+
+    func testWhenOnlyTheIntervalsCopyFailsTheRunWaitsForIt() async throws {
+        api.error = APIError.http(502, #"{"error":"intervals_unavailable","stored":true}"#)
+        let model = makeModel()
+        await model.start()
+        location.onLocations?([fix(0, seconds: 1), fix(1, seconds: 11)])
+        coverGround()
+        await model.end()
+        XCTAssertEqual(model.uploadStatus, .waitingForIntervals)
+        XCTAssertEqual(try store().pendingUploads().count, 1)
+
+        api.error = nil
+        api.intervalsStatus = "uploaded"
+        await model.uploadPending()
+        XCTAssertEqual(model.uploadStatus, .uploaded)
+        XCTAssertEqual(try store().all(), [])
+    }
+
+    func testWithoutABearerTheRunWaits() async throws {
+        let model = makeModel(jwt: nil)
+        await model.start()
+        location.onLocations?([fix(0, seconds: 1), fix(1, seconds: 11)])
+        coverGround()
+        await model.end()
+        XCTAssertEqual(model.uploadStatus, .waiting)
+        XCTAssertEqual(try store().pendingUploads().count, 1)
+    }
+
+    func testDiscardRemovesTheRunWithoutSaving() async throws {
+        let model = makeModel()
+        await model.start()
+        location.onLocations?([fix(0, seconds: 1)])
+        model.discard()
+        XCTAssertEqual(model.phase, .idle)
+        XCTAssertNil(model.run)
+        XCTAssertEqual(engine.calls, ["authorize", "start", "discard"])
+        XCTAssertEqual(try store().all(), [])
+        XCTAssertEqual(api.uploaded.count, 0)
+    }
+
+    func testEngineFailureFinishesTheRunAndUploadsIt() async throws {
+        let model = makeModel()
+        await model.start()
+        location.onLocations?([fix(0, seconds: 1), fix(1, seconds: 11)])
+        engine.onFailure?("The workout stopped.")
+        XCTAssertEqual(model.phase, .finished)
+        XCTAssertEqual(model.note, "The workout stopped.")
+        XCTAssertEqual(model.run?.endedAt, clock.addingTimeInterval(11))
+        for _ in 0..<100 where api.uploaded.isEmpty {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(api.uploaded.count, 1)
+    }
+
+    func testRecoveryReattachesASurvivingWorkout() async throws {
+        var checkpoint = RecordedRun(startedAt: clock)
+        checkpoint.points = [point(0, seconds: 1, from: clock), point(1, seconds: 11, from: clock)]
+        try store().save(checkpoint)
+        engine.recovery = .running
+        clock = clock.addingTimeInterval(60)
+
+        let model = makeModel()
+        let recording = await model.recover()
+
+        XCTAssertTrue(recording)
+        XCTAssertEqual(model.phase, .running)
+        XCTAssertEqual(model.run?.id, checkpoint.id)
+        XCTAssertEqual(engine.route.map(\.timestamp), checkpoint.points.map(\.timestamp))
+        XCTAssertTrue(location.running)
+        XCTAssertEqual(api.uploaded.count, 0)
+        XCTAssertEqual(liveActivity.recordingIDs, [checkpoint.uploadID], "The Lock Screen picks the run back up")
+        XCTAssertEqual(liveActivity.endCount, 0)
+    }
+
+    func testRecoveryFinishesAnOrphanFromItsCheckpoint() async throws {
+        var checkpoint = RecordedRun(startedAt: clock)
+        checkpoint.points = [point(0, seconds: 1, from: clock), point(1, seconds: 11, from: clock)]
+        checkpoint.distanceMeters = 30
+        checkpoint.pauses = [.init(start: clock.addingTimeInterval(15), end: nil)]
+        try store().save(checkpoint)
+        engine.recovery = nil
+        clock = clock.addingTimeInterval(3600)
+
+        let model = makeModel()
+        let recording = await model.recover()
+
+        XCTAssertFalse(recording)
+        XCTAssertEqual(model.phase, .idle)
+        let uploaded = try XCTUnwrap(api.uploaded.first)
+        // The run ends at the open pause, not an hour later.
+        XCTAssertEqual(uploaded.endedAt, checkpoint.startedAt.addingTimeInterval(15))
+        XCTAssertEqual(uploaded.movingSeconds, 15)
+        XCTAssertFalse(uploaded.isPaused)
+        XCTAssertEqual(try store().all(), [])
+        XCTAssertEqual(liveActivity.endCount, 1, "The lost run's Lock Screen activity ends")
+    }
+
+    func testNothingStartsWhileRecoveryIsWaitingOnHealth() async throws {
+        var checkpoint = RecordedRun(startedAt: clock)
+        checkpoint.points = [point(0, seconds: 1, from: clock)]
+        try store().save(checkpoint)
+        engine.recovery = .running
+        engine.holdRecovery = true
+        let model = makeModel()
+
+        let recovery = Task { await model.recover() }
+        for _ in 0..<100 where !engine.calls.contains("recover") {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(model.phase, .recovering)
+        await model.start()
+        XCTAssertEqual(engine.calls, ["recover"])
+
+        engine.releaseRecovery()
+        let recording = await recovery.value
+        XCTAssertTrue(recording)
+        XCTAssertEqual(model.phase, .running)
+        XCTAssertEqual(model.run?.id, checkpoint.id)
+    }
+
+    func testStartPicksUpAnUnfinishedRunFirst() async throws {
+        var checkpoint = RecordedRun(startedAt: clock)
+        checkpoint.points = [point(0, seconds: 1, from: clock)]
+        try store().save(checkpoint)
+        engine.recovery = .running
+
+        let model = makeModel()
+        await model.start()
+
+        XCTAssertEqual(model.phase, .running)
+        XCTAssertEqual(model.run?.id, checkpoint.id)
+        XCTAssertEqual(engine.calls, ["recover"])
+
+        // An orphan instead finishes and uploads, then the new run starts.
+        model.discard()
+        var orphan = RecordedRun(startedAt: clock)
+        orphan.points = [point(0, seconds: 1, from: clock), point(1, seconds: 11, from: clock)]
+        try store().save(orphan)
+        engine.recovery = nil
+        clock = clock.addingTimeInterval(600)
+        await model.start()
+        XCTAssertEqual(api.uploaded.map(\.id), [orphan.id])
+        XCTAssertEqual(model.phase, .running)
+        XCTAssertNotEqual(model.run?.id, orphan.id)
+        XCTAssertEqual(engine.calls, ["recover", "discard", "recover", "authorize", "start"])
+    }
+
+    // MARK: - Planned runs
+
+    private let intervalSteps = """
+    [{"kind":"warmup","duration_s":60},{"repeat":2,"steps":[{"kind":"work","distance_m":400},\
+    {"kind":"recovery","duration_s":30}]}]
+    """
+
+    func testAPlannedRunFollowsItsStepsAndUploadsUnderItsName() async throws {
+        let model = makeModel()
+        model.plannedRun = PlannedRun(id: "slot", workoutName: "Track Tuesday", plan: RunPlan(json: intervalSteps),
+                                      runSteps: intervalSteps, durationSeconds: nil)
+        await model.start()
+        XCTAssertEqual(model.run?.name, "Track Tuesday")
+        XCTAssertEqual(model.planSteps.count, 5)
+        XCTAssertEqual(model.currentPlanStep?.step.kind, .warmup)
+
+        // The warm-up ends on moving time.
+        clock = clock.addingTimeInterval(61)
+        engine.onMetrics?(.init(distanceMeters: 200, movingSeconds: 61, heartRate: nil))
+        XCTAssertEqual(model.currentPlanStep?.step.kind, .work)
+        XCTAssertEqual(model.currentPlanStep?.round, 1)
+        // The interval ends on distance, and the checkpoint keeps the step.
+        clock = clock.addingTimeInterval(90)
+        engine.onMetrics?(.init(distanceMeters: 610, movingSeconds: 151, heartRate: nil))
+        XCTAssertEqual(model.currentPlanStep?.step.kind, .recovery)
+        let id = try XCTUnwrap(model.run?.id)
+        XCTAssertEqual(try store().load(id: id)?.plan?.progress.stepIndex, 2)
+
+        // Paused time doesn't count toward a timed step.
+        model.pause()
+        clock = clock.addingTimeInterval(120)
+        model.advancePlan()
+        model.resume()
+        model.advancePlan()
+        XCTAssertEqual(model.currentPlanStep?.step.kind, .recovery)
+
+        model.skipPlanStep()
+        XCTAssertEqual(model.currentPlanStep?.step.kind, .work)
+        XCTAssertEqual(model.currentPlanStep?.round, 2)
+        model.skipPlanStep()
+        model.skipPlanStep()
+        XCTAssertNil(model.currentPlanStep, "The plan is done; the run keeps recording")
+        XCTAssertEqual(model.phase, .running)
+
+        await model.end()
+        XCTAssertEqual(api.uploaded.first?.name, "Track Tuesday")
+        model.reset()
+        XCTAssertTrue(model.planSteps.isEmpty)
+        XCTAssertNil(model.plannedRun)
+    }
+
+    func testASavedPlannedRunMarksItsWorkoutDone() async throws {
+        let model = makeModel()
+        model.plannedRun = PlannedRun(id: "slot", workoutName: "Zone 3 Run", plan: nil, durationSeconds: nil)
+        await model.start()
+        XCTAssertEqual(model.run?.plannedSlotID, "slot", "The checkpoint keeps the slot")
+        location.onLocations?([fix(0, seconds: 1), fix(1, seconds: 11)])
+        coverGround()
+        engine.finalMetrics = .init(distanceMeters: 640, movingSeconds: 70, heartRate: nil)
+        await model.end()
+
+        let uploaded = try XCTUnwrap(api.uploaded.first)
+        XCTAssertEqual(plannedRunsLogged, ["slot \(uploaded.date) 70"])
+        XCTAssertEqual(model.completedWorkoutName, "Zone 3 Run")
+        XCTAssertEqual(uploaded.savedToHealth, true)
+        model.reset()
+        XCTAssertNil(model.completedWorkoutName)
+    }
+
+    func testARecoveredPlannedRunStillMarksItsWorkoutDone() async throws {
+        var checkpoint = RecordedRun(startedAt: clock, name: "Zone 3 Run")
+        checkpoint.plannedSlotID = "slot"
+        checkpoint.points = [point(0, seconds: 1, from: clock), point(1, seconds: 11, from: clock)]
+        try store().save(checkpoint)
+        engine.recovery = .running
+        clock = clock.addingTimeInterval(30)
+
+        // The app was stopped, so nothing in memory says which slot this was.
+        let model = makeModel()
+        let recording = await model.recover()
+        XCTAssertTrue(recording)
+        XCTAssertNil(model.plannedRun)
+        coverGround()
+        engine.finalMetrics = .init(distanceMeters: 640, movingSeconds: 120, heartRate: nil)
+        await model.end()
+
+        XCTAssertEqual(plannedRunsLogged, ["slot \(checkpoint.date) 120"])
+        XCTAssertEqual(model.completedWorkoutName, "Zone 3 Run")
+    }
+
+    func testAPlainRunOrARefusedPlannedRunMarksNothingDone() async throws {
+        let plain = makeModel()
+        await plain.start()
+        location.onLocations?([fix(0, seconds: 1), fix(1, seconds: 11)])
+        coverGround()
+        await plain.end()
+        XCTAssertEqual(plannedRunsLogged, [])
+        XCTAssertNil(plain.completedWorkoutName)
+
+        plannedRunAccepted = false
+        plain.reset()
+        plain.plannedRun = PlannedRun(id: "slot", workoutName: "Tempo", plan: nil, durationSeconds: nil)
+        await plain.start()
+        location.onLocations?([fix(0, seconds: 1), fix(1, seconds: 11)])
+        coverGround()
+        await plain.end()
+        XCTAssertEqual(plannedRunsLogged.count, 1)
+        XCTAssertNil(plain.completedWorkoutName)
+    }
+
+    func testARunWithoutStepsKeepsThePlainRecorder() async throws {
+        let model = makeModel()
+        model.plannedRun = PlannedRun(id: "slot", workoutName: "Easy Friday", plan: nil, durationSeconds: 1_800)
+        await model.start()
+        XCTAssertEqual(model.run?.name, "Easy Friday")
+        XCTAssertNil(model.run?.plan)
+        XCTAssertTrue(model.planSteps.isEmpty)
+        XCTAssertNil(model.currentPlanStep)
+
+        let plain = makeModel()
+        model.discard()
+        await plain.start()
+        XCTAssertEqual(plain.run?.name, "Run")
+        XCTAssertNil(plain.run?.plan)
+    }
+
+    /// A GPS batch that arrives late can pause the run back at the fix where
+    /// the runner stopped. A step that only ended in the time the pause
+    /// removes starts again.
+    func testABackdatedAutoPauseUndoesAStepItsTimeNeverReached() async throws {
+        let steps = """
+        [{"kind":"warmup","duration_s":20},{"kind":"work","duration_s":60}]
+        """
+        let model = makeModel()
+        model.plannedRun = PlannedRun(id: "slot", workoutName: "Strides", plan: RunPlan(json: steps),
+                                      runSteps: steps, durationSeconds: nil)
+        await model.start()
+        let started = clock
+        clock = started.addingTimeInterval(30)
+        location.onLocations?([fix(0, seconds: -29, speed: 3), fix(1, seconds: -16, speed: 0.2),
+                               fix(1, seconds: -15, speed: 0.1), fix(1, seconds: -14, speed: 0.1)])
+        XCTAssertEqual(model.phase, .paused)
+        XCTAssertEqual(model.run?.pauses.last?.start, started.addingTimeInterval(16))
+        XCTAssertEqual(model.currentPlanStep?.step.kind, .warmup, "Only 16 moving seconds have passed")
+        let id = try XCTUnwrap(model.run?.id)
+        XCTAssertEqual(try store().load(id: id)?.plan?.progress.stepIndex, 0)
+
+        // Running again, the warm-up ends at 20 moving seconds.
+        model.resume()
+        clock = clock.addingTimeInterval(5)
+        model.advancePlan()
+        XCTAssertEqual(model.currentPlanStep?.step.kind, .work)
+    }
+
+    func testASkippedStepStaysSkippedThroughABackdatedPause() async throws {
+        let steps = """
+        [{"kind":"warmup","duration_s":20},{"kind":"work","duration_s":60},{"kind":"cooldown","duration_s":60}]
+        """
+        let model = makeModel()
+        model.plannedRun = PlannedRun(id: "slot", workoutName: "Strides", plan: RunPlan(json: steps),
+                                      runSteps: steps, durationSeconds: nil)
+        await model.start()
+        let started = clock
+        clock = started.addingTimeInterval(5)
+        model.skipPlanStep()
+        clock = started.addingTimeInterval(30)
+        location.onLocations?([fix(0, seconds: -29, speed: 3), fix(1, seconds: -16, speed: 0.2),
+                               fix(1, seconds: -15, speed: 0.1), fix(1, seconds: -14, speed: 0.1)])
+        XCTAssertEqual(model.phase, .paused)
+        XCTAssertEqual(model.currentPlanStep?.step.kind, .work)
+    }
+
+    func testAPlannedRunSpeaksItsStepsAndHeartRateCues() async throws {
+        let steps = """
+        [{"kind":"warmup","duration_s":60},\
+        {"kind":"work","duration_s":300,"target":{"type":"heart_rate","min_bpm":130,"max_bpm":145}}]
+        """
+        let model = makeModel()
+        model.announcesSplits = true
+        model.plannedRun = PlannedRun(id: "slot", workoutName: "Zone 2", plan: RunPlan(json: steps),
+                                      runSteps: steps, durationSeconds: nil)
+        await model.start()
+        let started = clock
+        XCTAssertEqual(speaker.spoken, ["Step 1 of 2. 1 minute warm-up."])
+
+        clock = started.addingTimeInterval(61)
+        model.advancePlan()
+        XCTAssertEqual(speaker.spoken.last, "Step 2 of 2. 5 minutes at 130 to 145 beats per minute.")
+
+        // Heart rate well above the range from the step's start: one cue once
+        // the step has settled and the change has held.
+        for second in 62...120 {
+            clock = started.addingTimeInterval(TimeInterval(second))
+            model.record(.init(timestamp: clock, beatsPerMinute: 160))
+            model.advancePlan()
+        }
+        XCTAssertEqual(speaker.spoken.filter { $0.hasPrefix("Heart rate") }, ["Heart rate high. Ease off."])
+
+        model.skipPlanStep()
+        XCTAssertEqual(speaker.spoken.last, "Plan complete. Keep going or end the run.")
+    }
+
+    func testARecoveredRunPicksUpItsStep() async throws {
+        var checkpoint = RecordedRun(startedAt: clock)
+        checkpoint.points = [point(0, seconds: 1, from: clock)]
+        checkpoint.plan = RunPlanFollowing(runSteps: intervalSteps,
+                                           progress: RunPlanProgress(stepIndex: 3, stepStartSeconds: 200,
+                                                                     stepStartMeters: 900))
+        try store().save(checkpoint)
+        engine.recovery = .running
+        clock = clock.addingTimeInterval(210)
+
+        let model = makeModel()
+        let recording = await model.recover()
+        XCTAssertTrue(recording)
+        XCTAssertEqual(model.planSteps.count, 5)
+        XCTAssertEqual(model.currentPlanStep?.step.kind, .work)
+        XCTAssertEqual(model.currentPlanStep?.round, 2)
+    }
+
+    // MARK: - Laps on the Step page and the Lock Screen (P8)
+
+    func testALapIsThePlannedStepOrTheNextWholeUnit() throws {
+        let steps = try XCTUnwrap(RunPlan(json: intervalSteps)).expandedSteps
+        // Twenty seconds into a one-minute warm-up.
+        let warmUp = try XCTUnwrap(RunLapStatus.step(steps, progress: RunPlanProgress(), movingSeconds: 20,
+                                                     meters: 60, unit: .miles))
+        XCTAssertEqual(warmUp.title, "WARM UP")
+        XCTAssertEqual(warmUp.position, "STEP 1 OF 5")
+        XCTAssertTrue(warmUp.planned)
+        XCTAssertEqual(warmUp.left, "0:40")
+        XCTAssertEqual(warmUp.whole, "1:00")
+        XCTAssertEqual(warmUp.endSeconds, 60)
+        XCTAssertEqual(warmUp.fraction, 1.0 / 3, accuracy: 0.001)
+        XCTAssertEqual(warmUp.next, "400 m")
+
+        // A distance step counts down meters, with no end time.
+        let interval = try XCTUnwrap(RunLapStatus.step(
+            steps, progress: RunPlanProgress(stepIndex: 1, stepStartSeconds: 60, stepStartMeters: 200),
+            movingSeconds: 90, meters: 300, unit: .miles))
+        XCTAssertEqual(interval.title, "RUN · REP 1 OF 2")
+        XCTAssertEqual(interval.left, "300 m")
+        XCTAssertNil(interval.endSeconds)
+        XCTAssertEqual(interval.fraction, 0.25, accuracy: 0.001)
+        XCTAssertEqual(interval.next, "30 s recovery")
+
+        // The last step has nothing next, and a finished plan has no step.
+        let last = try XCTUnwrap(RunLapStatus.step(steps, progress: RunPlanProgress(stepIndex: 4),
+                                                   movingSeconds: 0, meters: 0, unit: .miles))
+        XCTAssertNil(last.next)
+        XCTAssertNil(RunLapStatus.step(steps, progress: RunPlanProgress(stepIndex: 5), movingSeconds: 0,
+                                       meters: 0, unit: .miles))
+
+        let split = RunLapStatus.split(meters: 2.58 * 1_609.344, movingSeconds: 1_200, unit: .miles)
+        XCTAssertEqual(split.title, "MILE 3")
+        XCTAssertFalse(split.planned)
+        XCTAssertEqual(split.left, "0.42 mi")
+        XCTAssertEqual(split.fraction, 0.58, accuracy: 0.001)
+        XCTAssertEqual(RunLapStatus.split(meters: 0, movingSeconds: 0, unit: .kilometers).title, "KILOMETER 1")
+    }
+
+    func testALapJudgesItsTargetLikeTheSpokenCues() {
+        let pace = RunPlan.Target.pace(fastestSecondsPerKm: 300, slowestSecondsPerKm: 330)
+        XCTAssertEqual(RunLapStatus.verdict(310, target: pace), .onTarget)
+        XCTAssertEqual(RunLapStatus.verdict(400, target: pace), .speedUp)
+        XCTAssertEqual(RunLapStatus.verdict(250, target: pace), .easeOff)
+        XCTAssertNil(RunLapStatus.verdict(333, target: pace), "Just outside the range says nothing yet")
+        XCTAssertNil(RunLapStatus.verdict(nil, target: pace))
+        let heartRate = RunPlan.Target.heartRate(minBPM: 150, maxBPM: 160)
+        XCTAssertEqual(RunLapStatus.verdict(170, target: heartRate), .easeOff)
+        XCTAssertEqual(RunLapStatus.verdict(140, target: heartRate), .pickItUp)
+        XCTAssertNil(RunLapStatus.verdict(170, target: nil))
+    }
+
+    func testTheLockScreenShowsThePlannedStepAndCountsItDown() async throws {
+        let steps = """
+        [{"kind":"warmup","duration_s":60},{"kind":"work","distance_m":400,\
+        "target":{"type":"heart_rate","min_bpm":150,"max_bpm":160}}]
+        """
+        let model = makeModel()
+        model.plannedRun = PlannedRun(id: "slot", workoutName: "Track Tuesday", plan: RunPlan(json: steps),
+                                      runSteps: steps, durationSeconds: nil)
+        await model.start()
+        let start = try XCTUnwrap(liveActivity.shown.last)
+        let warmUp = try XCTUnwrap(start.lap)
+        XCTAssertTrue(warmUp.planned)
+        XCTAssertEqual(warmUp.title, "WARM UP")
+        XCTAssertEqual(warmUp.startSeconds, 0)
+        XCTAssertEqual(warmUp.endSeconds, 60)
+        XCTAssertEqual(warmUp.next, "400 m at 150–160 bpm")
+        // The Lock Screen counts the step down from the run's own clock.
+        XCTAssertEqual(warmUp.timerRange(start), clock...clock.addingTimeInterval(60))
+
+        // The step's end updates the Lock Screen at once, within the five
+        // seconds distance updates wait.
+        clock = clock.addingTimeInterval(4)
+        engine.onMetrics?(.init(distanceMeters: 15, movingSeconds: 4, heartRate: nil))
+        let shown = liveActivity.shown.count
+        clock = clock.addingTimeInterval(57)
+        model.advancePlan()
+        XCTAssertEqual(liveActivity.shown.count, shown + 1)
+        let interval = try XCTUnwrap(liveActivity.shown.last?.lap)
+        XCTAssertEqual(interval.title, "RUN")
+        XCTAssertNil(interval.endSeconds)
+        XCTAssertEqual(interval.target, "150–160 bpm")
+        XCTAssertTrue(interval.targetIsHeartRate)
+        XCTAssertNil(interval.next)
+
+        // Paused, the countdown stands still.
+        model.pause()
+        let paused = try XCTUnwrap(liveActivity.shown.last)
+        XCTAssertNil(paused.lap?.timerRange(paused))
+
+        // Skipping the last step leaves the next whole mile.
+        model.resume()
+        model.skipPlanStep()
+        let after = try XCTUnwrap(liveActivity.shown.last?.lap)
+        XCTAssertFalse(after.planned)
+        XCTAssertEqual(after.title, "MILE 1")
+    }
+
+    func testARunWithoutAPlanShowsTheNextMileOnTheLockScreen() async throws {
+        let model = makeModel()
+        await model.start()
+        let lap = try XCTUnwrap(liveActivity.shown.last?.lap)
+        XCTAssertFalse(lap.planned)
+        XCTAssertEqual(lap.title, "MILE 1")
+        XCTAssertEqual(lap.left, "1.00 mi")
+        XCTAssertNil(lap.target)
+    }
+
+    func testRecoveryWithoutStoredRunsCreatesNoDirectory() async throws {
+        let recording = await makeModel().recover()
+        XCTAssertFalse(recording)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: base.path))
+        XCTAssertEqual(engine.calls, [])
+    }
+}

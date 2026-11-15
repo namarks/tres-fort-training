@@ -1,0 +1,169 @@
+import CoreImage
+import XCTest
+
+final class StationConnectionJourneyTests: XCTestCase {
+    override func setUpWithError() throws { continueAfterFailure = false }
+
+    override func tearDownWithError() throws {
+        let app = XCUIApplication()
+        if (testRun?.failureCount ?? 0) > 0 { print(app.debugDescription) }
+        app.terminate()
+    }
+
+    private func launch(shortcut: Bool = false, rememberedAccount: String? = nil,
+                        largeText: Bool = false) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchEnvironment["TRESFORT_UI_FIXTURE"] = "app-store"
+        if let rememberedAccount { app.launchEnvironment["TRESFORT_UI_STATION_REMEMBERED_ACCOUNT"] = rememberedAccount }
+        if largeText { app.launchEnvironment["TRESFORT_UI_LARGE_TEXT"] = "1" }
+        app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US", "-restAudioCuesEnabled", "NO"]
+        if shortcut {
+            app.open(URL(string: "tresfort://ipad-display")!)
+        } else {
+            app.launch()
+        }
+        return app
+    }
+
+    private func tap(_ element: XCUIElement, in app: XCUIApplication,
+                     file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(element.waitForExistence(timeout: UITestWait.screen), file: file, line: line)
+        UITestScrolling.reveal(element, in: app, maxAttempts: 12, file: file, line: line)
+        element.tapWhenReady(file: file, line: line)
+    }
+
+    /// iPad display sits in the + menu (or the workout menu during a
+    /// workout) until this phone turns it on, then in the toolbar.
+    private func openIPadDisplay(in app: XCUIApplication,
+                                 file: StaticString = #filePath, line: UInt = #line) {
+        let direct = app.navigationBars.buttons["today.ipadDisplay"]
+        let workoutMenu = app.buttons["today.workoutActions"]
+        let moreMenu = app.buttons["today.moreWaysToTrain"]
+        let deadline = Date().addingTimeInterval(UITestWait.screen)
+        while Date() < deadline, !direct.exists, !workoutMenu.exists, !moreMenu.exists {
+            _ = moreMenu.waitForExistence(timeout: 0.5)
+        }
+        if !direct.exists {
+            tap(workoutMenu.exists ? workoutMenu : moreMenu, in: app, file: file, line: line)
+        }
+        tap(app.buttons["today.ipadDisplay"], in: app, file: file, line: line)
+    }
+
+    private func capture(_ name: String) {
+        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    private func assertDisplayedCodeDecodes(in app: XCUIApplication) throws {
+        let code = app.images["station.setupCode"]
+        XCTAssertTrue(code.waitForExistence(timeout: UITestWait.screen))
+        UITestScrolling.reveal(code, in: app, maxAttempts: 12)
+        XCTAssertTrue(app.windows.firstMatch.frame.contains(code.frame), "Keep the full code and white border on screen")
+        let image = try XCTUnwrap(code.screenshot().image.cgImage)
+        let detector = try XCTUnwrap(CIDetector(ofType: CIDetectorTypeQRCode,
+            context: CIContext(options: [.useSoftwareRenderer: true]),
+            options: [CIDetectorAccuracy: CIDetectorAccuracyHigh]))
+        let payloads = detector.features(in: CIImage(cgImage: image))
+            .compactMap { ($0 as? CIQRCodeFeature)?.messageString }
+        XCTAssertEqual(payloads, ["tresfort://ipad-display"])
+    }
+
+    func testPhoneConnectionIsVisibleBeforeAndDuringWorkoutAndRemembersExplicitChoice() throws {
+        try XCTSkipIf(UIDevice.current.userInterfaceIdiom != .phone)
+        let app = launch()
+        openIPadDisplay(in: app)
+        XCTAssertTrue(app.buttons["station.phoneConnect"].waitForExistence(timeout: UITestWait.screen))
+        capture("iphone-connect-ipad")
+        // Looking at setup and dismissing does not opt in.
+        app.navigationBars["iPad display"].buttons["Done"].tap()
+        openIPadDisplay(in: app)
+        tap(app.buttons["station.phoneConnect"], in: app)
+        XCTAssertTrue(app.buttons["station.phoneDisconnect"].waitForExistence(timeout: UITestWait.screen))
+        // The fixture refuses the key request. The real setup must expose
+        // recovery without requesting local networking or starting a workout.
+        let offline = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label CONTAINS %@", "internet"),
+            object: app.staticTexts["station.phoneStatus"])
+        XCTAssertEqual(XCTWaiter.wait(for: [offline], timeout: UITestWait.screen), .completed)
+        app.navigationBars["iPad display"].buttons["Done"].tap(until: app.buttons["today.startWorkout"])
+        XCTAssertFalse(app.buttons["runner.logSet"].exists)
+        openIPadDisplay(in: app)
+        XCTAssertTrue(app.buttons["station.phoneDisconnect"].waitForExistence(timeout: UITestWait.screen))
+        tap(app.buttons["station.phoneDisconnect"], in: app)
+        XCTAssertTrue(app.buttons["station.phoneConnect"].waitForExistence(timeout: UITestWait.screen))
+        app.navigationBars["iPad display"].buttons["Done"].tap()
+        tap(app.buttons["today.startWorkout"], in: app)
+        XCTAssertTrue(app.buttons["runner.logSet"].waitForExistence(timeout: UITestWait.screen))
+        openIPadDisplay(in: app)
+        XCTAssertTrue(app.buttons["station.phoneConnect"].waitForExistence(timeout: UITestWait.screen))
+    }
+
+    func testPhoneSetupShortcutOpensConfirmationWithoutEnablingOrStartingWorkout() throws {
+        try XCTSkipIf(UIDevice.current.userInterfaceIdiom != .phone)
+        let app = launch(shortcut: true)
+        XCTAssertTrue(app.buttons["station.phoneConnect"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertFalse(app.buttons["station.phoneDisconnect"].exists)
+        app.navigationBars["iPad display"].buttons["Done"].tap(until: app.buttons["today.startWorkout"])
+        XCTAssertFalse(app.buttons["runner.logSet"].exists)
+        openIPadDisplay(in: app)
+        XCTAssertTrue(app.buttons["station.phoneConnect"].waitForExistence(timeout: UITestWait.screen))
+    }
+
+    func testIPadSetupCodeRetryAndRememberedReconnectAreReachable() throws {
+        try XCTSkipIf(UIDevice.current.userInterfaceIdiom != .pad)
+        let app = launch()
+        tap(app.buttons["today.station"], in: app)
+        XCTAssertFalse(app.images["station.setupCode"].exists)
+        tap(app.buttons["station.connectPhone"], in: app)
+        XCTAssertTrue(app.images["station.setupCode"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertTrue(app.staticTexts["station.connectionProblem"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertTrue(app.staticTexts["station.connectionProblem"].label.contains("internet"))
+        try assertDisplayedCodeDecodes(in: app)
+        capture("ipad-scan-to-connect")
+        tap(app.buttons["station.retryConnection"], in: app)
+        XCTAssertTrue(app.images["station.setupCode"].waitForExistence(timeout: UITestWait.screen))
+        app.buttons["station.done"].tap(until: app.buttons["today.station"])
+        tap(app.buttons["today.station"], in: app)
+        XCTAssertTrue(app.images["station.setupCode"].waitForExistence(timeout: UITestWait.screen),
+                      "Reopening Station restores this account’s opt-in")
+        tap(app.buttons["ipadWorkout.options"], in: app)
+        let reconnect = app.switches["station.link"]
+        XCTAssertEqual(reconnect.value as? String, "1")
+        tap(reconnect, in: app)
+        XCTAssertEqual(reconnect.value as? String, "0")
+        app.buttons["station.done"].tap(until: app.buttons["today.station"])
+        tap(app.buttons["today.station"], in: app)
+        XCTAssertTrue(app.buttons["station.connectPhone"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertFalse(app.images["station.setupCode"].exists)
+    }
+
+    func testAnotherAccountsRememberedIPadPreferenceDoesNotConnect() throws {
+        try XCTSkipIf(UIDevice.current.userInterfaceIdiom != .pad)
+        let app = launch(rememberedAccount: "another-member")
+        tap(app.buttons["today.station"], in: app)
+        XCTAssertTrue(app.buttons["station.connectPhone"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertEqual(app.switches["station.link"].value as? String, "0")
+        XCTAssertFalse(app.images["station.setupCode"].exists)
+    }
+
+    func testLargestTextKeepsSetupAndDismissalReachable() throws {
+        let app = launch(largeText: true)
+        if UIDevice.current.userInterfaceIdiom == .phone {
+            openIPadDisplay(in: app)
+            tap(app.buttons["station.phoneConnect"], in: app)
+            tap(app.buttons["station.phoneDisconnect"], in: app)
+            XCTAssertTrue(app.navigationBars["iPad display"].buttons["Done"].isHittable)
+        } else {
+            tap(app.buttons["today.station"], in: app)
+            tap(app.buttons["station.connectPhone"], in: app)
+            try assertDisplayedCodeDecodes(in: app)
+            capture("ipad-setup-code-largest-text")
+            tap(app.buttons["ipadWorkout.options"], in: app)
+            tap(app.switches["station.link"], in: app)
+            XCTAssertTrue(app.buttons["station.done"].isHittable)
+        }
+        capture("station-setup-largest-text")
+    }
+}

@@ -1,0 +1,1084 @@
+import SwiftUI
+import CoreLocation
+
+// Milestone n — agenda tap-through (presented as a sheet from a tapped
+// calendar day).
+//
+//   completed            → the actual logged sets, grouped by exercise.
+//   workout              → the day-template name + its template_exercises
+//                           targets (the internal planned-vs-projected
+//                           CalendarProjection split collapses to one
+//                           user-facing "Workout" here — presentation only).
+//   skipped              → "Skipped".
+//   rest / nothing       → "Rest day".
+//
+// A future date with BOTH a projection and a real session shows the real
+// session — that precedence lives entirely in CalendarProjection (the
+// frozen algorithm); this view only renders whatever it returns.
+
+/// One activity on a date, opened on its own from the Activity tab.
+enum DayAgendaFocus: Hashable {
+    /// A run, ride, swim or other activity from a provider or the recorder.
+    case activity(String)
+    /// An activity the member logged by hand.
+    case logged(String)
+}
+
+struct DayAgendaView: View {
+    @ObservedObject var sync: SyncModel
+    let dateString: String
+    /// Shows only this activity instead of the whole date.
+    var focus: DayAgendaFocus? = nil
+    var onStartWorkout: (() -> Void)? = nil
+    @State private var showDateEditor = false
+    @State private var showFreestyle = false
+    @State private var confirmRemoval = false
+    @State private var movingWorkout: Workout?
+    @State private var isPreparingWorkoutStart = false
+    @State private var workoutStartTask: Task<Void, Never>?
+    @State private var workoutStartRequestID: UUID?
+    @State private var workoutStartError: String?
+    @State private var recordedRunDeleteOutcome: RecordedRunDeleteOutcome?
+    @State private var reportingActivity: ReportableActivity?
+
+    private static let prettyDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.calendar = CalendarProjection.calendar
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "EEEE · d MMM yyyy"
+        return f
+    }()
+
+    private var prettyDate: String {
+        guard let d = CalendarProjection.date(from: dateString) else { return dateString }
+        return Self.prettyDateFormatter.string(from: d)
+    }
+
+    var body: some View {
+        // Capture today ONCE for the whole render: it feeds the
+        // projection's past/future split AND the FIX6 inference gate in
+        // `plannedDisplayDay`. `sync.todayString` is a computed var (fresh
+        // `Date()` each access); separate reads across one agenda render
+        // could straddle midnight and disagree. One read, one clock.
+        let today = sync.todayString
+        let proj = sync.projection(for: dateString, today: today)
+        ZStack {
+            Theme.bg.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    if let focus {
+                        focusedEntry(focus)
+                    } else {
+                        dayContent(proj, today: today)
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+                .padding(.bottom, 22)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .onDisappear {
+            workoutStartTask?.cancel()
+            workoutStartTask = nil
+            workoutStartRequestID = nil
+            isPreparingWorkoutStart = false
+        }
+        .sheet(isPresented: $showFreestyle) { FreestyleExercisePicker(sync: sync, starting: true, onStarted: onStartWorkout) }
+        .sheet(item: $movingWorkout) { workout in
+            MoveWorkoutDateSheet(sync: sync, workout: workout, fromDate: dateString)
+        }
+        .sheet(isPresented: $showDateEditor) {
+            WorkoutsView(sync: sync, date: dateString)
+        }
+        .confirmationDialog("Remove workout from this date?", isPresented: $confirmRemoval,
+                            titleVisibility: .visible) {
+            Button("Remove workout", role: .destructive) {
+                Task { await sync.setCalendarOverride(date: dateString, dayID: nil) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This date becomes a rest day. The saved workout and weekly schedule stay available.")
+        }
+        .recordedRunDeleteAlert($recordedRunDeleteOutcome)
+        .sheet(item: $reportingActivity) { activity in
+            NavigationStack {
+                ReportProblemView(sync: sync, initialActivity: activity, screen: "activity",
+                                  onClose: { reportingActivity = nil })
+            }
+        }
+    }
+
+    /// The whole date: its workout or record, then logged and completed
+    /// activities and rides.
+    @ViewBuilder private func dayContent(_ proj: DayProjection, today: String) -> some View {
+        header(proj, today: today)
+        if let error = sync.loadError {
+            Text(error)
+                .font(Theme.mono(12))
+                .foregroundStyle(Theme.danger)
+                .accessibilityIdentifier("calendarOverrideError")
+        }
+        if let workoutStartError {
+            Text(workoutStartError).font(.subheadline).foregroundStyle(Theme.muted)
+        }
+        todayWorkoutAction(proj, today: today)
+        content(proj, today: today)
+        additionalSessions(today: today)
+        extrasSection(today: today)
+        if dateString == today, sync.canStartFreestyle {
+            Button("Start freestyle", systemImage: "figure.strengthtraining.traditional") { showFreestyle = true }
+                .frame(minHeight: 44).accessibilityIdentifier("calendar.startFreestyle")
+        }
+        // On a can_train_light=false blackout the backend projects
+        // items: [] — so suppress the endurance cards here too, or a
+        // blackout day would still show training to do (Codex #61 P2).
+        if !proj.suppressesScheduleAndEndurance {
+            loggedActivitiesSection
+            completedActivitiesSection
+            ridesSection
+        }
+    }
+
+    @ViewBuilder private func additionalSessions(today: String) -> some View {
+        ForEach(sync.sessions(on: dateString).filter { ($0.slot ?? 0) > 0 }) { session in
+            VStack(alignment: .leading, spacing: 12) {
+                Text(session.isFreestyle ? "Freestyle" : sync.workout(id: session.workout_id)?.name ?? "Workout")
+                    .font(.headline).foregroundStyle(Theme.text).accessibilityAddTraits(.isHeader)
+                Text(session.status.replacingOccurrences(of: "_", with: " ").capitalized)
+                    .font(.subheadline).foregroundStyle(Theme.muted)
+                if session.status == "completed" { WorkoutSummaryView(sync: sync, session: session) }
+                let sets = sync.setsForSession(session.id)
+                if !sets.isEmpty { SetReviewList(sync: sync, sets: sets, pending: []) }
+                else if let workout = sync.workout(id: session.workout_id) { templateTargets(workout) }
+                if session.status == "completed" {
+                    CompletedWorkoutFeedbackEntry(sync: sync, session: session)
+                } else {
+                    let feedback = WorkoutFeedback(notes: session.notes, perceivedFatigue: session.perceived_fatigue)
+                    if !feedback.isEmpty { SavedWorkoutFeedbackView(feedback: feedback) }
+                }
+                if dateString == today, ["planned", "in_progress"].contains(session.status) {
+                    Button(session.status == "in_progress" ? "Continue workout" : "Start workout") {
+                        guard sync.selectWorkout(session) else { return }
+                        if !sync.running {
+                            if sync.hasResumableWorkout { sync.resumeWorkout() } else { sync.startToday() }
+                        }
+                        if sync.running { onStartWorkout?() }
+                    }
+                    .frame(minHeight: 44).disabled(!sync.canSwitchWorkout)
+                    .accessibilityIdentifier("calendar.startSession.\(session.slot ?? 0)")
+                }
+            }
+            .padding(16).background(Theme.surface, in: RoundedRectangle(cornerRadius: 14))
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("dayAgenda.session.\(session.slot ?? 0)")
+        }
+    }
+
+    /// One activity on its own, opened from History.
+    @ViewBuilder private func focusedEntry(_ focus: DayAgendaFocus) -> some View {
+        switch focus {
+        case .activity(let id):
+            if let activity = sync.activities(on: dateString).first(where: { $0.id == id }) {
+                activityCard(activity)
+            } else {
+                focusedEntryGone
+            }
+        case .logged(let id):
+            if let activity = sync.manualActivities(on: dateString).first(where: { $0.id == id }) {
+                loggedActivityCard(activity)
+            } else {
+                focusedEntryGone
+            }
+        }
+    }
+
+    private var focusedEntryGone: some View {
+        Text("This activity is no longer here.")
+            .font(.subheadline).foregroundStyle(Theme.muted)
+            .accessibilityIdentifier("dayAgenda.focusGone")
+    }
+
+    /// Deletes a run recorded in the app and keeps the outcome for the alert.
+    private func deleteRecordedRun(_ recordingID: String) async {
+        recordedRunDeleteOutcome = await sync.deleteRecordedRun(recordingID: recordingID)
+    }
+
+    private func canEditDate(today: String) -> Bool {
+        sync.plan != nil
+            && sync.calendarAssignmentUnavailableReason(date: dateString, today: today) == nil
+    }
+
+    private var dateActions: some View {
+        let workout = sync.previewWorkout(forDateString: dateString)
+        return Menu {
+            Section("This date only") {
+                Button { showDateEditor = true } label: {
+                    Label(workout == nil ? "Plan something" : "Swap", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .accessibilityIdentifier("calendar.chooseWorkout")
+                if let workout {
+                    Button { movingWorkout = workout } label: {
+                        Label("Move to another date", systemImage: "calendar.badge.clock")
+                    }
+                    .accessibilityIdentifier("calendar.moveWorkout")
+                }
+                if workout != nil || realSession?.status == "planned" {
+                    Button(role: .destructive) { confirmRemoval = true } label: {
+                        Label("Skip, make it a rest day", systemImage: "moon.zzz")
+                    }
+                    .accessibilityIdentifier("calendar.removeWorkout")
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Workout date actions")
+        .accessibilityHint("Swap, move or skip a workout for this date only. Your weekly schedule stays the same.")
+        .accessibilityIdentifier("calendar.dateActions")
+        .disabled(sync.isRoutineMutationInFlight)
+    }
+
+    // MARK: header
+
+    private func header(_ proj: DayProjection, today: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(prettyDate)
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.muted)
+                Text(title(proj, today: today))
+                    .font(Theme.display(30))
+                    .foregroundStyle(Theme.text)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if canEditDate(today: today) {
+                // Keep the full 44pt target in content: native toolbar buttons
+                // can constrain the menu's touch area below its label height.
+                dateActions.fixedSize()
+            }
+        }
+    }
+
+    private func title(_ proj: DayProjection, today: String) -> String {
+        if case .session = proj, realSession?.isFreestyle == true, realSession?.workout_id == nil {
+            return realSession?.status == "completed" ? "FREESTYLE COMPLETE" : "FREESTYLE"
+        }
+        switch proj {
+        case .session(let s, let hardBlackoutTripType):
+            let compositeTitle: (String) -> String = { title in
+                hardBlackoutTripType == nil ? withBike(title) : title
+            }
+            switch s {
+            case "completed":   return compositeTitle("COMPLETED")
+            // An in-progress session with nothing logged yet records no work
+            // — it's the upcoming workout, not an active one. Show its name.
+            case "in_progress":
+                return compositeTitle(
+                    liveSetCount > 0
+                        ? "IN PROGRESS"
+                        : (planTitle(
+                            today: today,
+                            allowScheduleInference: hardBlackoutTripType == nil)
+                            ?? "WORKOUT"))
+            // Planned + projected collapse to one user-facing "WORKOUT"
+            // (no "Planned"/"Projected" wording); prefer the template name.
+            case "planned":
+                return compositeTitle(
+                    planTitle(
+                        today: today,
+                        allowScheduleInference: hardBlackoutTripType == nil)
+                        ?? "WORKOUT")
+            // Skipped lift was NOT performed → not "lift + bike"; no suffix.
+            case "skipped":     return "SKIPPED"
+            default:            return compositeTitle(s.uppercased())
+            }
+        case .projected(let tid):
+            return withBike(sync.workout(id: tid)?.name.uppercased() ?? "WORKOUT")
+        // No lift on this day: a ride/run makes it a "<noun> DAY" (a ride
+        // day is not a rest day); nothing at all is a true rest day.
+        case .rest, .none:
+            return restOrEnduranceTitle
+        // M4 (multisport) — trip days. Minimal titles so the file builds;
+        // the lead should refine copy and decide how a `.light` day reads
+        // when it still carries endurance. tripType is available for richer
+        // wording ("ITALY — TRAVEL"). For now a plain marker.
+        case .unavailable:
+            return "AWAY"
+        case .light:
+            return restOrEnduranceTitle == "REST DAY" ? "LIGHT — AWAY" : restOrEnduranceTitle
+        }
+    }
+
+    /// Suffix a LIFT-day title with " + BIKE" / "+ RUN" / … when the same
+    /// date also carries a ride/run/swim — the "lift + bike" classification
+    /// the user asked for. No endurance → the bare lift title, unchanged.
+    private func withBike(_ liftTitle: String) -> String {
+        guard let noun = sync.enduranceNoun(on: dateString) else { return liftTitle }
+        // A workout's own planned run isn't extra training on top of it.
+        if noun == "Run", sessionRunSlot != nil { return liftTitle }
+        return "\(liftTitle) + \(noun.uppercased())"
+    }
+
+    // MARK: planned run in the record (docs/plans/planned-runs P7)
+
+    /// The outdoor run this date's session planned, if its workout has one.
+    private var sessionRunSlot: TemplateExercise? {
+        sync.workout(id: realSession?.workout_id, on: dateString)?.exercises.first(where: \.isOutdoorRun)
+    }
+
+    /// The completed workout is a run and nothing else, so its record is
+    /// the run rather than sets.
+    private var recordIsRunOnly: Bool {
+        guard realSession?.status == "completed",
+              let workout = sync.workout(id: realSession?.workout_id, on: dateString) else { return false }
+        return !workout.exercises.isEmpty && workout.exercises.allSatisfy(\.isOutdoorRun)
+    }
+
+    /// The day's run that carried out the completed workout's planned run.
+    private var recordRun: ExternalActivity? {
+        guard realSession?.status == "completed", sessionRunSlot != nil else { return nil }
+        return PlannedRunRecord.matchingRun(
+            workoutName: sync.workout(id: realSession?.workout_id)?.name,
+            among: sync.activities(on: dateString))
+    }
+
+    /// "BIKE DAY" / "PILATES DAY" / … when this no-lift date carries any
+    /// endurance OR a logged manual activity, else "REST DAY". The single
+    /// source for the no-lift title + note.
+    private var restOrEnduranceTitle: String {
+        sync.noLiftDayNoun(on: dateString).map { "\($0.uppercased()) DAY" } ?? "REST DAY"
+    }
+
+    /// Live (non-deleted) logged-set count for this date's real session.
+    private var liveSetCount: Int {
+        realSession.map { sync.setsForSession($0.id).count } ?? 0
+    }
+
+    /// The day template to DISPLAY for a real (planned) session on this
+    /// date — the SAME shared session→schedule resolver Today / the
+    /// calendar / `upcomingDays` use (FIX5's class), not a bare
+    /// `workout_id` read. When the session's own `workout_id`
+    /// is null (server drops it for an existing same-date row) this still
+    /// recovers the template via the weekly schedule unless a hard blackout
+    /// suppresses that schedule alongside endurance content.
+    ///
+    /// The schedule-inference fallback is gated EXACTLY as FIX6 gates it
+    /// in `CalendarMonthView.dayCell`: `dateString >= today` — the same
+    /// civil-date boundary `CalendarProjection.project` uses
+    /// (`dateString < today`). For a PAST date with a null
+    /// `workout_id` this returns nil (no schedule-inferred relabel —
+    /// don't reintroduce the FIX6 class in the agenda); for today/future
+    /// the gate is true so a planned session resolves its template, except
+    /// when `allowScheduleInference` is false for a hard blackout.
+    /// `today` is supplied by the caller (captured ONCE per render in
+    /// `body`, midnight-TOCTOU discipline) — title + content body share
+    /// that single value rather than re-reading the computed clock.
+    private func plannedDisplayDay(
+        today: String,
+        allowScheduleInference: Bool = true
+    ) -> Workout? {
+        if let id = realSession?.workout_id {
+            return sync.workout(id: id, on: dateString)
+        }
+        return sync.sessionDisplayTemplate(
+            forDateString: dateString,
+            allowScheduleInference:
+                allowScheduleInference && dateString >= today)
+    }
+
+    /// Template title for a real planned session (via the shared,
+    /// FIX6-gated resolver above — not a bare `workout_id`).
+    private func planTitle(
+        today: String,
+        allowScheduleInference: Bool = true
+    ) -> String? {
+        plannedDisplayDay(
+            today: today,
+            allowScheduleInference: allowScheduleInference)?.name.uppercased()
+    }
+
+    private var realSession: SessionRow? {
+        sync.sessionsByDate[dateString]
+    }
+
+    /// Only today's agenda can execute a workout. All transitions stay in the
+    /// same runner model, including a minimized or recovered freestyle session.
+    @ViewBuilder private func todayWorkoutAction(_ projection: DayProjection, today: String) -> some View {
+        if dateString == today, onStartWorkout != nil, sync.currentWorkoutScope.slot != 0 {
+            Button("Open main workout") { _ = sync.selectPrimaryWorkout() }
+                .frame(minHeight: 44).disabled(!sync.canSwitchWorkout)
+        } else if dateString == today, onStartWorkout != nil, !sync.todayIsCompleted {
+            let continuing = sync.running || sync.hasResumableWorkout
+            let workout = sync.previewWorkout(forDateString: dateString, today: today)
+            if continuing || (!projection.suppressesScheduleAndEndurance && workout != nil) {
+                Button(isPreparingWorkoutStart ? "Preparing…" : continuing ? "Continue workout" : "Start workout") {
+                    guard dateString == sync.todayString, !sync.todayIsCompleted else { return }
+                    if sync.running {
+                        onStartWorkout?()
+                    } else if sync.hasResumableWorkout {
+                        sync.resumeWorkout()
+                        if sync.running { onStartWorkout?() }
+                    } else if let workout {
+                        prepareWorkoutStart(workout)
+                    }
+                }
+                .buttonStyle(WorkoutPrimaryButtonStyle())
+                .disabled(isPreparingWorkoutStart || sync.isRoutineMutationInFlight
+                    || (!continuing && (sync.blocksNewWorkoutStart || workout?.exercises.isEmpty != false)))
+                .accessibilityIdentifier("calendar.startWorkout")
+            }
+        }
+    }
+
+    private func prepareWorkoutStart(_ workout: Workout) {
+        guard !isPreparingWorkoutStart else { return }
+        let reviewedSessionID = realSession?.id
+        let reviewedAttempt = realSession?.attempt
+        let reviewedStatus = realSession?.status
+        let reviewedPlanID = sync.plan?.id
+        let requestID = UUID()
+        workoutStartRequestID = requestID
+        isPreparingWorkoutStart = true
+        workoutStartError = nil
+        workoutStartTask = Task { @MainActor in
+            defer {
+                if workoutStartRequestID == requestID {
+                    isPreparingWorkoutStart = false
+                    workoutStartTask = nil
+                    workoutStartRequestID = nil
+                }
+            }
+            // Match Today's explicit start boundary: the first logged set must
+            // never be interrupted by the notification permission prompt.
+            await RestCue.requestNotificationPermissionIfNeeded()
+            guard !Task.isCancelled, workoutStartRequestID == requestID else { return }
+            // A permission dialog can outlive midnight, a sync, or a session
+            // change. Only start the exact workout/session the user reviewed.
+            guard dateString == sync.todayString,
+                  !sync.running, !sync.hasResumableWorkout,
+                  !sync.blocksNewWorkoutStart, !sync.todayIsCompleted,
+                  !sync.isRoutineMutationInFlight,
+                  sync.plan?.id == reviewedPlanID,
+                  sync.previewWorkout(forDateString: dateString) == workout,
+                  !sync.projection(for: dateString).suppressesScheduleAndEndurance,
+                  realSession?.id == reviewedSessionID,
+                  realSession?.attempt == reviewedAttempt,
+                  realSession?.status == reviewedStatus else {
+                workoutStartError = "This workout changed. Review the date before starting."
+                return
+            }
+            sync.startOverride(dayID: workout.id)
+            if sync.running { onStartWorkout?() }
+        }
+    }
+
+    // MARK: content
+
+    @ViewBuilder private func content(_ proj: DayProjection, today: String) -> some View {
+        switch proj {
+        case .session(let status, let hardBlackoutTripType):
+            if realSession?.isFreestyle == true && liveSetCount == 0 {
+                note("Add exercises as you go. Your saved workouts stay unchanged.")
+            } else if status == "in_progress" && liveSetCount == 0 {
+                // Phantom in-progress (sets logged then all deleted): nothing
+                // was recorded, so show the planned workout's targets — not a
+                // bare "no sets logged" under an "in progress" header.
+                plannedContent(
+                    today: today,
+                    allowScheduleInference: hardBlackoutTripType == nil)
+            } else if status == "completed" || status == "in_progress" {
+                loggedSets
+            } else if status == "skipped" {
+                note("This workout was skipped.")
+            } else {
+                // planned real session → show its template targets.
+                plannedContent(
+                    today: today,
+                    allowScheduleInference: hardBlackoutTripType == nil)
+            }
+        case .projected(let tid):
+            if let day = sync.workout(id: tid, on: dateString) {
+                templateTargets(day)
+            } else {
+                note("Workout (template unavailable).")
+            }
+        case .rest, .none:
+            // A ride/run OR a logged manual activity reads "<noun> day — no
+            // lift scheduled" (the ride/activity cards render below); only a
+            // genuinely empty day stays "Rest day — nothing scheduled".
+            if let noun = sync.noLiftDayNoun(on: dateString) {
+                note("\(noun) day — no lift scheduled.")
+            } else if !sync.plannedExtras(on: dateString, today: today).isEmpty {
+                // The day's activities are listed just below.
+                note("No workout scheduled.")
+            } else {
+                note("Rest day — nothing scheduled.")
+            }
+        // M4 (multisport) — trip days. Minimal notes so the file builds; any
+        // endurance cards for the date still render below this note. The lead
+        // should refine copy (e.g. surface the trip note/type).
+        case .unavailable:
+            note("Away — training unavailable on this trip.")
+        case .light:
+            if let noun = sync.noLiftDayNoun(on: dateString) {
+                note("Away — light training. \(noun) scheduled.")
+            } else {
+                note("Away — light training only.")
+            }
+        }
+    }
+
+    // planned (or phantom-empty in-progress) → the day-template targets.
+    // Shared FIX6-gated resolver (not a bare workout_id): recovers the
+    // template via the weekly schedule when the session's own id is null,
+    // for today/future only. Past planned w/ null id stays the graceful
+    // no-template note (no schedule-inferred relabel — FIX6 class preserved).
+    @ViewBuilder private func plannedContent(
+        today: String,
+        allowScheduleInference: Bool = true
+    ) -> some View {
+        if let day = plannedDisplayDay(
+            today: today,
+            allowScheduleInference: allowScheduleInference)
+        {
+            templateTargets(day)
+        } else {
+            note("Workout — no template details cached.")
+        }
+    }
+
+    // completed / in-progress → actual logged sets, grouped by exercise.
+    private var loggedSets: some View {
+        let logged = realSession.map { sync.setsForSession($0.id) } ?? []
+        let groups = Dictionary(grouping: logged, by: \.exercise_id)
+        let orderedIDs = logged.map(\.exercise_id).reduce(into: [String]()) {
+            if !$0.contains($1) { $0.append($1) }
+        }
+        let runOnly = recordIsRunOnly
+        let runSlot = realSession?.status == "completed" ? sessionRunSlot : nil
+        let run = recordRun
+        return VStack(alignment: .leading, spacing: 12) {
+            if let session = realSession, session.status == "completed", !runOnly {
+                WorkoutSummaryView(sync: sync, session: session)
+                    .padding(16).background(Theme.surface)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+            }
+            // A planned run's record is the run itself, against its plan,
+            // not a count of sets.
+            if let runSlot {
+                PlannedRunRecordView(slot: runSlot, run: run, routeAccess: sync.activityRouteAccess,
+                                     deleteRun: deleteRecordedRun,
+                                     rateEffort: { id, effort in
+                                         await sync.rateActivityEffort(activityID: id, effort: effort)
+                                     })
+            }
+            if let session = realSession {
+                if session.status == "completed" {
+                    CompletedWorkoutFeedbackEntry(sync: sync, session: session)
+                } else {
+                    let feedback = WorkoutFeedback(notes: session.notes, perceivedFatigue: session.perceived_fatigue)
+                    if !feedback.isEmpty { SavedWorkoutFeedbackView(feedback: feedback) }
+                }
+            }
+            if runOnly {
+                EmptyView()
+            } else if logged.isEmpty {
+                note("No sets logged.")
+            } else {
+                Text("Exercises")
+                    .font(.headline)
+                    .foregroundStyle(Theme.muted)
+                    .padding(.top, 12)
+                    .accessibilityAddTraits(.isHeader)
+                ForEach(orderedIDs, id: \.self) { exID in
+                    let rows = (groups[exID] ?? []).sorted { $0.set_index < $1.set_index }
+                    DisclosureGroup {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(rows) { set in
+                                VStack(alignment: .leading, spacing: 0) {
+                                    Text("Set \(set.set_index)")
+                                        .font(.caption).foregroundStyle(Theme.muted)
+                                    SetReviewList(sync: sync, sets: [set], pending: [])
+                                }
+                            }
+                        }
+                        .padding(.top, 12)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(sync.exerciseName(exID))
+                                .font(.headline).foregroundStyle(Theme.text)
+                                .accessibilityIdentifier("calendar.exercise.\(exID)")
+                            Text(exerciseSummary(rows))
+                                .font(.subheadline).foregroundStyle(Theme.muted)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    }
+                    .tint(Theme.accent)
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Theme.surface)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                }
+            }
+            if let session = realSession, session.status == "completed", !runOnly,
+               let summary = sync.completionSummary(for: session.id) {
+                // A recorded run settles its slot, whatever sets say.
+                WorkoutTargetComparisonView(
+                    summary: summary,
+                    settledSlotIDs: run == nil ? [] : Set(runSlot.map { [$0.id] } ?? []))
+                    .padding(16).background(Theme.surface)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+            }
+        }
+    }
+
+    private func exerciseSummary(_ rows: [SetLog]) -> String {
+        let working = rows.filter { $0.is_warmup != 1 }
+        let warmups = rows.count - working.count
+        var parts = ["\(working.count) working \(working.count == 1 ? "set" : "sets")"]
+        let reps = sync.totalReps(for: working)
+        let seconds = working.filter { sync.isTimedSet($0) }.reduce(0) { $0 + max(0, $1.duration_s ?? $1.reps) }
+        if reps > 0 { parts.append("\(reps) reps") }
+        if seconds > 0 { parts.append(WorkoutSummaryStats.duration(seconds)) }
+        if warmups > 0 { parts.append("\(warmups) warm-up \(warmups == 1 ? "set" : "sets")") }
+        return parts.joined(separator: " · ")
+    }
+
+    // planned / projected → template name + targets.
+    @ViewBuilder private func templateTargets(_ day: Workout) -> some View {
+        if day.exercises.isEmpty {
+            note("An activity, with no sets to log. Log it from Today once it's done.")
+        } else {
+            WorkoutExercisePreview(sync: sync, exercises: day.exercises)
+        }
+    }
+
+    // MARK: activities beside the day's workout (schedule extras)
+
+    /// What the weekday holds beside its workout, such as core or
+    /// stretching, from the same projection Coming up and Today read, so
+    /// the date shows everything its Coming up row promised.
+    @ViewBuilder private func extrasSection(today: String) -> some View {
+        let extras = sync.plannedExtras(on: dateString, today: today)
+        if !extras.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: "plus.circle")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(Theme.accent)
+                    Text("ALSO ON THIS DAY")
+                        .font(Theme.mono(11, .bold)).tracking(2)
+                        .foregroundStyle(Theme.muted)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(.isHeader)
+                ForEach(extras) { extra in
+                    extraCard(extra)
+                }
+            }
+            .accessibilityIdentifier("dayAgenda.extras")
+        }
+    }
+
+    private func extraCard(_ extra: Workout) -> some View {
+        let logged = PlannedActivity.isLogged(extra.name,
+                                              manual: sync.manualActivities(on: dateString),
+                                              synced: sync.activities(on: dateString))
+        let detail = logged ? "Logged" : TodayLineup.detail(
+            PlanItemSummary.kindName(extra),
+            minutes: ScheduleTimes.minutes(extra.id, onDate: dateString, plan: sync.plan))
+        return HStack(alignment: .center, spacing: 12) {
+            PlanItemBadge(glyph: PlanItemSummary.glyph(for: extra))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(extra.name)
+                    .font(Theme.mono(15, .bold)).foregroundStyle(Theme.text)
+                    .lineLimit(1)
+                Text(detail)
+                    .font(Theme.mono(12)).foregroundStyle(Theme.muted)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(extra.name), \(detail)")
+        .accessibilityIdentifier("dayAgenda.extra.\(extra.id)")
+    }
+
+    // MARK: user-logged manual activities (Pilates / walk / "lift elsewhere")
+    //
+    // Personal off-plan log — what the user did that wasn't on the schedule
+    // and didn't go through the workout runner. Authored from the app (Log
+    // activity) or MCP, keyed on the user, NOT a group: these render here
+    // regardless of group membership. Distinct from the intervals.icu
+    // actuals below (those are a server-reconciled cache with a frozen
+    // wire contract).
+
+    @ViewBuilder private var loggedActivitiesSection: some View {
+        let logged = sync.manualActivities(on: dateString)
+        if !logged.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: "square.and.pencil")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(Theme.accent)
+                    Text("LOGGED ACTIVITIES")
+                        .font(Theme.mono(11, .bold)).tracking(2)
+                        .foregroundStyle(Theme.muted)
+                }
+                ForEach(logged) { activity in
+                    loggedActivityCard(activity)
+                }
+            }
+        }
+    }
+
+    /// A manual activity row: kind glyph + title, then a compact line of
+    /// duration + kind label, then any notes. Mirrors the visual weight of
+    /// the completed-activity card below without the intervals stats grid.
+    private func loggedActivityCard(_ a: ActivityRow) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: PendingActivity.glyph(for: a.type))
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(Theme.accent)
+                Text((a.title?.isEmpty == false ? a.title! : PendingActivity.label(for: a.type))
+                    .uppercased())
+                    .font(Theme.display(20))
+                    .foregroundStyle(Theme.text)
+            }
+            HStack(spacing: 10) {
+                Text(PendingActivity.label(for: a.type))
+                    .font(Theme.mono(11, .bold)).tracking(1)
+                    .foregroundStyle(Theme.dim)
+                if let mins = a.duration_minutes, mins > 0 {
+                    Text("\(mins) MIN")
+                        .font(Theme.mono(11, .bold)).tracking(1)
+                        .foregroundStyle(Theme.dim)
+                }
+            }
+            if let notes = a.notes, !notes.trimmingCharacters(in: .whitespaces).isEmpty {
+                Text(notes)
+                    .font(Theme.mono(13))
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("dayAgenda.logged." + a.id)
+    }
+
+    // MARK: read-only completed activities (intervals.icu actuals)
+    //
+    // COMPLETED endurance activities (rides/runs) for this date, shown as
+    // "workouts completed" with the same basic stats the intervals.icu app
+    // shows: duration, power, heart rate, distance, elevation, load.
+    // Recorded upstream; the member can only rate how hard one was when
+    // nothing measured scores it (sport-activities P2).
+
+    @ViewBuilder private var completedActivitiesSection: some View {
+        // The run a planned run workout records shows in that record instead.
+        let shownRunID = recordRun?.id
+        let dayActivities = sync.activities(on: dateString)   // non-deleted
+            .filter { $0.id != shownRunID }
+        if !dayActivities.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.seal.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(Theme.accent)
+                    Text("COMPLETED ACTIVITIES")
+                        .font(Theme.mono(11, .bold)).tracking(2)
+                        .foregroundStyle(Theme.muted)
+                }
+                ForEach(dayActivities) { activity in
+                    activityCard(activity)
+                }
+            }
+        }
+    }
+
+    /// A completed activity's title + the intervals.icu basic stats grid,
+    /// and the route map of a run recorded in the app, which can be deleted
+    /// here.
+    private func activityCard(_ a: ExternalActivity) -> some View {
+        WithActivityRoute(activity: a, access: sync.activityRouteAccess) { segments, recordingID, recovery, laps in
+            WithActivityStreams(activity: a, access: sync.activityRouteAccess) { streams in
+                WithActivitySwim(activity: a, access: sync.activityRouteAccess) { swim in
+                    activityCardContent(a, routeSegments: segments,
+                                        recordedRunID: a.recordedRunID(routeRecordingID: recordingID),
+                                        recovery: recovery, laps: laps, streams: streams, swim: swim)
+                }
+            }
+        }
+    }
+
+    private func activityCardContent(_ a: ExternalActivity,
+                                     routeSegments: [[CLLocationCoordinate2D]],
+                                     recordedRunID: String?,
+                                     recovery: HeartRateRecovery?,
+                                     laps: [ActivityLap],
+                                     streams: ActivityStreams?,
+                                     swim: ActivitySwimResponse?) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: a.glyph)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(Theme.accent)
+                Text(a.displayTitle.uppercased())
+                    .font(Theme.display(20))
+                    .foregroundStyle(Theme.text)
+            }
+
+            SourceAttributionLabel(text: a.source_attribution)
+            let stats = activityStats(a) + recoveryStats(recovery)
+            if !stats.isEmpty {
+                LazyVGrid(
+                    columns: [
+                        GridItem(.flexible(), alignment: .leading),
+                        GridItem(.flexible(), alignment: .leading),
+                    ],
+                    alignment: .leading,
+                    spacing: 12
+                ) {
+                    ForEach(stats, id: \.label) { stat in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(stat.label.uppercased())
+                                .font(Theme.mono(9, .bold)).tracking(1)
+                                .foregroundStyle(Theme.dim)
+                            Text(stat.value)
+                                .font(Theme.mono(15, .bold))
+                                .foregroundStyle(Theme.text)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            if let swim {
+                SwimDetailSection(swim: swim, unit: RunDistanceUnit.preferred())
+            }
+            ActivityChartsSection(activity: a, streams: streams, routeSegments: routeSegments)
+            if !laps.isEmpty {
+                RunLapsView(laps: laps, unit: RunDistanceUnit.preferred())
+            }
+            // Every run also gets a split per mile or kilometer, planned
+            // steps or not.
+            ActivitySplitsSection(kind: a.kind, streams: streams, unit: RunDistanceUnit.preferred())
+            if a.offersEffortRating {
+                EffortRatingControl(activity: a) { effort in
+                    await sync.rateActivityEffort(activityID: a.id, effort: effort)
+                }
+            }
+            let reportable = ReportableActivity(a)
+            if reportable != nil || recordedRunID != nil {
+                HStack {
+                    if let reportable {
+                        Button {
+                            reportingActivity = reportable
+                        } label: {
+                            Label("Something wrong?", systemImage: "exclamationmark.bubble")
+                                .font(.footnote)
+                                .frame(minHeight: 44)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Theme.dim)
+                        .accessibilityIdentifier("dayAgenda.reportProblem." + a.id)
+                    }
+                    Spacer(minLength: 0)
+                    // Delete sits behind "…" so a stray tap can't reach it.
+                    if let recordedRunID {
+                        RecordedRunDeleteButton(recordingID: recordedRunID, delete: deleteRecordedRun)
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("dayAgenda.activity." + a.id)
+    }
+
+    /// The heart rate drop after a run recorded with a strap (run-recorder P7).
+    private func recoveryStats(_ recovery: HeartRateRecovery?) -> [(label: String, value: String)] {
+        guard let summary = recovery?.summary else { return [] }
+        return [(label: "HR Recovery", value: summary)]
+    }
+
+    /// The present (non-nil) basic stats, in display order — duration and
+    /// power and heart rate first (what the user explicitly asked for).
+    private func activityStats(_ a: ExternalActivity) -> [(label: String, value: String)] {
+        var out: [(label: String, value: String)] = []
+        if let v = a.durationLabel { out.append((label: "Duration", value: v)) }
+        let unit = RunDistanceUnit.preferred()
+        if let m = a.distance_m, let v = EnduranceProgress.distance(m, kind: a.kind, unit: unit) {
+            out.append((label: "Distance", value: v))
+        }
+        if let v = EnduranceProgress.pace(a, unit: unit) {
+            out.append((label: a.kind == "ride" ? "Speed" : "Pace", value: v))
+        }
+        if let v = a.avgPowerLabel { out.append((label: "Avg Power", value: v)) }
+        if let v = a.normPowerLabel { out.append((label: "Norm Power", value: v)) }
+        if let v = a.hrLabel { out.append((label: "Heart Rate", value: v)) }
+        if let v = a.elevationLabel { out.append((label: "Elevation", value: v)) }
+        if let load = a.shownLoad {
+            out.append((label: a.loadMethodLabel.map { "Load · \($0)" } ?? "Load", value: "\(load)"))
+        }
+        if let v = a.strainLabel { out.append((label: "WHOOP strain", value: v)) }
+        if let v = a.caloriesLabel { out.append((label: "Calories", value: v)) }
+        return out
+    }
+
+    // MARK: read-only ride overlay
+    //
+    // External events (intervals.icu etc.) for this date. READ-ONLY: no
+    // buttons, no actions. When the day is also a lift conflict we show a
+    // single static line — adjustments happen in the Claude app, not here
+    // (mirrors the no-in-app-chat split).
+
+    @ViewBuilder private var ridesSection: some View {
+        let dayRides = sync.rides(on: dateString)   // already non-deleted
+        let conflict = sync.rideConflict(for: dateString)
+        // Render whenever there ARE same-day rides OR a conflict exists.
+        // `.heavyNextDay` is the day BEFORE a hard ride, so `dayRides` is
+        // empty BY DEFINITION (the ride is the next day) — the old
+        // `!dayRides.isEmpty` guard silently hid the warning even though
+        // the calendar cell shows a conflict badge. Now the explanation
+        // always renders when `conflict != .none`.
+        if !dayRides.isEmpty || conflict != .none {
+            VStack(alignment: .leading, spacing: 10) {
+                if !dayRides.isEmpty {
+                    HStack(spacing: 8) {
+                        Image(systemName: "bicycle")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(Theme.muted)
+                        Text("PLANNED RIDES")
+                            .font(Theme.mono(11, .bold)).tracking(2)
+                            .foregroundStyle(Theme.muted)
+                    }
+
+                    ForEach(dayRides) { ride in
+                        rideCard(ride)
+                    }
+                }
+
+                conflictMessage(conflict)
+            }
+        }
+    }
+
+    /// A single ride's title + stats + description card.
+    private func rideCard(_ ride: ExternalEvent) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(ride.displayTitle.uppercased())
+                .font(Theme.display(20))
+                .foregroundStyle(Theme.text)
+
+            // Duration · TSS · IF — only the parts we have.
+            let stats = rideStats(ride)
+            if !stats.isEmpty {
+                Text(stats)
+                    .font(Theme.mono(13, .bold))
+                    .foregroundStyle(Theme.accent)
+            }
+
+            if let d = ride.description, !d.isEmpty {
+                Text(d)
+                    .font(Theme.mono(11))
+                    .foregroundStyle(Theme.dim)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+    }
+
+    /// The hard ride on the NEXT calendar day that triggered a
+    /// `.heavyNextDay` conflict, if it can still be found. Uses the SAME
+    /// frozen civil-date rule + hard-thresholds as `RideConflict` (no
+    /// forked logic) so this names exactly the event the conflict rule
+    /// fired on. nil ⇒ render graceful text, never crash.
+    private var nextDayHardRide: ExternalEvent? {
+        guard let next = RideConflict.nextDateString(after: dateString) else { return nil }
+        return sync.rides(on: next).first(where: RideConflict.isHard)
+    }
+
+    /// Static, read-only conflict explanation (NO action / button —
+    /// adjustments happen in the Claude app, mirroring no-in-app-chat).
+    /// Fixed scheduling heuristic; missing inputs remain visible as unknown.
+    @ViewBuilder private func conflictMessage(_ conflict: RideConflict.Severity) -> some View {
+        if conflict == .clash || conflict == .heavyNextDay || conflict == .unknown {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(Theme.accent)
+                    Text(conflict == .unknown ? "Endurance context incomplete"
+                         : conflict == .heavyNextDay ? "Higher planned endurance load tomorrow"
+                         : "Strength and higher planned endurance load today")
+                        .font(Theme.mono(12, .bold))
+                        .foregroundStyle(Theme.accent)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Text("Scheduling heuristic · planned endurance load ≥150 or duration ≥2h 30m. Missing values are unknown; this does not measure recovery or safety.")
+                    .font(Theme.mono(11)).foregroundStyle(Theme.muted)
+                // Next-day hard ride context (only for .heavyNextDay).
+                if conflict == .heavyNextDay {
+                    if let ride = nextDayHardRide {
+                        let stats = rideStats(ride)
+                        Text(stats.isEmpty
+                             ? "Tomorrow: \(ride.displayTitle)"
+                             : "Tomorrow: \(ride.displayTitle) — \(stats)")
+                            .font(Theme.mono(11, .bold))
+                            .foregroundStyle(Theme.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Text("A planned endurance event meets a scheduling threshold tomorrow.")
+                            .font(Theme.mono(11, .bold))
+                            .foregroundStyle(Theme.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(14)
+            .background(Theme.accent.opacity(0.12))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+    }
+
+    /// "1h 30m  ·  95 TSS  ·  0.78 IF" — omits any missing component.
+    private func rideStats(_ ride: ExternalEvent) -> String {
+        var parts: [String] = []
+        if let dur = ride.durationLabel { parts.append(dur) }
+        if let tss = ride.training_load { parts.append("\(tss) TSS") }
+        if let iff = ride.intensity {
+            parts.append(String(format: "%.2f IF", iff))
+        }
+        return parts.joined(separator: "  ·  ")
+    }
+
+    private func note(_ text: String) -> some View {
+        Text(text)
+            .font(Theme.mono(13))
+            .foregroundStyle(Theme.muted)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(20)
+            .background(Theme.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 14))
+    }
+}

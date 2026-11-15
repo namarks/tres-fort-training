@@ -1,0 +1,515 @@
+import SwiftUI
+import UniformTypeIdentifiers
+
+private struct AccountExportDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.json] }
+
+    let data: Data
+
+    init(data: Data) {
+        self.data = data
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        guard let data = configuration.file.regularFileContents else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        self.data = data
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
+    }
+}
+
+/// Profile — one place to manage your setup: account, the AI coach
+/// connection, integrations and preferences. It opens as a sheet from the
+/// avatar on every tab's bar (`ProfileButton`). Groups live on the Group
+/// tab. Server connection state
+/// comes from GET /api/me; Apple Health reflects the device's local opt-ins.
+struct ProfileView: View {
+    @ObservedObject var groupModel: GroupModel
+    @ObservedObject var auth: AuthModel
+    @ObservedObject var health: HealthKitSyncModel
+    var sync: SyncModel? = nil
+    var runs: RunRecorderModel? = nil
+    /// Closes the sheet Profile opens in.
+    var onDone: (() -> Void)? = nil
+
+    @State private var showTrainingOverview = false
+    @State private var showTrainingProfile = false
+    @State private var showNameEditor = false
+    @State private var accountExportDocument: AccountExportDocument?
+    @State private var accountExportFilename = "tres-fort-account-export.json"
+    @State private var showAccountExporter = false
+    @State private var isExportingAccount = false
+    @State private var showExportError = false
+    @State private var exportErrorMessage = ""
+    @State private var showDeleteConfirmation = false
+    @State private var isDeletingAccount = false
+    @State private var showDeletionError = false
+    @State private var deletionErrorMessage = ""
+    @State private var showCoachDisconnectConfirmation = false
+    @State private var isDisconnectingCoach = false
+    @State private var coachDisconnectMessage: String?
+    @State private var testMemberBuild = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                accountSection
+                if !auth.isReviewAccount {
+                Section("Your training") {
+                    Button("Training profile") { showTrainingProfile = true }
+                        .accessibilityIdentifier("profile.trainingProfile")
+                    NavigationLink {
+                        AthleteThresholdsView(auth: auth)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Training thresholds")
+                            Text("FTP, threshold heart rate and pace, used to score runs and rides.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                    .accessibilityIdentifier("profile.thresholds")
+                    NavigationLink {
+                        FitImportView(auth: auth)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Import workout files")
+                            Text("Add rides and runs from .fit files, with their training load.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                    .accessibilityIdentifier("profile.fitImport")
+                }
+                }
+                if auth.isReviewAccount {
+                    Section("Shared sample account") {
+                        Text("Use sample data only. Workouts, history, export, and deletion work in this account. Sign out and use Sign in with Apple for personal connections, AI coaching, and groups.")
+                    }
+                } else {
+                coachSection
+                integrationsSection
+                // Joining, creating and switching groups live on the Group tab.
+                Section {
+                    NavigationLink("Group safety") { GroupSafetyView(model: groupModel) }
+                }
+                }
+                PreferencesSection(sync: sync, runs: runs)
+                if let userID = auth.userID {
+                    WorkoutReminderSettingsSection(userID: userID)
+                }
+                Section("Help") {
+                    if let sync {
+                        NavigationLink {
+                            ReportProblemView(sync: sync)
+                        } label: {
+                            Label("Report a problem", systemImage: "exclamationmark.bubble")
+                        }
+                        .accessibilityIdentifier("profile.reportProblem")
+                    }
+                    Link("Email support", destination: AppInformation.supportURL)
+                }
+                Section("About Très Fort") {
+                    PrivacyPolicyLink()
+                }
+            }
+            .navigationTitle("Profile")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                if let onDone {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done", action: onDone)
+                            .accessibilityIdentifier("profile.done")
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $showTrainingProfile) {
+            TrainingSetupView(auth: auth) { showTrainingProfile = false }
+        }
+        .sheet(isPresented: $showTrainingOverview) {
+            if let sync { CoachingContextView(sync: sync) }
+        }
+        .sheet(isPresented: $showNameEditor) {
+            EditDisplayNameSheet(
+                initialName: groupModel.me?.display_name ?? "",
+                onSave: { try await groupModel.updateDisplayName($0) })
+        }
+        .alert(
+            "Permanently delete your account?",
+            isPresented: $showDeleteConfirmation
+        ) {
+            Button("Delete Account", role: .destructive) {
+                Task { await deleteConfirmedAccount() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This permanently deletes your training plan, workout history, connected-service credentials, AI connection tokens, and group memberships. Groups with other members will continue under another member. This cannot be undone.")
+        }
+        .alert("Account wasn’t deleted", isPresented: $showDeletionError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(deletionErrorMessage)
+        }
+        .alert("Account data wasn’t downloaded", isPresented: $showExportError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(exportErrorMessage)
+        }
+        .confirmationDialog(
+            "Disconnect all AI apps?",
+            isPresented: $showCoachDisconnectConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Disconnect all AI apps", role: .destructive) {
+                Task { await disconnectCoach() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This revokes access for all AI apps connected to your account. Your workouts and plan stay in Très Fort.")
+        }
+        .alert(
+            "Coach connection",
+            isPresented: Binding(
+                get: { coachDisconnectMessage != nil },
+                set: { if !$0 { coachDisconnectMessage = nil } })
+        ) {
+            Button("OK", role: .cancel) { coachDisconnectMessage = nil }
+        } message: {
+            Text(coachDisconnectMessage ?? "")
+        }
+        .fileExporter(
+            isPresented: $showAccountExporter,
+            document: accountExportDocument,
+            contentType: .json,
+            defaultFilename: accountExportFilename
+        ) { result in
+            if case let .failure(error) = result {
+                exportErrorMessage = error.localizedDescription
+                showExportError = true
+            }
+            accountExportDocument = nil
+        }
+        .task {
+            // Loads groups if Profile is opened before the Group tab;
+            // load() also refreshes `me`. Otherwise just refresh the snapshot.
+            if groupModel.groups.isEmpty {
+                await groupModel.load()
+            } else {
+                await groupModel.refreshMe()
+            }
+        }
+        .refreshable { await groupModel.load() }
+    }
+
+    // MARK: - Account
+
+    private var accountSection: some View {
+        Section {
+            Button { showNameEditor = true } label: {
+                HStack {
+                    Text(groupModel.me?.display_name.flatMap { $0.isEmpty ? nil : $0 }
+                         ?? "Set your name")
+                        .foregroundStyle(Theme.text)
+                    Spacer()
+                    Text("Edit name").foregroundStyle(Theme.accent)
+                }
+                .frame(minHeight: 44).contentShape(Rectangle())
+            }
+            .accessibilityIdentifier("profile.editName")
+            NavigationLink {
+                accountSettings
+            } label: {
+                Label("Account", systemImage: "person.crop.circle")
+            }
+            .accessibilityIdentifier("profile.account")
+        }
+    }
+
+    private var accountSettings: some View {
+        Form {
+            if let email = groupModel.me?.email, !email.isEmpty {
+                Section { LabeledContent("Apple ID", value: email) }
+            }
+            Section {
+                Button {
+                    Task { await downloadAccountData() }
+                } label: {
+                    if isExportingAccount {
+                        HStack {
+                            ProgressView().controlSize(.small)
+                            Text("Preparing account data…")
+                        }
+                    } else {
+                        Label("Download account data", systemImage: "square.and.arrow.down")
+                    }
+                }
+                .disabled(isExportingAccount || isDeletingAccount || auth.accountDeletionPending)
+            } footer: {
+                Text("Saves a JSON file containing your profile and training data. It excludes credentials, access tokens, invite codes, and other members’ private data.")
+            }
+            if auth.isTestMember {
+                Section {
+                    Button("Back to my account") {
+                        Task { await auth.endTestMember() }
+                    }
+                    .disabled(auth.isSwitchingTestMember)
+                    .accessibilityIdentifier("profile.endTestMember")
+                } footer: {
+                    Text("Deletes this test account and everything in it, then returns you to your own account.")
+                }
+            } else {
+            if testMemberBuild, groupModel.me?.coach.is_owner == true {
+                Section {
+                    Button {
+                        Task { await auth.startTestMember() }
+                    } label: {
+                        if auth.isSwitchingTestMember {
+                            HStack {
+                                ProgressView().controlSize(.small)
+                                Text("Creating test account…")
+                            }
+                        } else {
+                            Text("Try setup as a new member")
+                        }
+                    }
+                    .disabled(auth.isSwitchingTestMember || isDeletingAccount || auth.accountDeletionPending)
+                    .accessibilityIdentifier("profile.startTestMember")
+                } header: {
+                    Text("TestFlight")
+                } footer: {
+                    Text("Switches to a new, empty test account so you can go through setup like a new member. Your own account and data stay as they are. Back to my account deletes the test account. Only you see this, and only in TestFlight builds.")
+                }
+            }
+            Section {
+                Button(role: .destructive) { Task { await auth.signOutOnServer() } } label: {
+                    Text(auth.signingOut ? "Signing out…" : "Sign out")
+                }
+                .disabled(isDeletingAccount || auth.accountDeletionPending || auth.signingOut)
+                if let error = auth.signOutError { Text(error).foregroundStyle(.red) }
+                Button(role: .destructive) {
+                    showDeleteConfirmation = true
+                } label: {
+                    if isDeletingAccount {
+                        HStack {
+                            ProgressView().controlSize(.small)
+                            Text("Deleting account…")
+                        }
+                    } else {
+                        Text(auth.accountDeletionPending
+                             ? "Retry account deletion"
+                             : "Delete account")
+                    }
+                }
+                .disabled(isDeletingAccount)
+            }
+            }
+            if let message = auth.testMemberError {
+                Section { Text(message).foregroundStyle(.secondary) }
+            }
+        }
+        .task { testMemberBuild = await TestMemberAvailability.isAvailableInThisBuild() }
+        .navigationTitle("Account")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func downloadAccountData() async {
+        guard !isExportingAccount else { return }
+        isExportingAccount = true
+        defer { isExportingAccount = false }
+        do {
+            let file = try await auth.downloadAccountExport()
+            accountExportDocument = AccountExportDocument(data: file.data)
+            accountExportFilename = file.filename
+            showAccountExporter = true
+        } catch {
+            exportErrorMessage = error.localizedDescription
+            showExportError = true
+        }
+    }
+
+    private func deleteConfirmedAccount() async {
+        guard !isDeletingAccount else { return }
+        isDeletingAccount = true
+        defer { isDeletingAccount = false }
+        do {
+            try await auth.deleteAccount()
+        } catch {
+            deletionErrorMessage = error.localizedDescription
+            showDeletionError = true
+        }
+    }
+
+    // MARK: - Coach
+
+    @ViewBuilder
+    private var coachSection: some View {
+        Section {
+            if sync != nil {
+                Button {
+                    showTrainingOverview = true
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Training overview")
+                        Text("Recorded training and plan settings your coach can read.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                }
+                .accessibilityIdentifier("profile.trainingOverview")
+            }
+            if groupModel.me?.coach.connected == true {
+                HStack(spacing: 10) {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Connected").font(.headline)
+                        if let t = groupModel.me?.coach.last_active {
+                            Text("Last active \(RelativeTimeFormat.short(epochMs: t))")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                Text("Ask your connected AI app to review your training, explain your numbers, or adjust your plan. Your plan and workout history stay in Très Fort.")
+                    .font(.footnote).foregroundStyle(.secondary)
+                Button("Disconnect all AI apps", role: .destructive) {
+                    showCoachDisconnectConfirmation = true
+                }
+                .disabled(isDisconnectingCoach)
+                Button("Connect another AI app") { auth.requestEntry(.coach) }
+            } else {
+                Button {
+                    auth.requestEntry(.coach)
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "brain.head.profile").foregroundStyle(Theme.accent)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Set up your AI coach").font(.headline)
+                            Text("Your coach works with your own training plan, whether you train independently or in a group.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                // An approved code may not have reached its AI app yet, or
+                // the profile refresh may be stale after an uncertain write.
+                // Revocation must remain reachable without an active grant.
+                DisclosureGroup("Manage AI access") {
+                    Text("Cancel unfinished approvals or disconnect AI apps. Your training data stays in Très Fort.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Button("Disconnect all AI apps", role: .destructive) {
+                        showCoachDisconnectConfirmation = true
+                    }
+                    .disabled(isDisconnectingCoach)
+                }
+                .accessibilityIdentifier("coach.manageAccess")
+            }
+        } header: {
+            Text("Coach")
+        }
+    }
+
+    private func disconnectCoach() async {
+        guard !isDisconnectingCoach else { return }
+        isDisconnectingCoach = true
+        defer { isDisconnectingCoach = false }
+        do {
+            let refreshed = try await groupModel.disconnectCoach()
+            if !refreshed {
+                coachDisconnectMessage = "All AI apps were disconnected. The latest profile status couldn’t be refreshed; pull to refresh when you’re online."
+            }
+        } catch {
+            coachDisconnectMessage = "AI apps weren’t disconnected: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - Integrations
+
+    private var integrationsSection: some View {
+        Section("Integrations") {
+            NavigationLink {
+                ConnectionsView(groupModel: groupModel, health: health, auth: auth)
+            } label: {
+                ProfileConnectionsLabel()
+            }
+            .accessibilityIdentifier("profile.connections")
+        }
+    }
+}
+
+/// Discovery stays accurate for every provider; live status is on its source row.
+private struct ProfileConnectionsLabel: View {
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "link").foregroundStyle(Theme.muted)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Connections")
+                Text("Apple Health, Garmin Connect, intervals.icu and WHOOP")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
+private struct EditDisplayNameSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var displayName: String
+    @State private var isSaving = false
+    @State private var errorMessage: String?
+    let onSave: (String) async throws -> Void
+
+    init(
+        initialName: String,
+        onSave: @escaping (String) async throws -> Void
+    ) {
+        _displayName = State(initialValue: initialName)
+        self.onSave = onSave
+    }
+
+    private var trimmedName: String {
+        displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                TextField("Display name", text: $displayName)
+                    .textContentType(.name)
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+            }
+            .navigationTitle("Edit Name")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                        .disabled(isSaving)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(isSaving ? "Saving…" : "Save") {
+                        Task { await save() }
+                    }
+                    .disabled(
+                        isSaving || trimmedName.isEmpty || trimmedName.utf16.count > 80)
+                }
+            }
+        }
+    }
+
+    private func save() async {
+        guard !isSaving else { return }
+        isSaving = true
+        errorMessage = nil
+        do {
+            try await onSave(trimmedName)
+            dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
+            isSaving = false
+        }
+    }
+}

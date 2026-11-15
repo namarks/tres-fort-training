@@ -1,0 +1,149 @@
+import XCTest
+
+final class StationJourneyTests: XCTestCase {
+    override func setUpWithError() throws {
+        continueAfterFailure = false
+        #if APP_STORE_BUILD
+        throw XCTSkip("Movement tracking is exercised in the beta variant; PublicStationJourneyTests covers manual Station.")
+        #endif
+        try XCTSkipIf(UIDevice.current.userInterfaceIdiom != .pad, "Station Mode is an iPad surface")
+    }
+
+    override func tearDownWithError() throws {
+        XCUIDevice.shared.orientation = .portrait
+        if (testRun?.failureCount ?? 0) > 0 { print(XCUIApplication().debugDescription) }
+    }
+
+    private func launch(largeText: Bool = false) -> XCUIApplication {
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let app = XCUIApplication()
+        app.launchEnvironment["TRESFORT_UI_FIXTURE"] = "app-store"
+        if largeText { app.launchEnvironment["TRESFORT_UI_LARGE_TEXT"] = "1" }
+        app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US",
+                               "-restAudioCuesEnabled", "NO"]
+        app.launch()
+        XCTAssertTrue(app.buttons["today.station"].waitForExistence(timeout: UITestWait.screen))
+        return app
+    }
+
+    func testLandscapeSetupIsOptInAndDoesNotStartWorkout() {
+        let app = launch()
+        let enable = app.buttons["station.enableCamera"]
+        app.buttons["today.station"].tap(until: enable)
+        XCTAssertTrue(enable.isHittable)
+        XCTAssertLessThanOrEqual(enable.frame.maxY, app.frame.maxY)
+        XCTAssertFalse(app.buttons["station.trial"].isEnabled)
+        XCTAssertEqual(app.staticTexts["station.repCount"].label, "MediaPipe: 0 reps")
+        XCTAssertFalse(app.staticTexts["station.appleCount"].exists)
+        XCTAssertTrue(app.staticTexts["station.trialNotice"].exists)
+        app.buttons["station.exercise.curl"].tap()
+        XCTAssertEqual(app.staticTexts["station.movement"].label, "CURL")
+        XCTAssertEqual(app.staticTexts["station.leftRepCount"].label, "Left arm: 0 reps")
+        XCTAssertEqual(app.staticTexts["station.rightRepCount"].label, "Right arm: 0 reps")
+        XCTAssertFalse(app.staticTexts["station.repCount"].exists)
+        app.buttons["station.exercise.benchPress"].tap()
+        XCTAssertEqual(app.staticTexts["station.movement"].label, "BENCH PRESS")
+        XCTAssertFalse(app.staticTexts["station.leftRepCount"].exists)
+        capture("ipad-station-landscape-setup")
+        app.buttons["station.done"].tap(until: app.buttons["today.startWorkout"])
+        XCTAssertFalse(app.buttons["LOG SET 1"].exists)
+    }
+
+    func testCameraUnavailableCanExitWithoutLoggingASet() {
+        let app = launch()
+        // Station has its own observation/link lifetime and must be entered
+        // before this iPad acquires a local workout writer.
+        let enable = app.buttons["station.enableCamera"]
+        app.buttons["today.station"].tap(until: enable)
+        enable.tap()
+        let status = app.staticTexts["station.cameraStatus"]
+        let unavailable = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "A front camera is not available on this device."), object: status)
+        XCTAssertEqual(XCTWaiter.wait(for: [unavailable], timeout: UITestWait.screen), .completed)
+        XCTAssertTrue(app.buttons["station.enableCamera"].isEnabled)
+        XCTAssertFalse(app.buttons["station.trial"].isEnabled)
+        XCTAssertEqual(app.staticTexts["station.repCount"].label, "MediaPipe: 0 reps")
+        let start = app.buttons["today.startWorkout"]
+        app.buttons["station.done"].tap(until: start)
+        XCTAssertFalse(app.buttons["LOG SET 1"].exists, "Camera setup must not start a workout")
+        for _ in 0..<6 where !start.isHittable { app.scrollViews.firstMatch.swipeUp() }
+        start.tapWhenReady()
+        XCTAssertTrue(app.buttons["LOG SET 1"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertFalse(app.buttons["LOG SET 2"].exists)
+        XCTAssertFalse(app.buttons["today.station"].isEnabled,
+                       "A local iPad workout cannot also enter the linked Station")
+    }
+
+    func testRotationAndLargeTextKeepSetupAndExitReachable() {
+        let app = launch(largeText: true)
+        app.buttons["today.station"].tap(until: app.buttons["station.done"])
+        XCTAssertTrue(app.buttons["station.done"].isHittable)
+        let bench = app.buttons["station.exercise.benchPress"]
+        for _ in 0..<6 where !bench.isHittable { app.scrollViews.firstMatch.swipeUp() }
+        XCTAssertTrue(bench.isHittable)
+        bench.tap()
+        // At an accessibility size the landscape layout stacks the counter
+        // before the camera, rather than retaining the two-column layout.
+        let reps = app.staticTexts["station.repCount"]
+        let enable = app.buttons["station.enableCamera"]
+        for _ in 0..<8 where !enable.isHittable { app.scrollViews.firstMatch.swipeUp() }
+        XCTAssertLessThan(reps.frame.minY, enable.frame.minY)
+        XCUIDevice.shared.orientation = .portrait
+        for _ in 0..<8 where !enable.isHittable { app.scrollViews.firstMatch.swipeUp() }
+        XCTAssertTrue(enable.isHittable)
+        capture("ipad-station-accessibility-portrait")
+        XCTAssertTrue(app.buttons["station.done"].isHittable)
+        app.buttons["station.done"].tap(until: app.buttons["today.station"])
+    }
+
+    func testSavedTestsAreReachableWithoutCameraOrWorkoutWrites() {
+        let app = launch()
+        app.buttons["today.station"].tap(until: app.buttons["station.done"])
+        let record = app.buttons["station.recordTest"]
+        let saved = app.buttons["station.savedTests"]
+        for _ in 0..<8 where !saved.isHittable { app.scrollViews.firstMatch.swipeUp() }
+        XCTAssertTrue(record.exists)
+        XCTAssertFalse(record.isEnabled)
+        XCTAssertTrue(saved.isHittable)
+        saved.tap(until: app.navigationBars["Saved tests"])
+        XCTAssertTrue(app.staticTexts["No saved tests"].exists)
+        app.navigationBars["Saved tests"].buttons["Done"].tap()
+        app.buttons["station.done"].tap(until: app.buttons["today.startWorkout"])
+        XCTAssertFalse(app.buttons["LOG SET 1"].exists)
+    }
+
+    func testHoldSetupAndUnknownCatalogExerciseStayObservationOnly() {
+        let app = launch()
+        let plank = app.buttons["station.exercise.plank"]
+        app.buttons["today.station"].tap(until: plank)
+        plank.tap()
+        XCTAssertEqual(app.staticTexts["station.holdRemaining"].label, "30 seconds remaining")
+        XCTAssertFalse(app.buttons["station.holdTrial"].isEnabled)
+        XCTAssertFalse(app.staticTexts["station.repCount"].exists)
+        XCTAssertFalse(app.buttons["station.recordTest"].exists)
+        app.buttons["station.holdTarget-Increment"].tap()
+        XCTAssertEqual(app.staticTexts["station.holdRemaining"].label, "35 seconds remaining")
+        plank.tap()
+        XCTAssertEqual(app.staticTexts["station.holdRemaining"].label, "30 seconds remaining")
+        capture("ipad-station-hold-setup")
+        app.buttons["station.exercise.wallSit"].tap()
+        XCTAssertEqual(app.staticTexts["station.movement"].label, "WALL SIT")
+        app.buttons["station.catalog"].tap()
+        let unknown = app.buttons["station.catalog.a-squat"]
+        XCTAssertTrue(unknown.waitForExistence(timeout: UITestWait.screen))
+        unknown.tap()
+        XCTAssertEqual(app.staticTexts["station.catalogStatus"].label, "Manual tracking")
+        XCTAssertFalse(app.buttons["station.enableCamera"].exists)
+        XCTAssertFalse(app.buttons["station.holdTrial"].exists)
+        XCTAssertFalse(app.buttons["station.trial"].exists)
+        app.buttons["station.done"].tap(until: app.buttons["today.startWorkout"])
+        XCTAssertFalse(app.buttons["LOG SET 1"].exists)
+    }
+
+    private func capture(_ name: String) {
+        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+}

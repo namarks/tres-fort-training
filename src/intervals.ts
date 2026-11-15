@@ -1,0 +1,821 @@
+// intervals.icu I/O — the ONLY place this backend talks to intervals.icu.
+//
+// Behind an injectable `fetcher` so tests never hit the network
+// (vitest-pool-workers is offline). The cycling-awareness feature is
+// DORMANT when no API key/athlete id is supplied: each function returns a
+// clean {ok:false, reason:'disabled'} with no network call and no throw.
+//
+// CREDENTIALS — M1 change. Per-user creds (multi-user backend foundation).
+// These functions used to read INTERVALS_ICU_API_KEY/ATHLETE_ID off `env`
+// directly; they now take the pair explicitly so callers in db.ts can
+// loop per-user (each user owns their own intervals.icu credentials in
+// the `users` row — see migrations/0016_user_intervals_creds.sql). Env
+// lookup is intentionally OUT of this module — pure I/O on injected creds.
+import type { CompletedActivity, PlannedEvent } from './types';
+import { activityInstant } from './activityTime';
+import { sportForIntervalsType } from './sports';
+
+/** Minimal fetch signature we depend on (URL or string + RequestInit). */
+export type Fetcher = (
+  input: string,
+  init?: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string | FormData;
+    signal?: AbortSignal;
+  },
+) => Promise<{
+  ok: boolean;
+  status: number;
+  json: () => Promise<unknown>;
+  headers?: { get: (name: string) => string | null };
+}>;
+
+export interface FetchDeps {
+  /** Defaults to global fetch. Stubbed in tests so the suite is offline. */
+  fetcher?: Fetcher;
+  /** Device-local "today" YYYY-MM-DD. Defaults to the worker clock. */
+  today?: string;
+  /** Window width in days (inclusive of today). Defaults to 90. */
+  windowDays?: number;
+  /** Per-request timeout in ms (default 10s). */
+  timeoutMs?: number;
+  /**
+   * OAuth bearer access token. When present it takes precedence over the
+   * `apiKey` (Basic) argument — the request uses `Authorization: Bearer`.
+   * Lets the same fetchers serve both the legacy per-user API-key path and
+   * the OAuth path without changing their call signatures.
+   */
+  accessToken?: string | null;
+}
+
+export type FetchResult =
+  | { ok: true; events: PlannedEvent[] }
+  | {
+      ok: false;
+      reason: 'disabled' | 'http' | 'timeout' | 'parse';
+      status?: number;
+      retryAfterMs?: number;
+    };
+
+const DAY_MS = 86_400_000;
+
+/** Parse the HTTP Retry-After delay-seconds or HTTP-date forms. */
+function retryAfterMs(
+  headers: { get: (name: string) => string | null } | undefined,
+): number | undefined {
+  const value = headers?.get('Retry-After')?.trim();
+  if (!value) return undefined;
+  if (/^\d+$/.test(value)) {
+    const milliseconds = Number(value) * 1000;
+    return Number.isFinite(milliseconds) ? milliseconds : undefined;
+  }
+  const at = Date.parse(value);
+  if (!Number.isFinite(at)) return undefined;
+  return Math.max(0, at - Date.now());
+}
+
+function todayLocal(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/** Add n days to a YYYY-MM-DD via UTC math on the civil date (no DST risk:
+ *  we only ever shift whole days and slice the date part back out). */
+function addDays(ymd: string, n: number): string {
+  const t = Date.parse(`${ymd}T00:00:00Z`);
+  return new Date(t + n * DAY_MS).toISOString().slice(0, 10);
+}
+
+/**
+ * Map an intervals.icu `type` to our coarse kind. intervals uses values
+ * like "Ride","VirtualRide","Run","TrailRun","Swim","OpenWaterSwim",
+ * "Walk","Hike","Rowing","Elliptical","AlpineSki","Yoga","Workout",
+ * "WeightTraining", ... We match on substrings so the many intervals
+ * spelling variants collapse to a handful of kinds the clients have
+ * glyphs for; anything we don't recognise still falls through to 'other'.
+ * NOTE: on the EVENTS path "WeightTraining" never reaches here —
+ * isTresFortExport() filters it upstream — but on the ACTIVITIES path only
+ * our marker-stamped exports are filtered (isOwnExportMarker), so a
+ * member's genuine "WeightTraining"/"Strength"/"WeightLifting" lands on the
+ * 'strength' branch. Keep the kinds emitted here in sync with the glyph maps
+ * in ios FeedItemRow.rideGlyph and Models.ExternalActivity.glyph.
+ */
+function kindOf(type: unknown): string {
+  const t = String(type ?? '').toLowerCase();
+  if (t.includes('ride') || t.includes('bike') || t.includes('cycl')) return 'ride';
+  if (t.includes('run')) return 'run';
+  if (t.includes('swim')) return 'swim';
+  if (t.includes('walk')) return 'walk';
+  if (t.includes('hik')) return 'hike'; // matches "Hike" and the alias "Hiking"
+  if (t.includes('row')) return 'row';
+  if (t.includes('ski')) return 'ski';
+  if (t.includes('yoga')) return 'yoga';
+  if (t.includes('elliptical')) return 'elliptical';
+  if (t.includes('weight') || t.includes('strength')) return 'strength';
+  return 'other';
+}
+
+function num(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+/**
+ * Validate an intervals.icu `start_date_local` civil timestamp and map it to
+ * the epoch-ms ordering key used by the group feed. `Date.parse` alone is not
+ * sufficient because JavaScript normalises impossible dates (for example,
+ * February 30) instead of rejecting them. Fractional seconds are accepted,
+ * but timezone suffixes are not: this provider field is explicitly local.
+ */
+function parseCivilTimestamp(v: unknown): { value: string; ms: number } | null {
+  if (typeof v !== 'string') return null;
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?$/.exec(v);
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const millisecond = Number((match[7] ?? '').padEnd(3, '0'));
+  const parsed = new Date(0);
+  parsed.setUTCFullYear(year, month - 1, day);
+  parsed.setUTCHours(hour, minute, second, millisecond);
+  if (
+    parsed.getUTCFullYear() !== year ||
+    parsed.getUTCMonth() !== month - 1 ||
+    parsed.getUTCDate() !== day ||
+    parsed.getUTCHours() !== hour ||
+    parsed.getUTCMinutes() !== minute ||
+    parsed.getUTCSeconds() !== second ||
+    parsed.getUTCMilliseconds() !== millisecond
+  ) {
+    return null;
+  }
+  return { value: v, ms: parsed.getTime() };
+}
+
+/** Provider ids are JSON scalars, but booleans and blank strings are not ids. */
+function providerId(v: unknown): string | null {
+  if (typeof v === 'string') return v.trim().length > 0 ? v : null;
+  return typeof v === 'number' && Number.isFinite(v) ? String(v) : null;
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+function str(v: unknown): string | null {
+  return typeof v === 'string' && v.length > 0 ? v : null;
+}
+
+/**
+ * Resolve the `Authorization` header value for an intervals.icu request.
+ * Prefers OAuth (`Bearer <token>`) when an access token is supplied; falls
+ * back to the legacy HTTP Basic scheme (username "API_KEY", password = the
+ * key → base64("API_KEY:" + key)). Returns null when neither credential is
+ * present — callers treat that as the dormant "disabled" no-op (no fetch).
+ */
+function intervalsAuthHeader(
+  apiKey: string | null | undefined,
+  accessToken: string | null | undefined,
+): string | null {
+  if (accessToken) return `Bearer ${accessToken}`;
+  if (apiKey) return `Basic ${btoa(`API_KEY:${apiKey}`)}`;
+  return null;
+}
+
+/** A raw intervals.icu array response, or the failure arm both read paths
+ *  share. The reason strings are the caller-visible contract — keep them. */
+type IntervalsArrayResult =
+  | { ok: true; body: unknown[] }
+  | {
+      ok: false;
+      reason: 'disabled' | 'http' | 'timeout' | 'parse';
+      status?: number;
+      retryAfterMs?: number;
+    };
+
+/**
+ * GET one intervals.icu JSON array. Everything the planned-event and
+ * completed-activity readers do identically — timeout-bounded fetch, HTTP
+ * and parse classification — lives here; each caller keeps its own URL,
+ * dormant-credential guard and per-item mapping.
+ */
+async function fetchIntervalsArray(
+  url: string,
+  authHeader: string,
+  deps: { fetcher?: Fetcher; timeoutMs?: number },
+): Promise<IntervalsArrayResult> {
+  const fetcher = deps.fetcher ?? (globalThis.fetch as unknown as Fetcher);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), deps.timeoutMs ?? 10_000);
+  let res: {
+    ok: boolean;
+    status: number;
+    json: () => Promise<unknown>;
+    headers?: { get: (name: string) => string | null };
+  };
+  try {
+    res = await fetcher(url, {
+      method: 'GET',
+      headers: { Authorization: authHeader, Accept: 'application/json' },
+      signal: controller.signal,
+    });
+  } catch {
+    // AbortError (timeout) or any network error — leave caller to NOT touch
+    // the cache. Indistinguishable cases all collapse to a no-op signal.
+    return { ok: false, reason: 'timeout' };
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!res.ok) {
+    const retryAfter = res.status === 429 ? retryAfterMs(res.headers) : undefined;
+    return {
+      ok: false,
+      reason: 'http',
+      status: res.status,
+      ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}),
+    };
+  }
+
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    return { ok: false, reason: 'parse' };
+  }
+  if (!Array.isArray(body)) return { ok: false, reason: 'parse' };
+  return { ok: true, body };
+}
+
+/**
+ * GET intervals.icu planned events in [today, today+windowDays]. Returns a
+ * discriminated result:
+ *   - {ok:true, events}     on 2xx + parseable body
+ *   - {ok:false, reason}    on disabled / non-2xx / timeout / parse-error
+ *
+ * Only `category == "WORKOUT"` rows are kept. `date` is the intervals
+ * `start_date_local` date part VERBATIM — no timezone math (the contract).
+ */
+export async function fetchPlannedEvents(
+  apiKey: string | null | undefined,
+  athleteId: string | null | undefined,
+  deps: FetchDeps = {},
+): Promise<FetchResult> {
+  // Dormant when unconfigured: a clean no-op, never an error/throw. Auth is
+  // OAuth Bearer when a token is supplied, else HTTP Basic with the API key.
+  const authHeader = intervalsAuthHeader(apiKey, deps.accessToken);
+  if (!authHeader || !athleteId) return { ok: false, reason: 'disabled' };
+
+  const today = deps.today ?? todayLocal();
+  const windowDays = deps.windowDays ?? 90;
+  const newest = addDays(today, windowDays);
+  const url =
+    `https://intervals.icu/api/v1/athlete/${encodeURIComponent(athleteId)}` +
+    `/events?oldest=${today}&newest=${newest}`;
+
+  const fetched = await fetchIntervalsArray(url, authHeader, deps);
+  if (!fetched.ok) return fetched;
+
+  const events: PlannedEvent[] = [];
+  for (const item of fetched.body) {
+    // A non-record cannot be safely classified as a deliberately ignored
+    // provider row, so fail the complete response closed before D1 mutation.
+    if (!isRecord(item)) return { ok: false, reason: 'parse' };
+    const raw = item;
+    // Category is the discriminator that makes a row intentionally
+    // irrelevant. Missing, non-string, or blank values cannot be safely
+    // classified as non-workouts: accepting the rest of the response could
+    // tombstone cached events omitted by provider schema drift.
+    if (typeof raw.category !== 'string' || raw.category.trim().length === 0) {
+      return { ok: false, reason: 'parse' };
+    }
+    if (raw.category !== 'WORKOUT') continue;
+    // Never ingest a (now-legacy) Tres Fort lift export back into the
+    // endurance cache. The one-way load export was removed, but WeightTraining
+    // events it wrote previously may still exist in a user's intervals.icu
+    // account; keeping them out of `external_events` keeps it endurance-only
+    // and avoids detectConflicts flagging a lift day against its own old event.
+    if (isTresFortExport(raw)) continue;
+    const externalId = providerId(raw.id);
+    const startLocal = parseCivilTimestamp(raw.start_date_local);
+    if (externalId === null || startLocal === null) return { ok: false, reason: 'parse' };
+    events.push({
+      external_id: externalId,
+      date: startLocal.value.slice(0, 10), // verbatim civil date, no tz math
+      // start_date_local is "YYYY-MM-DDTHH:MM:SS" (civil time, no zone).
+      // Parse as UTC for an order-stable numeric — across users in different
+      // tzs, two events at the same civil time get the same numeric key,
+      // which is the correct ordering for a "what happened on each day"
+      // feed. The full response fails closed if the timestamp is malformed.
+      start_date_local_ms: startLocal.ms,
+      kind: kindOf(raw.type),
+      title: str(raw.name),
+      description: str(raw.description),
+      // intervals planned duration is `moving_time` (seconds).
+      planned_duration_sec: num(raw.moving_time),
+      // planned TSS is `icu_training_load`.
+      training_load: num(raw.icu_training_load),
+      intensity: num(raw.icu_intensity),
+      raw: JSON.stringify(raw),
+    });
+  }
+  return { ok: true, events };
+}
+
+// ---- READ path: completed activities (the intervals.icu actuals) -------
+//
+// Mirror of fetchPlannedEvents but against the /activities feed — the
+// RECORDED, COMPLETED activities (rides/runs) the intervals.icu app shows,
+// carrying actual duration/power/HR/distance/TSS. Same discipline:
+// injectable fetcher (offline in tests), dormant no-op when unconfigured,
+// discriminated result. Window looks BACKWARD: [today-pastDays, today].
+
+export interface ActivityFetchDeps {
+  /** Defaults to global fetch. Stubbed in tests so the suite is offline. */
+  fetcher?: Fetcher;
+  /** Device-local "today" YYYY-MM-DD. Defaults to the worker clock. */
+  today?: string;
+  /** How many days back from today to pull (inclusive). Defaults to 90. */
+  pastDays?: number;
+  /** Per-request timeout in ms (default 10s). */
+  timeoutMs?: number;
+  /** OAuth bearer access token — see FetchDeps.accessToken. */
+  accessToken?: string | null;
+}
+
+export type ActivityFetchResult =
+  | { ok: true; activities: CompletedActivity[] }
+  | {
+      ok: false;
+      reason: 'disabled' | 'http' | 'timeout' | 'parse';
+      status?: number;
+      retryAfterMs?: number;
+    };
+
+/**
+ * GET intervals.icu completed activities in [today-pastDays, today]. Returns
+ * the same discriminated result shape as fetchPlannedEvents. Only our own
+ * marker-stamped exports are skipped (isOwnExportMarker) — a member's
+ * genuine recorded strength (`WeightTraining`) is KEPT and classified, since
+ * this cache feeds display only. `date` is the `start_date_local` date part
+ * VERBATIM — no timezone math (the contract).
+ */
+export async function fetchCompletedActivities(
+  apiKey: string | null | undefined,
+  athleteId: string | null | undefined,
+  deps: ActivityFetchDeps = {},
+): Promise<ActivityFetchResult> {
+  // Dormant when unconfigured: a clean no-op, never an error/throw. Auth is
+  // OAuth Bearer when a token is supplied, else HTTP Basic with the API key.
+  const authHeader = intervalsAuthHeader(apiKey, deps.accessToken);
+  if (!authHeader || !athleteId) return { ok: false, reason: 'disabled' };
+
+  const today = deps.today ?? todayLocal();
+  const pastDays = deps.pastDays ?? 90;
+  const oldest = addDays(today, -pastDays);
+  const url =
+    `https://intervals.icu/api/v1/athlete/${encodeURIComponent(athleteId)}` +
+    `/activities?oldest=${oldest}&newest=${today}`;
+
+  const fetched = await fetchIntervalsArray(url, authHeader, deps);
+  if (!fetched.ok) return fetched;
+
+  const activities: CompletedActivity[] = [];
+  for (const item of fetched.body) {
+    // Completed-feed rows have no category filter, so every unmarked record
+    // is relevant. Non-records fail the complete response closed as well.
+    if (!isRecord(item)) return { ok: false, reason: 'parse' };
+    const raw = item;
+    // Skip ONLY our own marker-stamped exports — NOT every WeightTraining
+    // row. Unlike the planned-event path, dropping all weight-training here
+    // would hide a member's genuine watch-recorded strength activity from
+    // the feed/calendar (this cache feeds display only, never the conflict/
+    // load math). Marker-only detection keeps real strength, drops exports.
+    if (isOwnExportMarker(raw)) continue;
+    const externalId = providerId(raw.id);
+    const startLocal = parseCivilTimestamp(raw.start_date_local);
+    if (externalId === null || startLocal === null) return { ok: false, reason: 'parse' };
+    activities.push({
+      external_id: externalId,
+      date: startLocal.value.slice(0, 10), // verbatim civil date, no tz math
+      // See note on PlannedEvent.start_date_local_ms — same ordering proxy.
+      start_date_local_ms: startLocal.ms,
+      start_date_utc_ms: activityInstant(raw.start_date),
+      kind: kindOf(raw.type),
+      sport: sportForIntervalsType(raw.type, kindOf(raw.type)),
+      name: str(raw.name),
+      moving_time_sec: num(raw.moving_time),
+      elapsed_time_sec: num(raw.elapsed_time),
+      distance_m: num(raw.distance),
+      // intervals computes icu_average_watts; fall back to the Strava-style
+      // average_watts when only that is present.
+      average_watts: num(raw.icu_average_watts) ?? num(raw.average_watts),
+      weighted_avg_watts: num(raw.icu_weighted_avg_watts),
+      average_hr: num(raw.average_heartrate),
+      max_hr: num(raw.max_heartrate),
+      training_load: num(raw.icu_training_load),
+      intensity: num(raw.icu_intensity),
+      calories: num(raw.calories),
+      elevation_gain_m: num(raw.total_elevation_gain),
+      raw: JSON.stringify(raw),
+    });
+  }
+  return { ok: true, activities };
+}
+
+// ---- read-path filter: legacy exported lift events -------------------
+//
+// Tres Fort once exported lifting load to intervals.icu as WeightTraining
+// WORKOUT events; that export was removed. Those events may still exist in
+// a user's intervals.icu account, so the inbound sync paths screen them out
+// via the two helpers below, keeping the endurance caches free of our own
+// (now-historical) strength exports.
+
+/** Recognises our own exported lift events (used to keep them OUT of the
+ *  endurance `external_events` cache — no self-conflict). Matches either
+ *  the deterministic external_id marker or the strength `type`.
+ *
+ *  USE ON THE EVENTS PATH ONLY. The `type === 'weighttraining'` clause is
+ *  belt-and-suspenders for the planned-events read-back, where ingesting
+ *  our own export would make detectConflicts flag a self-conflict
+ *  (BLOCKER-3). The completed-activities path must NOT use this — a
+ *  member's genuine watch-recorded `WeightTraining` would be dropped
+ *  entirely — so it uses isOwnExportMarker (marker-only) instead. */
+export function isTresFortExport(raw: {
+  external_id?: unknown;
+  type?: unknown;
+}): boolean {
+  if (isOwnExportMarker(raw)) return true;
+  const t = String(raw.type ?? '').toLowerCase();
+  return t === 'weighttraining';
+}
+
+/** Marker-only variant of isTresFortExport. Matches ONLY our deterministic
+ *  `liftcoach:session:` external_id, never the generic `WeightTraining`
+ *  type. Used on the completed-activities read path: our exports are
+ *  planned EVENTS that don't surface in the /activities feed, and
+ *  `external_activities` feeds only the display feed/calendar (never the
+ *  conflict/load math, which reads `external_events`), so a member's real
+ *  strength activity is safe to keep and classify. */
+export function isOwnExportMarker(raw: { external_id?: unknown }): boolean {
+  const ext = typeof raw.external_id === 'string' ? raw.external_id : '';
+  return ext.startsWith('liftcoach:session:');
+}
+
+// ---- WRITE path: manual completed activities ---------------------------
+//
+// log_activity routes endurance sessions here instead of the local
+// activities table so they count toward intervals.icu training load. The
+// created activity returns through the normal completed-activity sync.
+// Same discipline as the readers: injectable fetcher, dormant when
+// unconfigured, discriminated result, never throws.
+
+/** Body of POST /api/v1/athlete/{id}/activities/manual. Field names are the
+ *  intervals.icu Activity schema's. */
+export interface ManualActivityInput {
+  name: string;
+  type: string;
+  /** Civil "YYYY-MM-DDTHH:MM:SS" in the athlete's timezone, no zone suffix. */
+  start_date_local: string;
+  moving_time: number;
+  elapsed_time: number;
+  distance?: number;
+  average_heartrate?: number;
+  calories?: number;
+  trainer: boolean;
+  description?: string;
+  external_id: string;
+}
+
+/** The fields of a provider activity that create, dedupe and delete need. */
+export interface IntervalsActivityRef {
+  id: string;
+  type: string | null;
+  name: string | null;
+  start_date_local: string | null;
+  moving_time: number | null;
+  elapsed_time: number | null;
+  distance: number | null;
+  external_id: string | null;
+}
+
+export type IntervalsWriteResult<T> =
+  | { ok: true; value: T }
+  | {
+      ok: false;
+      reason: 'disabled' | 'http' | 'timeout' | 'parse';
+      status?: number;
+      /** Provider error text, truncated, when the body carried one. */
+      message?: string;
+    };
+
+export interface WriteDeps {
+  fetcher?: Fetcher;
+  timeoutMs?: number;
+  accessToken?: string | null;
+}
+
+function activityRef(raw: Record<string, unknown>): IntervalsActivityRef | null {
+  const id = providerId(raw.id);
+  if (id === null) return null;
+  return {
+    id,
+    type: str(raw.type),
+    name: str(raw.name),
+    start_date_local: str(raw.start_date_local),
+    moving_time: num(raw.moving_time),
+    elapsed_time: num(raw.elapsed_time),
+    distance: num(raw.distance),
+    external_id: str(raw.external_id),
+  };
+}
+
+/** A FormData body is sent as multipart (fetch sets the boundary); any
+ *  other body is sent as JSON. A success also carries the HTTP status. */
+async function intervalsRequest(
+  url: string,
+  method: 'GET' | 'POST' | 'DELETE',
+  authHeader: string,
+  body: unknown,
+  deps: WriteDeps,
+): Promise<Extract<IntervalsWriteResult<unknown>, { ok: false }> | { ok: true; value: unknown; status: number }> {
+  const fetcher = deps.fetcher ?? (globalThis.fetch as unknown as Fetcher);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), deps.timeoutMs ?? 10_000);
+  const multipart = body instanceof FormData;
+  let res: Awaited<ReturnType<Fetcher>>;
+  try {
+    res = await fetcher(url, {
+      method,
+      headers: {
+        Authorization: authHeader,
+        Accept: 'application/json',
+        ...(body === undefined || multipart ? {} : { 'Content-Type': 'application/json' }),
+      },
+      ...(body === undefined ? {} : { body: multipart ? body : JSON.stringify(body) }),
+      signal: controller.signal,
+    });
+  } catch {
+    return { ok: false, reason: 'timeout' };
+  } finally {
+    clearTimeout(timer);
+  }
+  let parsed: unknown = null;
+  let parseFailed = false;
+  try {
+    parsed = await res.json();
+  } catch {
+    parseFailed = true;
+  }
+  if (!res.ok) {
+    const message =
+      isRecord(parsed) && typeof parsed.error === 'string'
+        ? parsed.error.slice(0, 200)
+        : isRecord(parsed) && typeof parsed.message === 'string'
+          ? parsed.message.slice(0, 200)
+          : undefined;
+    return { ok: false, reason: 'http', status: res.status, ...(message ? { message } : {}) };
+  }
+  // A DELETE may answer with an empty body; only reads and creates need JSON.
+  if (parseFailed && method !== 'DELETE') return { ok: false, reason: 'parse' };
+  return { ok: true, value: parsed, status: res.status };
+}
+
+/** POST one manual activity; returns the created provider activity. */
+export async function createManualActivity(
+  apiKey: string | null | undefined,
+  athleteId: string | null | undefined,
+  input: ManualActivityInput,
+  deps: WriteDeps = {},
+): Promise<IntervalsWriteResult<IntervalsActivityRef>> {
+  const authHeader = intervalsAuthHeader(apiKey, deps.accessToken);
+  if (!authHeader || !athleteId) return { ok: false, reason: 'disabled' };
+  const url =
+    `https://intervals.icu/api/v1/athlete/${encodeURIComponent(athleteId)}` +
+    '/activities/manual';
+  const r = await intervalsRequest(url, 'POST', authHeader, input, deps);
+  if (!r.ok) return r;
+  const ref = isRecord(r.value) ? activityRef(r.value) : null;
+  return ref ? { ok: true, value: ref } : { ok: false, reason: 'parse' };
+}
+
+/** One activity file for POST /api/v1/athlete/{id}/activities. */
+export interface ActivityFileInput {
+  file: Blob;
+  /** Its extension (.fit, .gpx or .tcx) tells intervals.icu the format. */
+  filename: string;
+  name?: string;
+  external_id: string;
+}
+
+/** The provider activities an upload produced. intervals.icu dedupes on a
+ *  hash of the file and answers 200 instead of 201 when nothing was new. */
+export interface ActivityUpload {
+  ids: string[];
+  created: boolean;
+}
+
+/** Provider ids in an upload response, whichever of its shapes arrives: one
+ *  activity, `{ activities: [...] }`, or a bare array. */
+function uploadedIds(v: unknown): string[] {
+  const items = Array.isArray(v)
+    ? v
+    : isRecord(v) && Array.isArray(v.activities)
+      ? v.activities
+      : [v];
+  const ids: string[] = [];
+  for (const item of items) {
+    const id = isRecord(item) ? providerId(item.id) : null;
+    if (id !== null && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+/** Upload an activity file (multipart), which intervals.icu analyzes like a
+ *  watch upload. Name and external_id go in the query string. */
+export async function uploadActivityFile(
+  apiKey: string | null | undefined,
+  athleteId: string | null | undefined,
+  input: ActivityFileInput,
+  deps: WriteDeps = {},
+): Promise<IntervalsWriteResult<ActivityUpload>> {
+  const authHeader = intervalsAuthHeader(apiKey, deps.accessToken);
+  if (!authHeader || !athleteId) return { ok: false, reason: 'disabled' };
+  const query = new URLSearchParams({ external_id: input.external_id });
+  if (input.name) query.set('name', input.name);
+  const url =
+    `https://intervals.icu/api/v1/athlete/${encodeURIComponent(athleteId)}` +
+    `/activities?${query.toString()}`;
+  const form = new FormData();
+  form.append('file', input.file, input.filename);
+  const r = await intervalsRequest(url, 'POST', authHeader, form, {
+    ...deps,
+    timeoutMs: deps.timeoutMs ?? 30_000,
+  });
+  if (!r.ok) return r;
+  return { ok: true, value: { ids: uploadedIds(r.value), created: r.status === 201 } };
+}
+
+/** GET the athlete's completed activities in [oldest, newest] (civil dates). */
+export async function listActivityRefs(
+  apiKey: string | null | undefined,
+  athleteId: string | null | undefined,
+  oldest: string,
+  newest: string,
+  deps: WriteDeps = {},
+): Promise<IntervalsWriteResult<IntervalsActivityRef[]>> {
+  const authHeader = intervalsAuthHeader(apiKey, deps.accessToken);
+  if (!authHeader || !athleteId) return { ok: false, reason: 'disabled' };
+  const url =
+    `https://intervals.icu/api/v1/athlete/${encodeURIComponent(athleteId)}` +
+    `/activities?oldest=${oldest}&newest=${newest}`;
+  const r = await intervalsRequest(url, 'GET', authHeader, undefined, deps);
+  if (!r.ok) return r;
+  if (!Array.isArray(r.value)) return { ok: false, reason: 'parse' };
+  const refs: IntervalsActivityRef[] = [];
+  for (const item of r.value) {
+    const ref = isRecord(item) ? activityRef(item) : null;
+    if (ref) refs.push(ref);
+  }
+  return { ok: true, value: refs };
+}
+
+/** DELETE /api/v1/activity/{id}. */
+export async function deleteIntervalsActivity(
+  apiKey: string | null | undefined,
+  activityId: string,
+  deps: WriteDeps = {},
+): Promise<IntervalsWriteResult<null>> {
+  const authHeader = intervalsAuthHeader(apiKey, deps.accessToken);
+  if (!authHeader) return { ok: false, reason: 'disabled' };
+  const url = `https://intervals.icu/api/v1/activity/${encodeURIComponent(activityId)}`;
+  const r = await intervalsRequest(url, 'DELETE', authHeader, undefined, deps);
+  return r.ok ? { ok: true, value: null } : r;
+}
+
+/**
+ * One activity's GPS track as intervals.icu streams it, index for index:
+ * seconds from the start, latitude and longitude (the `latlng` stream's
+ * `data` and `data2`) and altitude in meters. Null entries are missing
+ * samples. `time` is null when intervals.icu sent no time stream.
+ */
+export interface IntervalsRouteStreams {
+  time: (number | null)[] | null;
+  lat: (number | null)[];
+  lon: (number | null)[];
+  altitude: (number | null)[] | null;
+}
+
+/**
+ * GET /api/v1/activity/{id}/streams with the time, latlng and altitude
+ * streams. `value` is null when the activity has no GPS track (an indoor
+ * run, a manual entry). Read only: nothing here is stored.
+ */
+export async function fetchActivityRouteStreams(
+  apiKey: string | null | undefined,
+  activityId: string,
+  deps: WriteDeps = {},
+): Promise<IntervalsWriteResult<IntervalsRouteStreams | null>> {
+  const authHeader = intervalsAuthHeader(apiKey, deps.accessToken);
+  if (!authHeader) return { ok: false, reason: 'disabled' };
+  const url =
+    `https://intervals.icu/api/v1/activity/${encodeURIComponent(activityId)}` +
+    '/streams?types=time,latlng,altitude';
+  const r = await intervalsRequest(url, 'GET', authHeader, undefined, {
+    ...deps,
+    timeoutMs: deps.timeoutMs ?? 15_000,
+  });
+  if (!r.ok) return r;
+  if (!Array.isArray(r.value)) return { ok: false, reason: 'parse' };
+  const byType = new Map<string, Record<string, unknown>>();
+  for (const stream of r.value) {
+    if (isRecord(stream) && typeof stream.type === 'string') byType.set(stream.type, stream);
+  }
+  const numbers = (v: unknown): (number | null)[] | null =>
+    Array.isArray(v) ? v.map((x) => (typeof x === 'number' && Number.isFinite(x) ? x : null)) : null;
+  const latlng = byType.get('latlng');
+  const lat = numbers(latlng?.data);
+  const lon = numbers(latlng?.data2);
+  if (!lat || !lon || lat.length !== lon.length) return { ok: true, value: null };
+  const time = numbers(byType.get('time')?.data);
+  const altitude = numbers(byType.get('altitude')?.data);
+  return {
+    ok: true,
+    value: {
+      time: time && time.length === lat.length ? time : null,
+      lat,
+      lon,
+      altitude: altitude && altitude.length === lat.length ? altitude : null,
+    },
+  };
+}
+
+/**
+ * One activity's chart streams as intervals.icu sends them, index for index
+ * (docs/plans/run-detail-charts P0): seconds from the start, cumulative
+ * meters, heart rate, altitude, GPS positions, and power and cadence (P6).
+ * A stream intervals.icu didn't send is null. Read only: nothing here is
+ * stored.
+ */
+export interface IntervalsChartStreams {
+  time: (number | null)[] | null;
+  distance: (number | null)[] | null;
+  heartrate: (number | null)[] | null;
+  altitude: (number | null)[] | null;
+  lat: (number | null)[] | null;
+  lon: (number | null)[] | null;
+  watts: (number | null)[] | null;
+  cadence: (number | null)[] | null;
+}
+
+/**
+ * GET /api/v1/activity/{id}/streams with the time, distance, heartrate,
+ * altitude, latlng, watts and cadence streams. `value` is null when
+ * intervals.icu has none of them for the activity (a manual entry).
+ */
+export async function fetchActivityChartStreams(
+  apiKey: string | null | undefined,
+  activityId: string,
+  deps: WriteDeps = {},
+): Promise<IntervalsWriteResult<IntervalsChartStreams | null>> {
+  const authHeader = intervalsAuthHeader(apiKey, deps.accessToken);
+  if (!authHeader) return { ok: false, reason: 'disabled' };
+  const url =
+    `https://intervals.icu/api/v1/activity/${encodeURIComponent(activityId)}` +
+    '/streams?types=time,distance,heartrate,altitude,latlng,watts,cadence';
+  const r = await intervalsRequest(url, 'GET', authHeader, undefined, {
+    ...deps,
+    timeoutMs: deps.timeoutMs ?? 15_000,
+  });
+  if (!r.ok) return r;
+  if (!Array.isArray(r.value)) return { ok: false, reason: 'parse' };
+  const byType = new Map<string, Record<string, unknown>>();
+  for (const stream of r.value) {
+    if (isRecord(stream) && typeof stream.type === 'string') byType.set(stream.type, stream);
+  }
+  const numbers = (v: unknown): (number | null)[] | null =>
+    Array.isArray(v) ? v.map((x) => (typeof x === 'number' && Number.isFinite(x) ? x : null)) : null;
+  const latlng = byType.get('latlng');
+  let lat = numbers(latlng?.data);
+  let lon = numbers(latlng?.data2);
+  if (!lat || !lon || lat.length !== lon.length) {
+    lat = null;
+    lon = null;
+  }
+  const value: IntervalsChartStreams = {
+    time: numbers(byType.get('time')?.data),
+    distance: numbers(byType.get('distance')?.data),
+    heartrate: numbers(byType.get('heartrate')?.data),
+    altitude: numbers(byType.get('altitude')?.data),
+    lat,
+    lon,
+    watts: numbers(byType.get('watts')?.data),
+    cadence: numbers(byType.get('cadence')?.data),
+  };
+  const any = value.distance || value.heartrate || value.altitude || value.lat || value.watts || value.cadence;
+  return { ok: true, value: any ? value : null };
+}

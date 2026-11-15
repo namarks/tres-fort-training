@@ -1,0 +1,94 @@
+import XCTest
+
+final class FreestyleJourneyTests: XCTestCase {
+    override func setUpWithError() throws { continueAfterFailure = false }
+    override func tearDownWithError() throws {
+        if (testRun?.failureCount ?? 0) > 0 { print(XCUIApplication().debugDescription) }
+    }
+    private func reveal(_ element: XCUIElement, app: XCUIApplication,
+                        file: StaticString = #filePath, line: UInt = #line) {
+        UITestScrolling.reveal(element, in: app, maxAttempts: 8, file: file, line: line)
+    }
+    private func journey(large: Bool, timed: Bool = false) {
+        let app = XCUIApplication()
+        app.launchEnvironment["TRESFORT_UI_FIXTURE"] = "freestyle"
+        if large { app.launchEnvironment["TRESFORT_UI_LARGE_TEXT"] = "1" }
+        app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US", "-restAudioCuesEnabled", timed ? "NO" : "YES"]
+        app.launch()
+        // Freestyle starts from Today itself on a day with nothing planned,
+        // or from its "+" menu.
+        let quick = app.buttons["today.quick.freestyle"]
+        if large, quick.waitForExistence(timeout: UITestWait.screen) {
+            let start = quick
+            XCTAssertEqual(start.label, "Freestyle lift")
+            reveal(start, app: app); start.tap()
+        } else {
+            let more = app.buttons["today.moreWaysToTrain"]
+            XCTAssertTrue(more.waitForExistence(timeout: UITestWait.screen)); more.tap()
+            let start = app.buttons["today.startFreestyle"]
+            XCTAssertTrue(start.waitForExistence(timeout: UITestWait.screen))
+            XCTAssertEqual(start.label, "Start freestyle"); start.tap()
+        }
+        let search = app.textFields["exercisePicker.search"]
+        XCTAssertTrue(search.waitForExistence(timeout: UITestWait.screen))
+        search.tap(); search.typeText((timed ? "Goblet Hold" : "Barbell Squat") + "\n")
+        let squat = app.buttons[timed ? "freestyle.exercise.synthetic-hold" : "freestyle.exercise.synthetic-exercise"]
+        XCTAssertTrue(squat.waitForExistence(timeout: UITestWait.screen)); squat.tap()
+        let allow = XCUIApplication(bundleIdentifier: "com.apple.springboard").alerts.buttons["Allow"]
+        if allow.waitForExistence(timeout: 2) { allow.tap() }
+        let first = app.buttons[timed ? "START SET 1" : "LOG SET 1"]
+        XCTAssertTrue(first.waitForExistence(timeout: UITestWait.screen)); first.tap()
+        if timed {
+            let stop = app.buttons["STOP & LOG"]
+            XCTAssertTrue(stop.waitForExistence(timeout: UITestWait.screen))
+            // The runner intentionally ignores reflexive taps in the first
+            // two seconds. Observe the live countdown before ending the hold.
+            let remaining = app.staticTexts["runner.timer.remaining"]
+            expectation(for: NSPredicate { _, _ in
+                guard let seconds = Int(remaining.label.dropLast()) else { return false }
+                return seconds > 0 && seconds <= 27
+            }, evaluatedWith: remaining)
+            waitForExpectations(timeout: UITestWait.screen)
+            stop.tap()
+        }
+        let skip = app.buttons["rest.done"]
+        XCTAssertTrue(skip.waitForExistence(timeout: UITestWait.screen)); skip.tap()
+        XCTAssertTrue(app.buttons[timed ? "START SET 2" : "LOG SET 2"].waitForExistence(timeout: UITestWait.screen))
+        let outline = app.buttons["runner.outline"]
+        reveal(outline, app: app); outline.tap()
+        app.buttons["Current exercise options"].tap()
+        let addExercise = app.buttons["runner.addFreestyleExercise"]
+        reveal(addExercise, app: app); addExercise.tap()
+        XCTAssertTrue(search.waitForExistence(timeout: UITestWait.screen))
+        search.tap(); search.typeText("Dumbbell Goblet Squat\n")
+        let replacement = app.buttons["freestyle.exercise.synthetic-replacement"]
+        XCTAssertTrue(replacement.waitForExistence(timeout: UITestWait.screen)); replacement.tap()
+        app.buttons["runner.outline.done"].tap()
+        XCTAssertTrue(app.buttons["LOG SET 1"].waitForExistence(timeout: UITestWait.screen)); app.buttons["LOG SET 1"].tap()
+        XCTAssertTrue(skip.waitForExistence(timeout: UITestWait.screen)); skip.tap()
+        let actions = app.buttons["today.workoutActions"]
+        actions.tap(); app.buttons["Finish workout"].tap()
+        let finish = app.buttons["FINISH"]
+        XCTAssertTrue(finish.waitForExistence(timeout: UITestWait.screen)); reveal(finish, app: app); finish.tap()
+        let history = app.buttons["today.viewCompletedWorkout"]
+        XCTAssertTrue(history.waitForExistence(timeout: UITestWait.screen)); reveal(history, app: app); history.tap()
+        let saveAs = app.buttons["freestyle.saveAsWorkout"]
+        XCTAssertTrue(saveAs.waitForExistence(timeout: UITestWait.screen)); reveal(saveAs, app: app); saveAs.tap()
+        XCTAssertTrue(app.navigationBars["Save as workout"].waitForExistence(timeout: UITestWait.screen))
+        // The front Form is a CollectionView whose Save row is lazy. Bind its
+        // unique surface before scrolling; the underlying summary stays mounted.
+        let saveForm = app.collectionViews.element
+        XCTAssertTrue(saveForm.waitForExistence(timeout: UITestWait.screen))
+        let save = app.buttons["freestyle.save"]
+        UITestScrolling.reveal(save, in: app, maxAttempts: 8, surface: saveForm)
+        let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        shot.name = large ? "freestyle-review-large" : "freestyle-review"; shot.lifetime = .keepAlways; add(shot)
+        save.tap()
+        expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: save)
+        waitForExpectations(timeout: UITestWait.screen)
+        XCTAssertFalse(app.buttons["freestyle.saveAsWorkout"].exists)
+    }
+    func testStartLogAddFinishAndSave() { journey(large: false) }
+    func testTimedFreestyleCanContinueAddAndSave() { journey(large: false, timed: true) }
+    func testStartLogAddFinishAndSaveLargestText() { journey(large: true) }
+}

@@ -1,0 +1,88 @@
+name: Contributor rights
+
+on:
+  # These events only invalidate an earlier review. Only trusted main is read;
+  # this workflow never checks out or executes a contributor's PR code.
+  pull_request_target:
+    branches: [main]
+    types: [opened, reopened, synchronize, edited]
+  push:
+    branches: [main]
+    paths:
+      - CONTRIBUTOR-TERMS.md
+      - scripts/contributor-rights.mjs
+      - .github/workflows/contributor-rights.yml
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number
+        required: true
+        type: string
+      head_sha:
+        description: Exact head SHA covered by the private review
+        required: true
+        type: string
+      terms_sha256:
+        description: SHA-256 of the operative main-branch contributor terms
+        required: true
+        type: string
+      receipt_sha256:
+        description: SHA-256 of the private rights-review receipt; no private contents
+        required: true
+        type: string
+      decision:
+        description: Record or revoke the owner's rights review
+        required: true
+        type: choice
+        options: [approve, revoke]
+      confirmation:
+        description: I verified private records for every author, coauthor and rights-holder at this head
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # One repository-wide writer serializes approvals and invalidations. Every
+  # surviving run resets all open PR heads before optionally approving one,
+  # covering events GitHub replaces while they are pending in this group.
+  group: contributor-rights
+  cancel-in-progress: false
+
+jobs:
+  record:
+    name: record contributor rights
+    if: >-
+      github.repository == 'namarks/tres-fort-training'
+      && github.ref == 'refs/heads/main'
+      && !github.event.repository.private
+      && (github.event_name != 'workflow_dispatch'
+          || (github.actor == 'namarks' && github.triggering_actor == 'namarks'
+              && github.actor_id == '5323089'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # For these events GITHUB_SHA identifies trusted main, never PR head.
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+      - name: Verify metadata and record the owner's decision
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+          INPUT_TERMS_SHA256: ${{ inputs.terms_sha256 }}
+          INPUT_RECEIPT_SHA256: ${{ inputs.receipt_sha256 }}
+          INPUT_DECISION: ${{ inputs.decision }}
+          INPUT_CONFIRMATION: ${{ inputs.confirmation }}
+        run: node scripts/contributor-rights.mjs

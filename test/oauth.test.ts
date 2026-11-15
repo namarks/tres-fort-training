@@ -1,0 +1,360 @@
+import { env, applyD1Migrations, SELF } from 'cloudflare:test';
+import { Hono } from 'hono';
+import { cors } from 'hono/cors';
+import { beforeAll, describe, expect, it } from 'vitest';
+
+import { createCoachConnectCode, ensureOwnerUser } from '../src/db';
+
+async function ownerCode() {
+  return (await createCoachConnectCode(env.DB, (await ensureOwnerUser(env.DB, env.OWNER_APPLE_SUB))!.id)).code;
+}
+
+const BASE = 'https://tres-fort.test';
+const ATTACK_SHAPED_REQUEST_HEADERS =
+  `x-prefix${' '.repeat(16_384)}x-suffix` + ',x-final-header';
+
+beforeAll(async () => {
+  await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
+});
+
+async function pkce() {
+  const verifier = 'verifier-' + crypto.randomUUID() + crypto.randomUUID();
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+  const challenge = btoa(String.fromCharCode(...new Uint8Array(digest)))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+  return { verifier, challenge };
+}
+
+describe('oauth discovery', () => {
+  const preflightRoutes = [
+    ['/.well-known/oauth-protected-resource', 'GET'],
+    ['/oauth/register', 'POST'],
+    ['/oauth/token', 'POST'],
+  ] as const;
+
+  it.each(preflightRoutes)(
+    'handles an attack-shaped default-CORS preflight for %s without enabling credentials',
+    async (path, requestedMethod) => {
+      const r = await SELF.fetch(`${BASE}${path}`, {
+        method: 'OPTIONS',
+        headers: {
+          origin: 'https://untrusted.example',
+          'access-control-request-method': requestedMethod,
+          'access-control-request-headers': ATTACK_SHAPED_REQUEST_HEADERS,
+        },
+      });
+
+      expect(r.status).toBe(204);
+      expect(r.headers.get('access-control-allow-origin')).toBe('*');
+      expect(r.headers.get('access-control-allow-methods')).toBe(
+        'GET,HEAD,PUT,POST,DELETE,PATCH',
+      );
+      expect(
+        r.headers.get('access-control-allow-headers') === ATTACK_SHAPED_REQUEST_HEADERS,
+      ).toBe(true);
+      expect(r.headers.get('access-control-allow-credentials')).toBeNull();
+      expect(r.headers.get('vary')).toBe('Access-Control-Request-Headers');
+      expect(await r.text()).toBe('');
+    },
+  );
+
+  it('does not invoke the vulnerable whitespace regex splitter for the attack shape', async () => {
+    const app = new Hono();
+    app.use('/probe', cors());
+
+    const splitDescriptor = Object.getOwnPropertyDescriptor(RegExp.prototype, Symbol.split);
+    expect(splitDescriptor?.value).toBeTypeOf('function');
+    let vulnerableSplitterInvoked = false;
+
+    Object.defineProperty(RegExp.prototype, Symbol.split, {
+      ...splitDescriptor,
+      value: function (this: RegExp, input: string, limit?: number) {
+        if (this.source === '\\s*,\\s*' && input === ATTACK_SHAPED_REQUEST_HEADERS) {
+          vulnerableSplitterInvoked = true;
+        }
+        return splitDescriptor!.value.call(this, input, limit);
+      },
+    });
+
+    try {
+      const r = await app.request('https://probe.test/probe', {
+        method: 'OPTIONS',
+        headers: {
+          origin: 'https://untrusted.example',
+          'access-control-request-method': 'POST',
+          'access-control-request-headers': ATTACK_SHAPED_REQUEST_HEADERS,
+        },
+      });
+      expect(r.status).toBe(204);
+    } finally {
+      Object.defineProperty(RegExp.prototype, Symbol.split, splitDescriptor!);
+    }
+
+    expect(vulnerableSplitterInvoked).toBe(false);
+  });
+
+  it('protected-resource metadata points at the AS', async () => {
+    const r = await SELF.fetch(`${BASE}/.well-known/oauth-protected-resource`);
+    expect(r.status).toBe(200);
+    const j = await r.json<any>();
+    expect(j.resource).toBe(`${BASE}/mcp`);
+    expect(j.authorization_servers).toEqual([BASE]);
+    expect(r.headers.get('access-control-allow-origin')).toBe('*');
+  });
+
+  it('serves the same metadata at the RFC 9728 path-inserted location', async () => {
+    const r = await SELF.fetch(`${BASE}/.well-known/oauth-protected-resource/mcp`);
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual(
+      await (await SELF.fetch(`${BASE}/.well-known/oauth-protected-resource`)).json(),
+    );
+    expect(r.headers.get('access-control-allow-origin')).toBe('*');
+  });
+
+  it('accepts offline_access beside mcp and refuses any other scope', async () => {
+    const redirect = 'https://agent.meta.ai/api/hatch/oauth/callback';
+    const { client_id } = await (
+      await SELF.fetch(`${BASE}/oauth/register`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ redirect_uris: [redirect], client_name: 'Meta Muse' }),
+      })
+    ).json<{ client_id: string }>();
+    const { challenge } = await pkce();
+    const authorize = (scope: string) => SELF.fetch(`${BASE}/oauth/authorize?` + new URLSearchParams({
+      response_type: 'code', client_id, redirect_uri: redirect, code_challenge: challenge,
+      code_challenge_method: 'S256', scope, resource: `${BASE}/mcp`,
+    }));
+    for (const scope of ['mcp offline_access', 'offline_access mcp', 'mcp']) {
+      const page = await authorize(scope);
+      expect(page.status).toBe(200);
+      const html = await page.text();
+      expect(html).toContain('name="scope" value="mcp"');
+      expect(html).toContain('Open Très Fort to review access');
+      expect(html).toMatch(/href="https:\/\/app\.tresfort\.app\/coach\/authorize\?request=[a-f0-9]{64}">Continue with Apple</);
+    }
+    for (const scope of ['openid', 'offline_access', 'mcp admin', 'mcp,offline_access', 'mcp ' + 'offline_access '.repeat(20)]) {
+      const r = await authorize(scope);
+      expect(r.status).toBe(400);
+      expect(await r.json()).toEqual({ error: 'invalid_scope' });
+    }
+    const submit = new FormData();
+    submit.set('client_id', client_id);
+    submit.set('redirect_uri', redirect);
+    submit.set('code_challenge', challenge);
+    submit.set('scope', 'mcp email');
+    submit.set('passphrase', await ownerCode());
+    expect((await SELF.fetch(`${BASE}/oauth/authorize`, { method: 'POST', body: submit })).status).toBe(400);
+    const token = new FormData();
+    token.set('grant_type', 'refresh_token');
+    token.set('refresh_token', 'unknown');
+    token.set('scope', 'openid');
+    expect(await (await SELF.fetch(`${BASE}/oauth/token`, { method: 'POST', body: token })).json())
+      .toEqual({ error: 'invalid_scope' });
+  });
+
+  it('AS metadata advertises PKCE + endpoints', async () => {
+    const j = await (await SELF.fetch(`${BASE}/.well-known/oauth-authorization-server`)).json<any>();
+    expect(j.issuer).toBe(BASE);
+    expect(j.authorization_endpoint).toBe(`${BASE}/oauth/authorize`);
+    expect(j.token_endpoint).toBe(`${BASE}/oauth/token`);
+    expect(j.registration_endpoint).toBe(`${BASE}/oauth/register`);
+    expect(j.code_challenge_methods_supported).toEqual(['S256']);
+  });
+});
+
+describe('native loopback OAuth callbacks', () => {
+  const registered = 'http://127.0.0.1/callback/tres-fort';
+  it.each([
+    [registered, 'http://127.0.0.1:45213/callback/tres-fort', true],
+    ['http://127.0.0.1:4000/callback?client=one', 'http://127.0.0.1:45213/callback?client=one', true],
+    ['http://[::1]/callback', 'http://[::1]:45213/callback', true],
+    [registered, 'http://127.0.0.1:45213/callback/other', false],
+    [registered, 'http://127.0.0.1:45213/callback/tres-fort?extra=1', false],
+    [registered, 'http://127.0.0.1:45213/callback/tres-fort#fragment', false],
+    [registered, 'http://127.0.0.1:45213/other/../callback/tres-fort', false],
+    [registered, 'http://127.0.0.1:45213/callback/%74res-fort', false],
+    [registered, 'http://user@127.0.0.1:45213/callback/tres-fort', false],
+    [registered, 'http://127.0.0.1.example.com:45213/callback/tres-fort', false],
+    [registered, 'http://127.1:45213/callback/tres-fort', false],
+    [registered, 'http://localhost:45213/callback/tres-fort', false],
+    [registered, 'http://[::1]:45213/callback/tres-fort', false],
+    [registered, 'https://127.0.0.1:45213/callback/tres-fort', false],
+    [registered, 'http://127.0.0.1:99999/callback/tres-fort', false],
+    ['https://127.0.0.1/callback', 'https://127.0.0.1:45213/callback', false],
+    ['http://localhost/callback', 'http://localhost:45213/callback', false],
+    ['https://example.com/callback', 'https://example.com:45213/callback', false],
+  ] as const)('matches %s against %s only when the loopback port varies', async (registration, redirect, valid) => {
+    const reg = await (await SELF.fetch(`${BASE}/oauth/register`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ redirect_uris: [registration], client_name: 'Native test client' }),
+    })).json<{ client_id: string }>();
+    const { challenge } = await pkce();
+    const params = new URLSearchParams({
+      client_id: reg.client_id, redirect_uri: redirect, response_type: 'code',
+      code_challenge: challenge, code_challenge_method: 'S256',
+    });
+    const page = await SELF.fetch(`${BASE}/oauth/authorize?${params}`);
+    expect(page.status).toBe(valid ? 200 : 400);
+    params.set('passphrase', await ownerCode());
+    const submitted = await SELF.fetch(`${BASE}/oauth/authorize`, {
+      method: 'POST', body: params, redirect: 'manual',
+    });
+    const ipv6 = valid && new URL(redirect).hostname.startsWith('[');
+    expect(submitted.status).toBe(valid ? (ipv6 ? 200 : 302) : 400);
+    if (valid) {
+      const destination = ipv6
+        ? (await submitted.text()).match(/<a href="([^"]+)"/)![1]!.replaceAll('&amp;', '&')
+        : submitted.headers.get('location')!;
+      const callback = new URL(destination);
+      expect(callback.port).toBe('45213');
+      expect(callback.pathname).toBe(new URL(redirect).pathname);
+      expect(callback.searchParams.has('code')).toBe(true);
+    } else {
+      expect(await submitted.text()).toBe('invalid redirect_uri');
+      expect(submitted.headers.has('location')).toBe(false);
+    }
+  });
+});
+
+describe('oauth full PKCE flow', () => {
+  it('register -> authorize (passphrase) -> token -> call /mcp -> refresh', async () => {
+    const redirect = 'https://claude.ai/api/mcp/auth_callback';
+
+    // 1. dynamic client registration
+    const reg = await SELF.fetch(`${BASE}/oauth/register`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ redirect_uris: [redirect], client_name: 'Claude' }),
+    });
+    expect(reg.status).toBe(201);
+    const { client_id } = await reg.json<{ client_id: string }>();
+
+    const { verifier, challenge } = await pkce();
+    const authUrl =
+      `${BASE}/oauth/authorize?response_type=code&client_id=${client_id}` +
+      `&redirect_uri=${encodeURIComponent(redirect)}&code_challenge=${challenge}` +
+      `&code_challenge_method=S256&state=xyz&scope=mcp`;
+
+    // 2a. consent page renders
+    const page = await SELF.fetch(authUrl);
+    expect(page.status).toBe(200);
+    const consent = await page.text();
+    expect(consent).toContain('passphrase');
+    expect(consent).toContain('<strong>Claude</strong>');
+    expect(consent).toContain('this app and its configured AI provider');
+    expect(consent).toContain('imported Apple Health and Intervals.icu workouts');
+    expect(consent).toContain('https://tresfort.app/privacy');
+    expect(consent).toContain('Allow access');
+
+    // 2b. wrong passphrase is rejected
+    const bad = new FormData();
+    bad.set('client_id', client_id);
+    bad.set('redirect_uri', redirect);
+    bad.set('code_challenge', challenge);
+    bad.set('state', 'xyz');
+    bad.set('scope', 'mcp');
+    bad.set('passphrase', 'nope');
+    const badRes = await SELF.fetch(`${BASE}/oauth/authorize`, { method: 'POST', body: bad });
+    expect(badRes.status).toBe(401);
+
+    // 2c. correct passphrase -> 302 with code
+    const good = new FormData();
+    good.set('client_id', client_id);
+    good.set('redirect_uri', redirect);
+    good.set('code_challenge', challenge);
+    good.set('state', 'xyz');
+    good.set('scope', 'mcp');
+    good.set('passphrase', await ownerCode());
+    const authRes = await SELF.fetch(`${BASE}/oauth/authorize`, {
+      method: 'POST',
+      body: good,
+      redirect: 'manual',
+    });
+    expect(authRes.status).toBe(302);
+    const loc = new URL(authRes.headers.get('location')!);
+    expect(loc.searchParams.get('state')).toBe('xyz');
+    const code = loc.searchParams.get('code')!;
+    expect(code).toBeTruthy();
+
+    // 3. token exchange with PKCE verifier
+    const tokForm = new FormData();
+    tokForm.set('grant_type', 'authorization_code');
+    tokForm.set('code', code);
+    tokForm.set('redirect_uri', redirect);
+    tokForm.set('client_id', client_id);
+    tokForm.set('code_verifier', verifier);
+    const tok = await SELF.fetch(`${BASE}/oauth/token`, { method: 'POST', body: tokForm });
+    expect(tok.status).toBe(200);
+    const t = await tok.json<{ access_token: string; refresh_token: string; token_type: string }>();
+    expect(t.token_type).toBe('Bearer');
+
+    // 3b. the code is single-use
+    const replay = await SELF.fetch(`${BASE}/oauth/token`, { method: 'POST', body: tokForm });
+    expect(replay.status).toBe(400);
+
+    // 4. OAuth access token is accepted at /mcp
+    const mcp = await SELF.fetch(`${BASE}/mcp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Authorization: `Bearer ${t.access_token}` },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+    });
+    expect(mcp.status).toBe(200);
+    const tools = (await mcp.json<any>()).result.tools as Array<{ name: string }>;
+    expect(tools).toHaveLength(47);
+    expect(tools.map((tool) => tool.name)).toEqual(expect.arrayContaining([
+      'get_plan_history', 'compare_plan_versions', 'restore_plan', 'discard_workout', 'group_exercises', 'ungroup_exercises',
+    ]));
+
+    // 5. refresh rotates the token
+    const rf = new FormData();
+    rf.set('grant_type', 'refresh_token');
+    rf.set('refresh_token', t.refresh_token);
+    rf.set('client_id', client_id);
+    const refreshed = await SELF.fetch(`${BASE}/oauth/token`, { method: 'POST', body: rf });
+    expect(refreshed.status).toBe(200);
+    const t2 = await refreshed.json<{ access_token: string }>();
+    expect(t2.access_token).not.toBe(t.access_token);
+
+    const mcp2 = await SELF.fetch(`${BASE}/mcp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Authorization: `Bearer ${t2.access_token}` },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'ping' }),
+    });
+    expect(mcp2.status).toBe(200);
+  });
+
+  it('rejects a tampered PKCE verifier', async () => {
+    const redirect = 'https://claude.ai/cb';
+    const { client_id } = await (
+      await SELF.fetch(`${BASE}/oauth/register`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ redirect_uris: [redirect] }),
+      })
+    ).json<{ client_id: string }>();
+    const { challenge } = await pkce();
+    const form = new FormData();
+    form.set('client_id', client_id);
+    form.set('redirect_uri', redirect);
+    form.set('code_challenge', challenge);
+    form.set('scope', 'mcp');
+    form.set('passphrase', await ownerCode());
+    const authRes = await SELF.fetch(`${BASE}/oauth/authorize`, {
+      method: 'POST',
+      body: form,
+      redirect: 'manual',
+    });
+    const code = new URL(authRes.headers.get('location')!).searchParams.get('code')!;
+    const tok = new FormData();
+    tok.set('grant_type', 'authorization_code');
+    tok.set('code', code);
+    tok.set('redirect_uri', redirect);
+    tok.set('client_id', client_id);
+    tok.set('code_verifier', 'wrong-verifier');
+    const r = await SELF.fetch(`${BASE}/oauth/token`, { method: 'POST', body: tok });
+    expect(r.status).toBe(400);
+  });
+});

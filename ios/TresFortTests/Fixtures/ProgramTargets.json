@@ -1,0 +1,425 @@
+{
+  "_comment": "Shared contract for per-week slot targets (docs/plans/progressive-plans/spec.md P1): test/programTargets.test.ts and ProgramTargetsTests.swift run every case. A week-2 press asks for 9 reps, past the slot's max of 8, so the range clears.",
+  "slots": [
+    {
+      "id": "swing",
+      "exercise_id": "ex_kb_swing",
+      "target_sets": 5,
+      "target_reps": 10,
+      "target_reps_max": 15,
+      "target_rpe": null,
+      "target_weight": 24,
+      "target_weight_unit": "kg",
+      "target_duration_s": null,
+      "run_steps": null
+    },
+    {
+      "id": "plank",
+      "exercise_id": "ex_plank",
+      "target_sets": 3,
+      "target_reps": 1,
+      "target_reps_max": null,
+      "target_rpe": 7,
+      "target_weight": null,
+      "target_weight_unit": "lb",
+      "target_duration_s": 45,
+      "run_steps": null
+    },
+    {
+      "id": "run",
+      "exercise_id": "ex_outdoor_run",
+      "target_sets": 1,
+      "target_reps": 1,
+      "target_reps_max": null,
+      "target_rpe": null,
+      "target_weight": null,
+      "target_weight_unit": "lb",
+      "target_duration_s": null,
+      "run_steps": "[{\"kind\":\"work\",\"distance_m\":12875}]"
+    },
+    {
+      "id": "press",
+      "exercise_id": "ex_kb_press",
+      "target_sets": 3,
+      "target_reps": 5,
+      "target_reps_max": 8,
+      "target_rpe": null,
+      "target_weight": 16,
+      "target_weight_unit": "kg",
+      "target_duration_s": null,
+      "run_steps": null
+    }
+  ],
+  "program": {
+    "id": "block",
+    "start": "2026-11-09",
+    "repeat": false,
+    "weeks": [
+      {
+        "label": "Base",
+        "week": {
+          "mon": "kb",
+          "tue": null,
+          "wed": null,
+          "thu": null,
+          "fri": null,
+          "sat": null,
+          "sun": "long"
+        }
+      },
+      {
+        "label": "Build",
+        "week": {
+          "mon": "kb",
+          "tue": null,
+          "wed": null,
+          "thu": null,
+          "fri": null,
+          "sat": null,
+          "sun": "long"
+        },
+        "targets": {
+          "swing": {
+            "target_weight": 28,
+            "target_reps": 12
+          },
+          "plank": {
+            "target_duration_s": 60,
+            "target_rpe": null
+          },
+          "run": {
+            "run_steps": "[{\"kind\":\"work\",\"distance_m\":16093}]"
+          },
+          "press": {
+            "target_reps": 9
+          }
+        }
+      },
+      {
+        "label": "Easy week",
+        "week": {
+          "mon": "kb",
+          "tue": null,
+          "wed": null,
+          "thu": null,
+          "fri": null,
+          "sat": null,
+          "sun": "long"
+        },
+        "targets": {
+          "swing": {
+            "target_sets": 3,
+            "target_weight": 53,
+            "target_weight_unit": "lb",
+            "target_reps_max": null
+          },
+          "gone": {
+            "target_sets": 9
+          }
+        }
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "before the block: swing",
+      "date": "2026-11-08",
+      "slot": "swing",
+      "expected": {
+        "target_sets": 5,
+        "target_reps": 10,
+        "target_reps_max": 15,
+        "target_rpe": null,
+        "target_weight": 24,
+        "target_weight_unit": "kg",
+        "target_duration_s": null,
+        "run_steps": null
+      }
+    },
+    {
+      "name": "before the block: plank",
+      "date": "2026-11-08",
+      "slot": "plank",
+      "expected": {
+        "target_sets": 3,
+        "target_reps": 1,
+        "target_reps_max": null,
+        "target_rpe": 7,
+        "target_weight": null,
+        "target_weight_unit": "lb",
+        "target_duration_s": 45,
+        "run_steps": null
+      }
+    },
+    {
+      "name": "before the block: run",
+      "date": "2026-11-08",
+      "slot": "run",
+      "expected": {
+        "target_sets": 1,
+        "target_reps": 1,
+        "target_reps_max": null,
+        "target_rpe": null,
+        "target_weight": null,
+        "target_weight_unit": "lb",
+        "target_duration_s": null,
+        "run_steps": "[{\"kind\":\"work\",\"distance_m\":12875}]"
+      }
+    },
+    {
+      "name": "before the block: press",
+      "date": "2026-11-08",
+      "slot": "press",
+      "expected": {
+        "target_sets": 3,
+        "target_reps": 5,
+        "target_reps_max": 8,
+        "target_rpe": null,
+        "target_weight": 16,
+        "target_weight_unit": "kg",
+        "target_duration_s": null,
+        "run_steps": null
+      }
+    },
+    {
+      "name": "week 1 changes nothing: swing",
+      "date": "2026-11-15",
+      "slot": "swing",
+      "expected": {
+        "target_sets": 5,
+        "target_reps": 10,
+        "target_reps_max": 15,
+        "target_rpe": null,
+        "target_weight": 24,
+        "target_weight_unit": "kg",
+        "target_duration_s": null,
+        "run_steps": null
+      }
+    },
+    {
+      "name": "week 1 changes nothing: plank",
+      "date": "2026-11-15",
+      "slot": "plank",
+      "expected": {
+        "target_sets": 3,
+        "target_reps": 1,
+        "target_reps_max": null,
+        "target_rpe": 7,
+        "target_weight": null,
+        "target_weight_unit": "lb",
+        "target_duration_s": 45,
+        "run_steps": null
+      }
+    },
+    {
+      "name": "week 1 changes nothing: run",
+      "date": "2026-11-15",
+      "slot": "run",
+      "expected": {
+        "target_sets": 1,
+        "target_reps": 1,
+        "target_reps_max": null,
+        "target_rpe": null,
+        "target_weight": null,
+        "target_weight_unit": "lb",
+        "target_duration_s": null,
+        "run_steps": "[{\"kind\":\"work\",\"distance_m\":12875}]"
+      }
+    },
+    {
+      "name": "week 1 changes nothing: press",
+      "date": "2026-11-15",
+      "slot": "press",
+      "expected": {
+        "target_sets": 3,
+        "target_reps": 5,
+        "target_reps_max": 8,
+        "target_rpe": null,
+        "target_weight": 16,
+        "target_weight_unit": "kg",
+        "target_duration_s": null,
+        "run_steps": null
+      }
+    },
+    {
+      "name": "week 2 raises the load and grows the run: swing",
+      "date": "2026-11-16",
+      "slot": "swing",
+      "expected": {
+        "target_sets": 5,
+        "target_reps": 12,
+        "target_reps_max": 15,
+        "target_rpe": null,
+        "target_weight": 28,
+        "target_weight_unit": "kg",
+        "target_duration_s": null,
+        "run_steps": null
+      }
+    },
+    {
+      "name": "week 2 raises the load and grows the run: plank",
+      "date": "2026-11-16",
+      "slot": "plank",
+      "expected": {
+        "target_sets": 3,
+        "target_reps": 1,
+        "target_reps_max": null,
+        "target_rpe": null,
+        "target_weight": null,
+        "target_weight_unit": "lb",
+        "target_duration_s": 60,
+        "run_steps": null
+      }
+    },
+    {
+      "name": "week 2 raises the load and grows the run: run",
+      "date": "2026-11-16",
+      "slot": "run",
+      "expected": {
+        "target_sets": 1,
+        "target_reps": 1,
+        "target_reps_max": null,
+        "target_rpe": null,
+        "target_weight": null,
+        "target_weight_unit": "lb",
+        "target_duration_s": null,
+        "run_steps": "[{\"kind\":\"work\",\"distance_m\":16093}]"
+      }
+    },
+    {
+      "name": "week 2 raises the load and grows the run: press",
+      "date": "2026-11-16",
+      "slot": "press",
+      "expected": {
+        "target_sets": 3,
+        "target_reps": 9,
+        "target_reps_max": null,
+        "target_rpe": null,
+        "target_weight": 16,
+        "target_weight_unit": "kg",
+        "target_duration_s": null,
+        "run_steps": null
+      }
+    },
+    {
+      "name": "week 3 is an easy week in pounds: swing",
+      "date": "2026-11-29",
+      "slot": "swing",
+      "expected": {
+        "target_sets": 3,
+        "target_reps": 10,
+        "target_reps_max": null,
+        "target_rpe": null,
+        "target_weight": 53,
+        "target_weight_unit": "lb",
+        "target_duration_s": null,
+        "run_steps": null
+      }
+    },
+    {
+      "name": "week 3 is an easy week in pounds: plank",
+      "date": "2026-11-29",
+      "slot": "plank",
+      "expected": {
+        "target_sets": 3,
+        "target_reps": 1,
+        "target_reps_max": null,
+        "target_rpe": 7,
+        "target_weight": null,
+        "target_weight_unit": "lb",
+        "target_duration_s": 45,
+        "run_steps": null
+      }
+    },
+    {
+      "name": "week 3 is an easy week in pounds: run",
+      "date": "2026-11-29",
+      "slot": "run",
+      "expected": {
+        "target_sets": 1,
+        "target_reps": 1,
+        "target_reps_max": null,
+        "target_rpe": null,
+        "target_weight": null,
+        "target_weight_unit": "lb",
+        "target_duration_s": null,
+        "run_steps": "[{\"kind\":\"work\",\"distance_m\":12875}]"
+      }
+    },
+    {
+      "name": "week 3 is an easy week in pounds: press",
+      "date": "2026-11-29",
+      "slot": "press",
+      "expected": {
+        "target_sets": 3,
+        "target_reps": 5,
+        "target_reps_max": 8,
+        "target_rpe": null,
+        "target_weight": 16,
+        "target_weight_unit": "kg",
+        "target_duration_s": null,
+        "run_steps": null
+      }
+    },
+    {
+      "name": "after a one-off block: swing",
+      "date": "2026-11-30",
+      "slot": "swing",
+      "expected": {
+        "target_sets": 5,
+        "target_reps": 10,
+        "target_reps_max": 15,
+        "target_rpe": null,
+        "target_weight": 24,
+        "target_weight_unit": "kg",
+        "target_duration_s": null,
+        "run_steps": null
+      }
+    },
+    {
+      "name": "after a one-off block: plank",
+      "date": "2026-11-30",
+      "slot": "plank",
+      "expected": {
+        "target_sets": 3,
+        "target_reps": 1,
+        "target_reps_max": null,
+        "target_rpe": 7,
+        "target_weight": null,
+        "target_weight_unit": "lb",
+        "target_duration_s": 45,
+        "run_steps": null
+      }
+    },
+    {
+      "name": "after a one-off block: run",
+      "date": "2026-11-30",
+      "slot": "run",
+      "expected": {
+        "target_sets": 1,
+        "target_reps": 1,
+        "target_reps_max": null,
+        "target_rpe": null,
+        "target_weight": null,
+        "target_weight_unit": "lb",
+        "target_duration_s": null,
+        "run_steps": "[{\"kind\":\"work\",\"distance_m\":12875}]"
+      }
+    },
+    {
+      "name": "after a one-off block: press",
+      "date": "2026-11-30",
+      "slot": "press",
+      "expected": {
+        "target_sets": 3,
+        "target_reps": 5,
+        "target_reps_max": 8,
+        "target_rpe": null,
+        "target_weight": 16,
+        "target_weight_unit": "kg",
+        "target_duration_s": null,
+        "run_steps": null
+      }
+    }
+  ]
+}

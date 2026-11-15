@@ -1,0 +1,3053 @@
+import { measuredJson } from '../operationMetrics';
+import { slotEditResponse } from '../planEditResult';
+import { swapSessionExercise } from '../db';
+import { isGroupReportReason } from '../groupSafety';
+import { validWorkoutTags, validArchivedAt } from '../workoutMetadata';
+import { Hono } from 'hono';
+import type { Context } from 'hono';
+import type { HonoEnv } from '../types';
+import { issueAppJwt, requireAppJwt } from '../auth';
+import { ownerDiagnosticsRoutes } from './diagnostics';
+import { PROBLEM_REPORT_LIMITS, parseProblemReport, screenshotType } from '../problemReports';
+import { submitProblemReport } from '../db';
+import { planForCapabilities, readCapabilities } from '../exerciseGroupViews';
+import { isEffort, type Sample } from '../trainingLoad';
+import { parseFit, FitParseError, type FitActivity } from '../fitFile';
+import { parseTcx, TcxParseError, type TcxRun } from '../tcxFile';
+import { parseRunLaps, type RunLap } from '../runLaps';
+import {
+  parseRecordingDiagnostics,
+  RECORDING_DIAGNOSTICS_LIMITS,
+  type RecordingDiagnostics,
+} from '../recordingDiagnostics';
+import { parseSwimDetail } from '../swimDetail';
+import { asEncodedRoute } from '../activityRoute';
+import { importFitActivity, deleteFitActivity, setActivityEffort } from '../db';
+import type { EventBuildResult, ExerciseReplacementTargets, HealthKitStreams, ProgramInput, SetProgramResult } from '../db';
+import { isGroupId } from '../exerciseGroups';
+import { isPartnerStartInput } from '../partnerTraining';
+import { appleProviderConfig } from '../apple';
+import { diagnosticErrorType } from '../errors';
+import { validActivitySourceTime } from '../activityTime';
+import {
+  cancelPartnerStart, createPartnerWorkout, createPrescribedWorkout,
+  startPartnerSession,
+  leavePartnerSession,
+  getOwnedSession,
+  startFreestyleSession,
+  getFreestyleWorkoutDraft,
+  saveFreestyleWorkout,
+  type SaveFreestyleInput,
+  getTrainingProfile,
+  saveTrainingProfile,
+  getStarterWorkouts,
+  acceptStarterWorkout,
+  reconcileIntervalsConnection,
+  accountDeletionContinuationMatches,
+  addWorkoutAtVersion,
+  oneTimeWorkoutReceipt,
+  workoutFitsDate,
+  addTemplateExercise,
+  createGroup,
+  setGroupMemberBlock,
+  listGroupBlocks,
+  isGroupSafetyOperator,
+  setGroupSharingRestriction,
+  getGroupSharingRestriction,
+  setGroup,
+  clearGroup,
+  createInvite,
+  createPlan,
+  deleteWorkoutAtVersion,
+  deleteUserAccount,
+  deleteTemplateExercise,
+  discardSession,
+  exportUserData,
+  getActivePlan,
+  getExercises,
+  getGroupActivitySeries,
+  getGroupFeed,
+  getGroupStats,
+  getInvitePreview,
+  getMeProfile,
+  getGroupWithMembers,
+  getHistory,
+  healthKitDateMatchesStart,
+  getOrCreateSession,
+  getOwnedSessionByDate,
+  getWorkoutInPlan,
+  getPlanTree,
+  getState,
+  getVolume,
+  getWorkoutSummary,
+  getSetsForSession,
+  groupExists,
+  isGroupMember,
+  isAccountDeletionKey,
+  leaveGroup,
+  listPlanHistory,
+  listGroupsForUser,
+  listOAuthGrants,
+  logActivity,
+  logSet,
+  nextWorkoutOrderIndex,
+  nextExerciseOrderIndex,
+  patchWorkoutAtVersion,
+  patchSession,
+  patchCompletedSessionFeedback,
+  patchSet,
+  redeemInvite,
+  revokeAllOAuthGrants,
+  revokeOAuthGrant,
+  resolveExercise,
+  restorePlanSnapshot,
+  comparePlanVersions,
+  setPlanSchedule,
+  addTrip,
+  updateTrip,
+  removeTrip,
+  setProgram,
+  buildEventBlock,
+  setRace,
+  clearRace,
+  setPlannedSession,
+  moveCalendarWorkout,
+  skipPlannedSession,
+  setGroupDisplayName,
+  setUserDisplayName,
+  setUserIntervalsCreds,
+  createCoachConnectCode,
+  setHealthActivitySharing,
+  softDeleteActivity,
+  reviveDiscardedSession,
+  SessionWriteConflictError,
+  todayForUser,
+  updateExercise,
+  swapExercise,
+  upsertHealthKitActivity,
+  uploadRecordedRun,
+  storeRecordedRun,
+  type HeartRateRecovery,
+  getActivityRoute,
+  getActivitySwim,
+  getIntervalsActivityRoute,
+  getActivityStreams,
+  saveHealthKitRoute,
+  deleteRecordedRun,
+  deleteRecordedRunUpload,
+  getRecordedRun,
+  logEnduranceActivity,
+  getUserTimezone,
+  recordingFormat,
+  MAX_RECORDING_BYTES,
+  writeAudit,
+  ensureActivePlan,
+  saveAthleteThreshold,
+  removeAthleteThreshold,
+  getAthleteThresholds,
+  getThresholdSuggestions,
+  parseThresholdInput,
+  isCivilDate,
+  createOwnerTestMember,
+  deleteTestMemberSelf,
+  getGarminStatus,
+  disconnectGarmin,
+  getWhoopStatus,
+  disconnectWhoop,
+  syncWhoop,
+  listRecoveryDays,
+  WHOOP_SYNC_DAYS,
+} from '../db';
+import { isWorkoutWriteFenceEnabled } from '../workout-write-fence';
+import {
+  hasRetiredWorkoutFields,
+  hasField as hasOwn,
+  invalidFields as invalidMutationFields,
+  isNonEmptyString,
+  isNonNegativeInteger,
+  isPositiveInteger,
+  type FieldRule,
+} from '../validation';
+import { isScheduleExtrasInput, isScheduleTimesInput, SLOT_TARGET_FIELDS, TRIP_TYPES, WEEKDAYS } from '../types';
+import { parseEventBuildBody, parseRaceInput } from '../eventBuildRequest';
+import type { RaceGoal, Trip, TripType, Weekday } from '../types';
+import { clockInTz, enduranceAlias, intervalsTypeFor, parseClock } from '../enduranceActivity';
+import { deriveStationLinkKey, STATION_LINK_KEY_VERSION } from '../stationLink';
+
+export const apiRoutes = new Hono<HonoEnv>();
+apiRoutes.use('*', requireAppJwt);
+for (const path of ['/groups', '/groups/*', '/me/group-safety', '/me/group-blocks/*', '/group-safety/*']) {
+  apiRoutes.use(path, async (c, next) => {
+    c.header('Cache-Control', 'no-store');
+    await next();
+  });
+}
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+// Initial account deletion is too destructive to authorize with a bearer that
+// may have been rolling for months. A matching durable intent or receipt is
+// exempt so provider interruption cannot strand an already-authorized delete.
+const ACCOUNT_DELETION_RECENT_AUTH_SECONDS = 5 * 60;
+
+type JsonObject = Record<string, unknown>;
+
+const isFiniteNumber: FieldRule = (value) =>
+  typeof value === 'number' && Number.isFinite(value);
+const parsePositiveIntegerText = (value: string | undefined): number | undefined => {
+  if (value === undefined || !/^[1-9]\d*$/.test(value)) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+};
+const isNullableString: FieldRule = (value) =>
+  value === null || typeof value === 'string';
+const isNullableFiniteNumber: FieldRule = (value) =>
+  value === null || isFiniteNumber(value);
+const isNullableNonNegativeInteger: FieldRule = (value) =>
+  value === null || isNonNegativeInteger(value);
+
+/**
+ * JSON generics only describe a body to TypeScript; they do not validate the
+ * bytes a client actually sent. Keep the four session/set mutation routes on
+ * one stable error contract before any value reaches D1.
+ */
+async function readMutationBody(
+  c: Context<HonoEnv>,
+): Promise<
+  | { ok: true; body: JsonObject }
+  | { ok: false; error: 'invalid_json' | 'invalid_body' | 'unsupported_workout_fields' }
+> {
+  let value: unknown;
+  try {
+    value = await c.req.json<unknown>();
+  } catch {
+    return { ok: false, error: 'invalid_json' };
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return { ok: false, error: 'invalid_body' };
+  }
+  if (hasRetiredWorkoutFields(value as JsonObject)) {
+    return { ok: false, error: 'unsupported_workout_fields' };
+  }
+  return { ok: true, body: value as JsonObject };
+}
+
+function readExpectedAttemptQuery(
+  c: Context<HonoEnv>,
+): { ok: true; value?: number } | { ok: false } {
+  const raw = c.req.query('expected_attempt');
+  if (raw === undefined) return { ok: true };
+  if (raw.trim() === '') return { ok: false };
+  const value = Number(raw);
+  return isNonNegativeInteger(value)
+    ? { ok: true, value }
+    : { ok: false };
+}
+
+function readAttemptProtocolHeader(
+  c: Context<HonoEnv>,
+): { ok: true; declared: boolean } | { ok: false } {
+  const raw = c.req.header('X-TresFort-Write-Protocol');
+  if (raw === undefined) return { ok: true, declared: false };
+  return raw.trim().toLowerCase() === 'attempt-v1'
+    ? { ok: true, declared: true }
+    : { ok: false };
+}
+
+const protocolConflictBody = <T extends { status: string; attempt: number }>(
+  session: T,
+) => ({
+  error: 'session_attempt_required' as const,
+  status: session.status,
+  current_attempt: session.attempt,
+  current_session: session,
+});
+
+async function inactiveAttemptProtocolResponse(
+  c: Context<HonoEnv>,
+  declared: boolean,
+): Promise<Response | null> {
+  if (!declared || (await isWorkoutWriteFenceEnabled(c.env.DB))) return null;
+  // The compatibility Worker is live but the irreversible database cutover
+  // has not been activated yet. New-app intents are durable/retryable; make
+  // the temporary admission boundary explicit instead of surfacing a D1 500.
+  c.header('Retry-After', '5');
+  return c.json(
+    {
+      error: 'write_protocol_not_active',
+      protocol: 'attempt-v1',
+      retryable: true,
+    },
+    503,
+  );
+}
+
+// ---- sync pull -----------------------------------------------------------
+// Device timezone (X-Device-TZ) is captured for EVERY authenticated request
+// in the requireAppJwt middleware, so it stays fresh even on non-/state
+// actions after the user travels — not handled here anymore.
+apiRoutes.get('/state', async (c) => {
+  const userId = c.get('userId');
+  const since = Number(c.req.query('since') ?? 0);
+  const setsSince = Number(c.req.query('sets_since') ?? 0);
+  const eventsSince = Number(c.req.query('events_since') ?? 0);
+  const activitiesSince = Number(c.req.query('activities_since') ?? 0);
+  // log_since gates the M3 generic activity log delta (separate cursor —
+  // `activities_since` is already taken by the intervals.icu external
+  // actuals cache, see migration 0015 / getState).
+  const logSince = Number(c.req.query('log_since') ?? 0);
+  const capabilities = readCapabilities(c.req.header('X-TresFort-Capabilities'));
+  const state = await getState(c.env.DB, userId, since, setsSince, eventsSince, activitiesSince, logSince);
+  return measuredJson(c, { ...state, plan: state.plan
+    ? planForCapabilities(state.plan, capabilities)
+    : state.plan,
+    ...(capabilities.has('groups') ? { plan_groups_version: 1 } : {}) });
+});
+
+// ---- plan tree -----------------------------------------------------------
+apiRoutes.get('/plan/active', async (c) => {
+  const tree = await getPlanTree(c.env.DB, c.get('userId'));
+  return tree ? c.json(planForCapabilities(tree, readCapabilities(c.req.header('X-TresFort-Capabilities'))))
+    : c.json({ error: 'no_active_plan' }, 404);
+});
+
+apiRoutes.get('/plan/history', async (c) => {
+  const rawLimit = c.req.query('limit');
+  const rawBefore = c.req.query('before_version');
+  const limit = rawLimit === undefined ? 30 : parsePositiveIntegerText(rawLimit);
+  const before = parsePositiveIntegerText(rawBefore);
+  if (limit === undefined || limit > 100 ||
+      (rawBefore !== undefined && before === undefined)) {
+    return c.json({ error: 'invalid_fields', fields: [
+      ...(limit === undefined || limit > 100 ? ['limit'] : []),
+      ...(rawBefore !== undefined && before === undefined ? ['before_version'] : []),
+    ] }, 400);
+  }
+  const result = await listPlanHistory(
+    c.env.DB, c.get('userId'), limit,
+    before,
+  );
+  return 'error' in result ? c.json(result, 404) : c.json(result);
+});
+
+apiRoutes.get('/plan/history/:version/compare', async (c) => {
+  const from = parsePositiveIntegerText(c.req.param('version'));
+  const rawTo = c.req.query('to_version');
+  const to = rawTo === undefined || rawTo === 'current' ? undefined : parsePositiveIntegerText(rawTo);
+  if (from === undefined || (rawTo !== undefined && rawTo !== 'current' && to === undefined)) {
+    return c.json({ error: 'invalid_version' }, 400);
+  }
+  const result = await comparePlanVersions(
+    c.env.DB, c.get('userId'), from,
+    to,
+  );
+  return 'error' in result ? c.json(result, 404) : c.json(result);
+});
+
+apiRoutes.post('/plan/history/:version/restore', async (c) => {
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const b = parsed.body;
+  const version = parsePositiveIntegerText(c.req.param('version'));
+  const invalid = invalidMutationFields(b, {
+    expected_plan_id: isNonEmptyString,
+    expected_version: isPositiveInteger,
+  }, { reason: isNullableString });
+  if (version === undefined) invalid.push('snapshot_version');
+  if (invalid.length > 0) return c.json({ error: 'invalid_fields', fields: invalid }, 400);
+  const result = await restorePlanSnapshot(c.env.DB, c.get('userId'), {
+    plan_id: String(b.expected_plan_id), snapshot_version: version!,
+    expected_version: Number(b.expected_version), actor: c.get('appClient'),
+    reason: typeof b.reason === 'string' ? b.reason : null,
+  });
+  if ('conflict' in result || ('error' in result && result.error === 'active_workout')) {
+    return c.json(result, 409);
+  }
+  if ('error' in result && result.error === 'invalid_fields') return c.json(result, 400);
+  if ('error' in result) return c.json(result, 404);
+  if ('plan' in result) {
+    return c.json({ ...result, plan: planForCapabilities(result.plan,
+      readCapabilities(c.req.header('X-TresFort-Capabilities'))) });
+  }
+  return c.json(result);
+});
+
+// Idempotent manual-authoring bootstrap. This route deliberately does not use
+// createPlan: a retry or concurrent coach write must return the active winner,
+// never archive it.
+apiRoutes.put('/plan/active', async (c) => {
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const invalid = invalidMutationFields(parsed.body, { name: isNonEmptyString });
+  if (invalid.length > 0) return c.json({ error: 'invalid_fields', fields: invalid }, 400);
+  const userId = c.get('userId');
+  const result = await ensureActivePlan(c.env.DB, userId, String(parsed.body.name).trim(), {
+    actor: c.get('appClient'), operation: 'ensure_active_plan', args: parsed.body,
+  });
+  return c.json(result, result.created ? 201 : 200);
+});
+
+apiRoutes.post('/plan', async (c) => {
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const b = parsed.body;
+  const invalid = invalidMutationFields(b, { name: isNonEmptyString }, {
+    meta: (value) => value === null || (typeof value === 'object' && !Array.isArray(value)),
+  });
+  if (invalid.length > 0) return c.json({ error: 'invalid_fields', fields: invalid }, 400);
+  return c.json(await createPlan(c.env.DB, c.get('userId'), String(b.name).trim(), b.meta ?? null, {
+    actor: c.get('appClient'), operation: 'create_plan', args: b,
+  }), 201);
+});
+
+// A complete reviewed prescription, saved with one client-owned retry receipt.
+// Scheduling is a separate versioned write and can retry this acknowledgement.
+apiRoutes.post('/workouts/prescribed', async (c) => {
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const result = await createPrescribedWorkout(c.env.DB, c.get('userId'), parsed.body, c.get('appClient'));
+  return c.json(result, 'conflict' in result ? 409 : 'error' in result ?
+    result.error === 'invalid_fields' || result.error === 'invalid_exercises' || result.error === 'group_conflict' ? 400 : 409 : 201);
+});
+
+apiRoutes.post('/workouts', async (c) => {
+  const userId = c.get('userId');
+  const plan = await getActivePlan(c.env.DB, userId);
+  if (!plan) return c.json({ error: 'no_active_plan' }, 400);
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const b = parsed.body;
+  const invalid = invalidMutationFields(
+    b,
+    { name: isNonEmptyString },
+    {
+      tags: validWorkoutTags,
+      archived_at: validArchivedAt,
+      day_label: isNullableString,
+      order_index: isNonNegativeInteger,
+      expected_plan_id: isNonEmptyString,
+      expected_version: isPositiveInteger,
+      exercise_ids: (value) => Array.isArray(value) && value.length > 0 && value.length <= 50
+        && value.every(isNonEmptyString) && new Set(value).size === value.length,
+      // A one-time workout (workout-library P3): made for one date, kept out
+      // of the library and the week; `id` makes a retry safe and `copy_from`
+      // starts it as a copy of another workout as it reads that date.
+      one_time_date: (value) => typeof value === 'string' && ISO_DATE_RE.test(value),
+      id: (value) => typeof value === 'string' && UUID_RE.test(value),
+      copy_from: isNonEmptyString,
+    },
+  );
+  if (invalid.length > 0) return c.json({ error: 'invalid_fields', fields: invalid }, 400);
+  const oneTime = hasOwn(b, 'one_time_date');
+  if ((hasOwn(b, 'id') || hasOwn(b, 'copy_from')) && !oneTime) {
+    return c.json({ error: 'invalid_fields', fields: ['one_time_date'] }, 400);
+  }
+  if (oneTime && (!hasOwn(b, 'id') || !hasOwn(b, 'expected_plan_id') || !hasOwn(b, 'expected_version')
+      || hasOwn(b, 'day_label') || hasOwn(b, 'archived_at'))) {
+    return c.json({ error: 'invalid_fields', fields: ['id', 'expected_plan_id', 'expected_version'] }, 400);
+  }
+  // A retry after a lost response returns the workout the first request
+  // made, although that request moved the plan version.
+  const made = oneTime ? await oneTimeWorkoutReceipt(c.env.DB, plan.id, String(b.id), String(b.one_time_date),
+    String(b.name).trim()) : null;
+  if (made) return c.json(made, 'error' in made ? 409 : 201);
+  if (hasOwn(b, 'expected_plan_id') && b.expected_plan_id !== plan.id) {
+    return c.json({ conflict: true, current_plan_id: plan.id, current_version: plan.version }, 409);
+  }
+  if (hasOwn(b, 'expected_version') && b.expected_version !== plan.version) {
+    return c.json({ conflict: true, current_version: plan.version }, 409);
+  }
+  if (hasOwn(b, 'exercise_ids') && (!hasOwn(b, 'expected_plan_id') || !hasOwn(b, 'expected_version'))) {
+    return c.json({ error: 'invalid_fields', fields: ['expected_plan_id', 'expected_version'] }, 400);
+  }
+  const orderIndex = hasOwn(b, 'order_index')
+    ? Number(b.order_index)
+    : await nextWorkoutOrderIndex(c.env.DB, plan.id);
+  const row = await addWorkoutAtVersion(
+    c.env.DB,
+    userId,
+    plan,
+    String(b.name).trim(),
+    typeof b.day_label === 'string' ? b.day_label : null,
+    orderIndex,
+    { actor: c.get('appClient'), operation: 'add_workout', args: b },
+    b.exercise_ids as string[] | undefined,
+    { tags: b.tags as string[] | undefined, archived_at: b.archived_at as number | null | undefined },
+    oneTime ? { date: String(b.one_time_date), id: String(b.id),
+      copyFrom: b.copy_from as string | undefined } : undefined,
+  );
+  if ('error' in row) return c.json(row, row.error === 'one_time_workout_conflict' ? 409 : 400);
+  if ('conflict' in row) return c.json(row, 409);
+  return c.json(row, 201);
+});
+
+apiRoutes.patch('/workouts/:id', async (c) => {
+  const userId = c.get('userId');
+  const plan = await getActivePlan(c.env.DB, userId);
+  if (!plan) return c.json({ error: 'no_active_plan' }, 400);
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const b = parsed.body;
+  const invalid = invalidMutationFields(
+    b,
+    {},
+    {
+      name: isNonEmptyString,
+      tags: validWorkoutTags,
+      archived_at: validArchivedAt,
+      day_label: isNullableString,
+      order_index: isNonNegativeInteger,
+      notes: isNullableString,
+      expected_version: isPositiveInteger,
+    },
+  );
+  if (invalid.length > 0) return c.json({ error: 'invalid_fields', fields: invalid }, 400);
+  if (hasOwn(b, 'expected_version') && b.expected_version !== plan.version) {
+    return c.json({ conflict: true, current_version: plan.version }, 409);
+  }
+  if ((hasOwn(b, 'tags') || hasOwn(b, 'archived_at')) && !hasOwn(b, 'expected_version')) {
+    return c.json({ error: 'invalid_fields', fields: ['expected_version'] }, 400);
+  }
+  const { expected_version: _expectedVersion, ...patch } = b;
+  const row = await patchWorkoutAtVersion(
+    c.env.DB, userId, plan, c.req.param('id'), patch,
+    { actor: c.get('appClient'), operation: 'update_workout', args: b },
+  );
+  if (!row) return c.json({ error: 'not_found' }, 404);
+  if ('conflict' in row) return c.json(row, 409);
+  if ('error' in row) return c.json(row, 400);
+  return c.json(row);
+});
+
+apiRoutes.delete('/workouts/:id', async (c) => {
+  const userId = c.get('userId');
+  const plan = await getActivePlan(c.env.DB, userId);
+  if (!plan) return c.json({ error: 'no_active_plan' }, 400);
+  const rawExpected = c.req.query('expected_version');
+  if (rawExpected !== undefined) {
+    const expected = Number(rawExpected);
+    if (!isPositiveInteger(expected)) {
+      return c.json({ error: 'invalid_fields', fields: ['expected_version'] }, 400);
+    }
+    if (expected !== plan.version) {
+      return c.json({ conflict: true, current_version: plan.version }, 409);
+    }
+  }
+  const dayId = c.req.param('id');
+  const result = await deleteWorkoutAtVersion(c.env.DB, userId, plan, dayId, {
+    actor: c.get('appClient'), operation: c.req.path.startsWith('/api/workouts') ? 'delete_workout' : 'delete_day', args: { workout_id: dayId },
+  });
+  if ('conflict' in result) return c.json(result, 409);
+  if ('error' in result && result.error === 'day_in_progress') {
+    return c.json(result, 409);
+  }
+  if ('error' in result) return c.json({ error: 'not_found' }, 404);
+  return c.json(result);
+});
+
+apiRoutes.put('/plan/schedule', async (c) => {
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const b = parsed.body;
+  const invalid = invalidMutationFields(
+    b,
+    { week: (value) => value !== null && typeof value === 'object' && !Array.isArray(value) },
+    {
+      expected_plan_id: isNonEmptyString,
+      expected_version: isPositiveInteger,
+      extras: isScheduleExtrasInput,
+      times: isScheduleTimesInput,
+    },
+  );
+  if (invalid.length > 0) return c.json({ error: 'invalid_fields', fields: invalid }, 400);
+  const week = b.week as Record<string, unknown>;
+  const badKeys = Object.keys(week).filter(
+    (key) => !(WEEKDAYS as readonly string[]).includes(key),
+  );
+  const badValues = Object.entries(week)
+    .filter(([, value]) => value !== null && typeof value !== 'string')
+    .map(([key]) => key);
+  if (badKeys.length > 0 || badValues.length > 0) {
+    return c.json({ error: 'invalid_fields', fields: [...new Set([...badKeys, ...badValues])] }, 400);
+  }
+  const userId = c.get('userId');
+  const result = await setPlanSchedule(
+    c.env.DB,
+    userId,
+    week as Partial<Record<Weekday, string | null>>,
+    typeof b.expected_version === 'number' ? b.expected_version : null,
+    typeof b.expected_plan_id === 'string' ? b.expected_plan_id : null,
+    { actor: c.get('appClient'), operation: 'set_schedule', args: b },
+    hasOwn(b, 'extras') ? b.extras as Partial<Record<Weekday, string[]>> : undefined,
+    hasOwn(b, 'times') ? b.times as Partial<Record<Weekday, Record<string, string>>> : undefined,
+  );
+  if ('conflict' in result) return c.json(result, 409);
+  if ('error' in result) return c.json(result, 400);
+  return c.json(result);
+});
+
+// Away dates (plans.meta.trips): the member's own add, edit and remove of the
+// availability ranges the coach writes with add_trip / update_trip /
+// remove_trip. Same versioned plan-meta writer and audit row, actor 'ios' or 'web'.
+// The app always holds the plan it shows, so expected_version is required.
+const TRIP_FIELDS: Record<string, FieldRule> = {
+  start: (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v),
+  end: (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v),
+  type: (v) => typeof v === 'string' && TRIP_TYPES.has(v),
+  can_train_light: (v) => typeof v === 'boolean',
+  note: (v) => typeof v === 'string' && v.length <= 500,
+};
+const TRIP_KEYS = new Set([...Object.keys(TRIP_FIELDS), 'expected_version']);
+
+function tripWriteResponse(
+  c: Context<HonoEnv>,
+  result: { conflict: true; current_version: number } | { error: string } | { ok: true },
+) {
+  if ('conflict' in result) return c.json(result, 409);
+  if ('error' in result) {
+    return c.json(result, result.error === 'trip_not_found' ? 404 : 400);
+  }
+  return c.json(result);
+}
+
+// A block of weeks (docs/plans/progressive-plans P0): replaced whole, or
+// cleared, through the same versioned service as the coach's set_program.
+const PROGRAM_KEYS = new Set(['program', 'expected_version']);
+const PROGRAM_BODY_KEYS = new Set(['name', 'start', 'repeat', 'weeks']);
+const PROGRAM_WEEK_KEYS = new Set(['label', 'week', 'extras', 'targets']);
+
+function programWriteResponse(c: Context<HonoEnv>, result: SetProgramResult) {
+  if ('conflict' in result) return c.json(result, 409);
+  if ('error' in result) return c.json(result, result.error === 'no_active_plan' ? 404 : 400);
+  return c.json(result);
+}
+
+apiRoutes.put('/plan/program', async (c) => {
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const b = parsed.body;
+  const invalid = Object.keys(b).filter((key) => !PROGRAM_KEYS.has(key));
+  if (!isPositiveInteger(b.expected_version)) invalid.push('expected_version');
+  const program = b.program as Record<string, unknown> | undefined;
+  if (!program || typeof program !== 'object' || Array.isArray(program)) invalid.push('program');
+  else {
+    invalid.push(...Object.keys(program).filter((key) => !PROGRAM_BODY_KEYS.has(key)).map((key) => `program.${key}`));
+    if (program.repeat !== undefined && typeof program.repeat !== 'boolean') invalid.push('program.repeat');
+    if (Array.isArray(program.weeks)) {
+      program.weeks.forEach((week, index) => {
+        if (week && typeof week === 'object' && !Array.isArray(week)) {
+          invalid.push(...Object.keys(week).filter((key) => !PROGRAM_WEEK_KEYS.has(key))
+            .map((key) => `program.weeks.${index}.${key}`));
+          // Weekday maps take only mon..sun, as PUT /plan/schedule does, so a
+          // misspelled day is rejected instead of saved as a rest day.
+          for (const field of ['week', 'extras'] as const) {
+            const map = (week as Record<string, unknown>)[field];
+            if (map === undefined || (field === 'extras' && map === null)) continue;
+            if (!map || typeof map !== 'object' || Array.isArray(map)) {
+              invalid.push(`program.weeks.${index}.${field}`);
+              continue;
+            }
+            for (const [key, value] of Object.entries(map)) {
+              const ok = (WEEKDAYS as readonly string[]).includes(key) && (field === 'week'
+                ? value === null || typeof value === 'string'
+                : Array.isArray(value) && value.every((ref) => typeof ref === 'string'));
+              if (!ok) invalid.push(`program.weeks.${index}.${field}.${key}`);
+            }
+          }
+          // Slot id → target fields; values are checked by the service with
+          // the slot's own rules.
+          const targets = (week as Record<string, unknown>).targets;
+          if (targets !== undefined && targets !== null) {
+            if (typeof targets !== 'object' || Array.isArray(targets)) invalid.push(`program.weeks.${index}.targets`);
+            else {
+              for (const [slot, fields] of Object.entries(targets)) {
+                if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
+                  invalid.push(`program.weeks.${index}.targets.${slot}`);
+                  continue;
+                }
+                invalid.push(...Object.keys(fields)
+                  .filter((key) => !(SLOT_TARGET_FIELDS as readonly string[]).includes(key))
+                  .map((key) => `program.weeks.${index}.targets.${slot}.${key}`));
+              }
+            }
+          }
+        }
+      });
+    }
+  }
+  if (invalid.length > 0) return c.json({ error: 'invalid_fields', fields: invalid }, 400);
+  const result = await setProgram(c.env.DB, c.get('userId'), program as unknown as ProgramInput,
+    b.expected_version as number, { actor: c.get('appClient'), operation: 'set_program', args: b });
+  return programWriteResponse(c, result);
+});
+
+apiRoutes.delete('/plan/program', async (c) => {
+  const expected = Number(c.req.query('expected_version'));
+  if (!isPositiveInteger(expected)) {
+    return c.json({ error: 'invalid_fields', fields: ['expected_version'] }, 400);
+  }
+  const result = await setProgram(c.env.DB, c.get('userId'), null, expected, {
+    actor: c.get('appClient'), operation: 'set_program', args: { program: null, expected_version: expected },
+  });
+  return programWriteResponse(c, result);
+});
+
+// "Train for an event" (docs/plans/progressive-plans P3): lay out a block of
+// weeks to the event by fixed rules. A preview by default; `save: true`
+// writes the event and the block together.
+function buildResponse(c: Context<HonoEnv>, result: EventBuildResult) {
+  if ('conflict' in result) return c.json(result, 409);
+  if ('error' in result) return c.json(result, result.error === 'no_active_plan' ? 404 : 400);
+  return c.json(result);
+}
+
+apiRoutes.post('/plan/program/build', async (c) => {
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const b = parsed.body;
+  const request = parseEventBuildBody(b);
+  if ('invalid' in request) return c.json({ error: 'invalid_fields', fields: request.invalid }, 400);
+  const save = request.expectedVersion != null
+    ? { expectedVersion: request.expectedVersion,
+        attribution: { actor: c.get('appClient'), operation: 'build_program', args: b } as const }
+    : null;
+  const result = await buildEventBlock(c.env.DB, c.get('userId'), request.input, save);
+  return buildResponse(c, result);
+});
+
+// The member's goal event (plans.meta.race; docs/plans/coach-free-planning
+// P1): set whole, or cleared, through the same versioned service as the
+// coach's set_race. A goal time and a distance in meters are optional; with
+// both a client can work out the goal pace.
+const RACE_KEYS = new Set(['race', 'expected_version']);
+function raceWriteResponse(
+  c: Context<HonoEnv>,
+  result: { conflict: true; current_version: number } | { error: string } | { ok: true },
+) {
+  if ('conflict' in result) return c.json(result, 409);
+  if ('error' in result) return c.json(result, result.error === 'no_active_plan' ? 404 : 400);
+  return c.json(result);
+}
+
+apiRoutes.put('/plan/race', async (c) => {
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const b = parsed.body;
+  const invalid = Object.keys(b).filter((key) => !RACE_KEYS.has(key));
+  if (!isPositiveInteger(b.expected_version)) invalid.push('expected_version');
+  const parsedRace = parseRaceInput(b.race);
+  if ('invalid' in parsedRace) invalid.push(...parsedRace.invalid);
+  if (invalid.length > 0 || !('race' in parsedRace)) {
+    return c.json({ error: 'invalid_fields', fields: [...new Set(invalid)] }, 400);
+  }
+  const race = parsedRace.race;
+  const result = await setRace(c.env.DB, c.get('userId'), race, b.expected_version as number, {
+    actor: c.get('appClient'), operation: 'set_race', args: b,
+  });
+  return raceWriteResponse(c, result);
+});
+
+apiRoutes.delete('/plan/race', async (c) => {
+  const expected = Number(c.req.query('expected_version'));
+  if (!isPositiveInteger(expected)) {
+    return c.json({ error: 'invalid_fields', fields: ['expected_version'] }, 400);
+  }
+  const result = await clearRace(c.env.DB, c.get('userId'), expected, {
+    actor: c.get('appClient'), operation: 'clear_race', args: { expected_version: expected },
+  });
+  return raceWriteResponse(c, result);
+});
+
+apiRoutes.post('/plan/trips', async (c) => {
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const b = parsed.body;
+  const unknown = Object.keys(b).filter((key) => !TRIP_KEYS.has(key));
+  const { start, end, ...rest } = TRIP_FIELDS;
+  const invalid = [
+    ...unknown,
+    ...invalidMutationFields(
+      b,
+      { start: start!, end: end!, expected_version: isPositiveInteger },
+      rest,
+    ),
+  ];
+  if (invalid.length > 0) return c.json({ error: 'invalid_fields', fields: invalid }, 400);
+  const trip: Omit<Trip, 'id'> = {
+    start: b.start as string,
+    end: b.end as string,
+    type: (typeof b.type === 'string' ? b.type : 'travel') as TripType,
+  };
+  if (typeof b.can_train_light === 'boolean') trip.can_train_light = b.can_train_light;
+  if (typeof b.note === 'string') trip.note = b.note;
+  const result = await addTrip(c.env.DB, c.get('userId'), trip, b.expected_version as number, {
+    actor: c.get('appClient'), operation: 'add_trip', args: b,
+  });
+  return tripWriteResponse(c, result);
+});
+
+apiRoutes.patch('/plan/trips/:id', async (c) => {
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const b = parsed.body;
+  const unknown = Object.keys(b).filter((key) => !TRIP_KEYS.has(key));
+  const invalid = [
+    ...unknown,
+    ...invalidMutationFields(b, { expected_version: isPositiveInteger }, TRIP_FIELDS),
+  ];
+  if (invalid.length > 0) return c.json({ error: 'invalid_fields', fields: invalid }, 400);
+  const patch: Partial<Omit<Trip, 'id'>> = {};
+  if (typeof b.start === 'string') patch.start = b.start;
+  if (typeof b.end === 'string') patch.end = b.end;
+  if (typeof b.type === 'string') patch.type = b.type as TripType;
+  if (typeof b.can_train_light === 'boolean') patch.can_train_light = b.can_train_light;
+  if (typeof b.note === 'string') patch.note = b.note;
+  const id = c.req.param('id');
+  const result = await updateTrip(
+    c.env.DB, c.get('userId'), id, patch, b.expected_version as number,
+    { actor: c.get('appClient'), operation: 'update_trip', args: { ...b, id } },
+  );
+  return tripWriteResponse(c, result);
+});
+
+apiRoutes.delete('/plan/trips/:id', async (c) => {
+  const expected = Number(c.req.query('expected_version'));
+  if (!isPositiveInteger(expected)) {
+    return c.json({ error: 'invalid_fields', fields: ['expected_version'] }, 400);
+  }
+  const id = c.req.param('id');
+  const result = await removeTrip(c.env.DB, c.get('userId'), id, expected, {
+    actor: c.get('appClient'), operation: 'remove_trip', args: { id, expected_version: expected },
+  });
+  return tripWriteResponse(c, result);
+});
+
+// One concrete date only. `workout_id: null` means rest; either branch
+// mutates sessions and deliberately leaves the recurring schedule/version
+// untouched.
+async function assignCalendarSession(c: Context<HonoEnv>) {
+  const date = c.req.param('date')!;
+  const rawSlot = c.req.param('slot');
+  const slot = rawSlot === undefined ? 0 : Number(rawSlot);
+  if ((rawSlot !== undefined && !/^(0|[1-9][0-9]*)$/.test(rawSlot)) || !Number.isSafeInteger(slot)) return c.json({ error: 'invalid_slot' }, 400);
+  if (!ISO_DATE_RE.test(date)) return c.json({ error: 'invalid_date' }, 400);
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const b = parsed.body;
+  const invalid = invalidMutationFields(
+    b,
+    { workout_id: (value) => value === null || isNonEmptyString(value) },
+    { expected_attempt: isNonNegativeInteger },
+  );
+  if (invalid.length > 0) return c.json({ error: 'invalid_fields', fields: invalid }, 400);
+  const userId = c.get('userId');
+  // Attempt zero is the explicit absence token for released clients that did
+  // not yet send the field. The first assignment persists as attempt one.
+  const expectedAttempt = typeof b.expected_attempt === 'number' ? b.expected_attempt : 0;
+  const isRest = b.workout_id === null;
+  const result = isRest
+    ? await skipPlannedSession(c.env.DB, userId, date, expectedAttempt, slot)
+    : await setPlannedSession(c.env.DB, userId, date, String(b.workout_id), expectedAttempt, slot);
+  if ('conflict' in result) return c.json(result, 409);
+  if ('error' in result) {
+    const conflict = result.error === 'session_attempt_conflict'
+      || result.error === 'session_attempt_missing'
+      || result.error === 'session_state_conflict'
+      || result.error === 'session_already_started';
+    return c.json(result, conflict ? 409 : 400);
+  }
+  await writeAudit(
+    c.env.DB,
+    userId,
+    isRest ? 'skip_planned_session' : 'set_planned_session',
+    { date, slot, workout_id: b.workout_id },
+    result.session.id,
+    c.get('appClient'),
+  );
+  return c.json(result);
+}
+apiRoutes.put('/calendar/:date', assignCalendarSession);
+apiRoutes.put('/calendar/:date/:slot', assignCalendarSession);
+
+apiRoutes.post('/calendar/:date/move', async (c) => {
+  const date = c.req.param('date');
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const b = parsed.body;
+  const civilDate: FieldRule = (value) => typeof value === 'string' && ISO_DATE_RE.test(value)
+    && Number.isFinite(Date.parse(`${value}T12:00:00Z`))
+    && new Date(`${value}T12:00:00Z`).toISOString().slice(0, 10) === value;
+  const invalid = invalidMutationFields(b, {
+    id: (value) => typeof value === 'string' && UUID_RE.test(value),
+    to_date: civilDate, today: civilDate, workout_id: isNonEmptyString,
+    expected_plan_id: isNonEmptyString, expected_version: isPositiveInteger,
+    expected_from_attempt: isNonNegativeInteger, expected_to_attempt: isNonNegativeInteger,
+  }, {});
+  if (!civilDate(date) || invalid.length) return c.json({ error: 'invalid_fields', fields: invalid }, 400);
+  const result = await moveCalendarWorkout(c.env.DB, c.get('userId'), {
+    id: String(b.id), from_date: date, to_date: String(b.to_date), today: String(b.today),
+    workout_id: String(b.workout_id), expected_plan_id: String(b.expected_plan_id),
+    expected_version: Number(b.expected_version), expected_from_attempt: Number(b.expected_from_attempt),
+    expected_to_attempt: Number(b.expected_to_attempt),
+  }, c.get('appClient'));
+  return c.json(result, 'error' in result ? 409 : 200);
+});
+
+// Group authoring always carries an observed plan version. Empty membership
+// explicitly clears a group; the service owns retry recognition and attribution.
+apiRoutes.put('/workouts/:id/groups', async (c) => {
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const b = parsed.body;
+  const unknown = Object.keys(b).filter((key) =>
+    !['group_id', 'exercises', 'expected_version', 'round_rest', 'transition_rest', 'target_sets', 'order_index'].includes(key));
+  if (unknown.length) return c.json({ error: 'unknown_fields', fields: unknown }, 400);
+  const invalid = invalidMutationFields(b, {
+    group_id: isGroupId,
+    exercises: (value) => Array.isArray(value) && value.every(isNonEmptyString),
+    expected_version: isPositiveInteger,
+  }, { round_rest: isNonNegativeInteger, transition_rest: isNonNegativeInteger, target_sets: isPositiveInteger, order_index: isNonNegativeInteger });
+  if (invalid.length) return c.json({ error: 'invalid_fields', fields: invalid }, 400);
+  const members = b.exercises as string[];
+  const userId = c.get('userId');
+  const dayId = c.req.param('id');
+  const attribution = { actor: c.get('appClient'), operation: members.length ? 'group_exercises' : 'ungroup_exercises',
+    args: b, note: members.length ? 'Grouped exercise slots.' : 'Ungrouped exercise slots.' };
+  if (members.length === 0) {
+    if (['round_rest', 'transition_rest', 'target_sets', 'order_index'].some((field) => hasOwn(b, field))) {
+      return c.json({ error: 'invalid_fields', fields: ['exercises'] }, 400);
+    }
+  } else if (!hasOwn(b, 'round_rest')) {
+    return c.json({ error: 'invalid_fields', fields: ['round_rest'] }, 400);
+  }
+  const result = members.length === 0
+    ? await clearGroup(c.env.DB, userId, b.group_id as string, b.expected_version as number, attribution, dayId)
+    : await setGroup(c.env.DB, userId, dayId, b.group_id as string, members, {
+        expected_version: b.expected_version as number, round_rest: b.round_rest as number,
+        ...(hasOwn(b, 'transition_rest') ? { transition_rest: b.transition_rest as number } : {}),
+        ...(hasOwn(b, 'target_sets') ? { target_sets: b.target_sets as number } : {}),
+        ...(hasOwn(b, 'order_index') ? { order_index: b.order_index as number } : {}),
+      }, attribution);
+  if ('conflict' in result || ('error' in result && result.error === 'group_conflict')) return c.json(result, 409);
+  if ('error' in result) return c.json(result, result.error === 'day_not_found' ? 404 : 400);
+  return c.json(result);
+});
+
+apiRoutes.post('/workouts/:id/exercises', async (c) => {
+  const userId = c.get('userId');
+  const plan = await getActivePlan(c.env.DB, userId);
+  if (!plan) return c.json({ error: 'no_active_plan' }, 400);
+  const dayId = c.req.param('id');
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const b = parsed.body as {
+    expected_version?: number;
+    exercise: string;
+    order_index?: number;
+    target_sets: number;
+    target_reps: number;
+    target_reps_max?: number | null;
+    target_rpe?: number | null;
+    rest_seconds?: number;
+    target_weight?: number | null;
+    target_weight_unit?: 'lb' | 'kg';
+    target_duration_s?: number | null;
+    progression?: unknown;
+    cues?: string | null;
+    is_warmup?: boolean;
+    run_steps?: unknown;
+  };
+  const versionFields = invalidMutationFields(b, {}, { expected_version: isPositiveInteger });
+  if (versionFields.length) return c.json({ error: 'invalid_fields', fields: versionFields }, 400);
+  if (b.expected_version !== undefined && b.expected_version !== plan.version) {
+    return c.json({ conflict: true, current_version: plan.version }, 409);
+  }
+  // Resolve the nested day through THIS user's active plan before resolving
+  // the exercise or computing order. A globally-valid day from another user
+  // or one of this user's archived plans is intentionally indistinguishable
+  // from a missing day and can never receive a slot or bump the active plan.
+  const day = await getWorkoutInPlan(c.env.DB, plan.id, dayId);
+  if (!day) return c.json({ error: 'not_found' }, 404);
+  const groupFields = Object.keys(b).filter((key) => ['group_id', 'group_rest_seconds', 'group_transition_seconds'].includes(key));
+  if (groupFields.length) return c.json({ error: 'unknown_fields', fields: groupFields }, 400);
+  if (!isNonEmptyString(b.exercise)) return c.json({ error: 'invalid_fields', fields: ['exercise'] }, 400);
+  const ex = await resolveExercise(c.env.DB, b.exercise);
+  if (!ex) return c.json({ error: 'unknown_exercise', query: b.exercise }, 400);
+  const orderIndex =
+    b.order_index !== undefined
+      ? b.order_index
+      : await nextExerciseOrderIndex(c.env.DB, dayId);
+  const row = await addTemplateExercise(c.env.DB, plan.id, {
+    workout_id: dayId,
+    exercise_id: (ex as { id: string }).id,
+    order_index: orderIndex,
+    target_sets: b.target_sets,
+    target_reps: b.target_reps,
+    target_reps_max: b.target_reps_max ?? null,
+    target_rpe: b.target_rpe ?? null,
+    rest_seconds: b.rest_seconds === undefined ? 120 : b.rest_seconds,
+    target_weight: b.target_weight ?? null,
+    ...(b.target_weight_unit === undefined ? {} : { target_weight_unit: b.target_weight_unit }),
+    target_duration_s: b.target_duration_s ?? null,
+    progression: b.progression == null ? null : JSON.stringify(b.progression),
+    cues: b.cues ?? null,
+    is_warmup: b.is_warmup === undefined ? 0 : b.is_warmup as unknown as number | boolean,
+    ...(b.run_steps === undefined ? {} : { run_steps: b.run_steps }),
+  }, { actor: c.get('appClient'), operation: 'add_exercise', args: b }, { expectedVersion: b.expected_version });
+  const response = slotEditResponse(row, 201);
+  return c.json(response.body, response.status);
+});
+
+// A workout-only substitution is an edit of the observed session attempt.
+apiRoutes.post('/sessions/:id/exercises/:teId/swap', async (c) => {
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const b = parsed.body;
+  const invalid = invalidMutationFields(b, { to_exercise: isNonEmptyString,
+    expected_attempt: isNonNegativeInteger, expected_version: isPositiveInteger,
+    expected_revision: isNonNegativeInteger }, {});
+  invalid.push(...Object.keys(b).filter((key) => !['to_exercise', 'expected_attempt',
+    'expected_version', 'expected_revision'].includes(key)));
+  if (invalid.length) return c.json({ error: 'invalid_fields', fields: invalid }, 400);
+  const result = await swapSessionExercise(c.env.DB, c.get('userId'), c.req.param('id'), c.req.param('teId'), {
+    to_exercise: String(b.to_exercise), expected_attempt: Number(b.expected_attempt),
+    expected_version: Number(b.expected_version), expected_revision: Number(b.expected_revision),
+  });
+  if ('error' in result) return c.json(result, result.error === 'not_found' ? 404
+    : ['exercise_not_found', 'incompatible_measure'].includes(result.error) ? 400 : 409);
+  return c.json(result);
+});
+
+// Replace the exact slot, optionally with its reviewed new targets, in one
+// versioned mutation. A stale review cannot replace an intervening edit.
+apiRoutes.post('/workouts/:id/exercises/:teId/swap', async (c) => {
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const b = parsed.body;
+  const invalid = invalidMutationFields(b, {
+    to_exercise: isNonEmptyString,
+    expected_version: isPositiveInteger,
+  }, { targets: (value) => value !== null && typeof value === 'object' && !Array.isArray(value) });
+  invalid.push(...Object.keys(b).filter((key) => !['to_exercise', 'expected_version', 'targets'].includes(key)));
+  if (invalid.length) return c.json({ error: 'invalid_fields', fields: invalid }, 400);
+  const ref = {
+    template_exercise_id: c.req.param('teId'),
+    workout_id: c.req.param('id'),
+    to_exercise: b.to_exercise as string,
+    expected_version: b.expected_version as number,
+    ...(hasOwn(b, 'targets') ? { targets: b.targets as ExerciseReplacementTargets } : {}),
+  };
+  const row = await swapExercise(c.env.DB, c.get('userId'), ref, {
+    actor: c.get('appClient'), operation: 'swap_exercise', args: ref,
+  });
+  if (!row) return c.json({ error: 'not_found' }, 404);
+  if ('conflict' in row) return c.json(row, 409);
+  if ('error' in row) return c.json(row, 400);
+  return c.json(row);
+});
+
+// Edit one exercise slot in place (targets / rest / warm-up flag / order).
+// Shared with MCP, audited as iOS, and scoped to the URL's day and caller.
+apiRoutes.patch('/workouts/:id/exercises/:teId', async (c) => {
+  const userId = c.get('userId');
+  const dayId = c.req.param('id');
+  const teId = c.req.param('teId');
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const b = parsed.body as {
+    expected_version?: number;
+    target_sets?: number;
+    target_reps?: number;
+    target_reps_max?: number | null;
+    target_rpe?: number | null;
+    rest_seconds?: number;
+    target_weight?: number | null;
+    target_weight_unit?: 'lb' | 'kg';
+    target_duration_s?: number | null;
+    cues?: string | null;
+    progression?: unknown;
+    order_index?: number;
+    is_warmup?: boolean;
+    run_steps?: unknown;
+  };
+  const versionFields = invalidMutationFields(b, {}, { expected_version: isPositiveInteger });
+  if (versionFields.length) return c.json({ error: 'invalid_fields', fields: versionFields }, 400);
+  const { expected_version, ...fields } = b;
+  const patch: Record<string, unknown> = { ...fields };
+  if (typeof b.is_warmup === 'boolean') patch.is_warmup = b.is_warmup ? 1 : 0;
+  const row = await updateExercise(c.env.DB, userId, { template_exercise_id: teId, workout_id: dayId }, patch, {
+    actor: c.get('appClient'), operation: 'update_exercise', args: b,
+  }, { expectedVersion: expected_version });
+  const response = slotEditResponse(row);
+  return c.json(response.body, response.status);
+});
+
+// Remove one exercise slot from a day. Detaches (NULLs) any historical
+// set_logs.template_exercise_id rather than deleting logged work. Version-
+// bumped + audited. Scoped to the URL :id day (see the PATCH above): a slot
+// from another day resolves to null → 404, never deleting the wrong exercise.
+apiRoutes.delete('/workouts/:id/exercises/:teId', async (c) => {
+  const userId = c.get('userId');
+  const dayId = c.req.param('id');
+  const teId = c.req.param('teId');
+  const rawVersion = c.req.query('expected_version');
+  const expectedVersion = parsePositiveIntegerText(rawVersion);
+  if (rawVersion !== undefined && expectedVersion === undefined) {
+    return c.json({ error: 'invalid_fields', fields: ['expected_version'] }, 400);
+  }
+  const row = await deleteTemplateExercise(c.env.DB, userId, { template_exercise_id: teId, workout_id: dayId }, {
+    actor: c.get('appClient'), operation: 'delete_exercise', args: { template_exercise_id: teId, expected_version: expectedVersion },
+  }, { expectedVersion });
+  const response = slotEditResponse(row);
+  return c.json(response.body, response.status);
+});
+
+// ---- sessions + sets -----------------------------------------------------
+apiRoutes.get('/sessions/:id/workout-draft', async (c) => {
+  const draft = await getFreestyleWorkoutDraft(c.env.DB,c.get('userId'),c.req.param('id'));
+  return 'error' in draft ? c.json(draft,draft.error==='not_found'?404:409) : c.json(draft);
+});
+
+apiRoutes.post('/sessions/:id/save-workout', async (c) => {
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({error:parsed.error},400);
+  const b=parsed.body;
+  const invalid=invalidMutationFields(b, {
+    workout_id:(v)=>typeof v==='string' && UUID_RE.test(v), name:isNonEmptyString,
+    expected_plan_id:isNonEmptyString,expected_version:isPositiveInteger,expected_attempt:isNonNegativeInteger,
+    source_signature:(v)=>typeof v==='string',slots:(v)=>Array.isArray(v) && v.length>0 && v.length<=50
+      && v.every(s=>s!==null && typeof s==='object' && !Array.isArray(s)
+        && isNonEmptyString(s.exercise_id) && isPositiveInteger(s.target_sets)
+        && isPositiveInteger(s.target_reps) && (s.target_duration_s===null || isPositiveInteger(s.target_duration_s))
+        && isFiniteNumber(s.target_weight) && isNonNegativeInteger(s.rest_seconds)
+        && (s.target_weight_unit === undefined || s.target_weight_unit === 'lb' || s.target_weight_unit === 'kg')
+        && Array.isArray(s.source_set_ids) && s.source_set_ids.length>0 && s.source_set_ids.every(isNonEmptyString)),
+  });
+  if (invalid.length) return c.json({error:'invalid_fields',fields:invalid},400);
+  const result=await saveFreestyleWorkout(c.env.DB,c.get('userId'),c.req.param('id'),b as unknown as SaveFreestyleInput);
+  return 'error' in result || 'conflict' in result ? c.json(result,409) : c.json(result,201);
+});
+
+apiRoutes.get('/today', async (c) => {
+  const userId = c.get('userId');
+  const plan = await getActivePlan(c.env.DB, userId);
+  if (!plan) return c.json({ error: 'no_active_plan' }, 400);
+  const date = await todayForUser(c.env.DB, userId);
+  const session = await getOrCreateSession(
+    c.env.DB,
+    userId,
+    plan.id,
+    date,
+    null,
+    // Compatibility read/start: the released app's date resolver had implicit
+    // restart semantics. It may revive only a legacy generation; the DB helper
+    // leaves an attempt-v1 tombstone untouched.
+    { reviveDiscarded: true },
+  );
+  const sets = await getSetsForSession(c.env.DB, session.id);
+  return c.json({ session, sets });
+});
+
+apiRoutes.post('/sessions', async (c) => {
+  const userId = c.get('userId');
+  const plan = await getActivePlan(c.env.DB, userId);
+  if (!plan) return measuredJson(c, { error: 'no_active_plan' }, 400);
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return measuredJson(c, { error: parsed.error }, 400);
+  const b = parsed.body;
+  const protocolHeader = readAttemptProtocolHeader(c);
+  if (!protocolHeader.ok) return measuredJson(c, { error: 'invalid_write_protocol' }, 400);
+  const invalid = invalidMutationFields(b, {}, {
+    date: (value) => typeof value === 'string' && ISO_DATE_RE.test(value),
+    workout_id: (value) => value === null || isNonEmptyString(value),
+    restart_discarded: (value) => typeof value === 'boolean',
+    expected_attempt: isNonNegativeInteger,
+    kind: (value) => value === 'planned' || value === 'freestyle',
+    slot: isNonNegativeInteger,
+    additional: (value) => typeof value === 'boolean',
+    id: (value) => typeof value === 'string' && UUID_RE.test(value),
+  });
+  if (invalid.length > 0) return measuredJson(c, { error: 'invalid_fields', fields: invalid }, 400);
+  const slot = typeof b.slot === 'number' ? b.slot : 0;
+  const additionalID = b.additional === true ? b.id as string | undefined : undefined;
+  if ((b.additional === true && (!additionalID || hasOwn(b, 'slot') || b.restart_discarded === true || (hasOwn(b, 'expected_attempt') && b.expected_attempt !== 0)))
+      || (hasOwn(b, 'id') && b.additional !== true)) {
+    return measuredJson(c, { error: 'invalid_fields', fields: ['additional', 'id', 'slot'] }, 400);
+  }
+  const carriesAttemptProtocol =
+    protocolHeader.declared ||
+    hasOwn(b, 'expected_attempt') ||
+    hasOwn(b, 'restart_discarded');
+  if (carriesAttemptProtocol && !hasOwn(b, 'expected_attempt')) {
+    return measuredJson(c, { error: 'invalid_fields', fields: ['expected_attempt'] }, 400);
+  }
+  const restartDiscarded = b.restart_discarded === true;
+  if (restartDiscarded && !hasOwn(b, 'expected_attempt')) {
+    return measuredJson(c,
+      {
+        error: 'invalid_fields',
+        fields: ['expected_attempt'],
+      },
+      400,
+    );
+  }
+  const inactiveProtocol = await inactiveAttemptProtocolResponse(
+    c,
+    protocolHeader.declared,
+  );
+  if (inactiveProtocol) return inactiveProtocol;
+  if (b.kind === 'freestyle') {
+    if (!hasOwn(b,'expected_attempt') || b.workout_id != null) {
+      return c.json({error:'invalid_fields',fields:['expected_attempt','workout_id']},400);
+    }
+    let result;
+    try { result = await startFreestyleSession(c.env.DB,userId,
+      typeof b.date==='string' ? b.date : await todayForUser(c.env.DB,userId), Number(b.expected_attempt), 'ios', { slot, additionalID }); } catch (error) {
+      if (['session_id_conflict', 'session_state_conflict'].includes((error as Error).message)) return c.json({ error: (error as Error).message }, 409);
+      throw error;
+    }
+    return 'error' in result ? c.json(result,409) : c.json(result.session,201);
+  }
+  const date =
+    typeof b.date === 'string'
+      ? b.date
+      : await todayForUser(c.env.DB, userId);
+  const workoutId =
+    (b.workout_id as string | null | undefined) ?? null;
+  // Creation retries acknowledge their immutable receipt even if a later
+  // calendar edit, plan rebuild or completion changed the returned session.
+  if (additionalID) {
+    try {
+      const created = await getOrCreateSession(c.env.DB, userId, plan.id, date, workoutId,
+        { additionalID, expectedAttempt: 0, claimAttemptProtocol: protocolHeader.declared });
+      return measuredJson(c, created, 201);
+    } catch (error) {
+      if (['session_id_conflict', 'session_state_conflict'].includes((error as Error).message)) {
+        return measuredJson(c, { error: (error as Error).message }, 409);
+      }
+      throw error;
+    }
+  }
+  // An offline intent may retain a day UUID that update_plan has since
+  // rebuilt away. Resolve the optional pin through this user's active plan
+  // before it reaches the sessions FK, both to keep tenant/plan boundaries
+  // closed and to give iOS a stable permanent-client-error fallback.
+  if (
+    workoutId !== null &&
+    (!(await getWorkoutInPlan(c.env.DB, plan.id, workoutId))
+      // A one-time workout runs on its own date only (workout-library P3).
+      || !(await workoutFitsDate(c.env.DB, plan.id, workoutId, date)))
+  ) {
+    return measuredJson(c, { error: 'unknown_day' }, 422);
+  }
+  let s;
+  if (restartDiscarded) {
+    const expectedAttempt = b.expected_attempt as number;
+    const existing = await getOwnedSessionByDate(c.env.DB, userId, date, slot);
+    if (!existing) {
+      return measuredJson(c,
+        { error: 'restart_target_missing', expected_attempt: expectedAttempt },
+        409,
+      );
+    }
+    // The helper also handles a commit-then-timeout retry whose next
+    // generation is already live. That matters during migration-first
+    // rollout: the old Worker may have performed the restart and migration
+    // 0032's trigger advanced the attempt while leaving the row `legacy`.
+    // The first attempt-aware retry must claim that winner atomically before
+    // returning it, so later tokenless writes are fenced out.
+    const revived = await reviveDiscardedSession(
+      c.env.DB,
+      userId,
+      existing.id,
+      expectedAttempt,
+      workoutId,
+      protocolHeader.declared,
+    );
+    if (!revived) return measuredJson(c, { error: 'not_found' }, 404);
+    if ('error' in revived) return measuredJson(c, revived, 409);
+    s = revived;
+  } else {
+    const expectedAttempt = carriesAttemptProtocol
+      ? (b.expected_attempt as number)
+      : undefined;
+    if (expectedAttempt !== undefined && expectedAttempt > 0) {
+      const existing = await getOwnedSessionByDate(c.env.DB, userId, date, slot);
+      if (!existing) {
+        return measuredJson(c,
+          {
+            error: 'session_attempt_missing',
+            expected_attempt: expectedAttempt,
+          },
+          409,
+        );
+      }
+    }
+    try {
+      s = await getOrCreateSession(
+        c.env.DB,
+        userId,
+        plan.id,
+        date,
+        workoutId,
+        {
+          slot, additionalID,
+          reviveDiscarded: !carriesAttemptProtocol,
+          expectedAttempt,
+          claimAttemptProtocol: protocolHeader.declared,
+        },
+      );
+    } catch (error) {
+      if (['session_slot_missing', 'session_id_conflict', 'session_state_conflict'].includes((error as Error).message)) {
+        return measuredJson(c, { error: (error as Error).message }, 409);
+      }
+      if ((error as Error).message === 'session_expected_attempt_missing') {
+        return measuredJson(c,
+          {
+            error: 'session_attempt_missing',
+            expected_attempt: expectedAttempt,
+          },
+          409,
+        );
+      }
+      throw error;
+    }
+  }
+  if (!carriesAttemptProtocol && s.write_protocol !== 'legacy') {
+    return measuredJson(c, protocolConflictBody(s), 409);
+  }
+  if (!restartDiscarded && s.status === 'discarded') {
+    return measuredJson(c,
+      { error: 'session_discarded', status: 'discarded', current_session: s },
+      409,
+    );
+  } else if (
+    !restartDiscarded &&
+    carriesAttemptProtocol &&
+    s.attempt !== (b.expected_attempt as number)
+  ) {
+    const expectedAttempt = b.expected_attempt as number;
+    return measuredJson(c,
+      {
+        error: 'session_attempt_conflict',
+        status: s.status,
+        expected_attempt: expectedAttempt,
+        current_attempt: s.attempt,
+        current_session: s,
+      },
+      409,
+    );
+  }
+  return measuredJson(c, s, 201);
+});
+
+apiRoutes.patch('/sessions/:id/feedback', async (c) => {
+  const protocolHeader = readAttemptProtocolHeader(c);
+  if (!protocolHeader.ok) return measuredJson(c, { error: 'invalid_write_protocol' }, 400);
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return measuredJson(c, { error: parsed.error }, 400);
+  const b = parsed.body;
+  const fields: Record<string, FieldRule> = {
+    notes: isNullableString,
+    perceived_fatigue: (value) => value === null
+      || (isPositiveInteger(value) && (value as number) <= 10),
+    expected_attempt: isNonNegativeInteger,
+    // The reviewed baseline may contain a legacy rating outside 1–10.
+    expected_feedback: (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
+      && Object.keys(value).length === 2
+      && 'notes' in value && isNullableString(value.notes)
+      && 'perceived_fatigue' in value && isNullableNonNegativeInteger(value.perceived_fatigue),
+  };
+  const invalid = [
+    ...invalidMutationFields(b, fields),
+    ...Object.keys(b).filter((key) => !hasOwn(fields, key)),
+  ];
+  if (invalid.length > 0) return measuredJson(c, { error: 'invalid_fields', fields: invalid }, 400);
+  // This dedicated endpoint always carries attempt authority, including when
+  // the web gateway intentionally does not forward the protocol header.
+  const inactiveProtocol = await inactiveAttemptProtocolResponse(c, true);
+  if (inactiveProtocol) return inactiveProtocol;
+  const s = await patchCompletedSessionFeedback(c.env.DB, c.get('userId'), c.req.param('id'), {
+    notes: b.notes as string | null,
+    perceived_fatigue: b.perceived_fatigue as number | null,
+    expected_feedback: b.expected_feedback as { notes: string | null; perceived_fatigue: number | null },
+  }, b.expected_attempt as number);
+  if (!s) return measuredJson(c, { error: 'not_found' }, 404);
+  if ('error' in s) return measuredJson(c, s, 409);
+  return measuredJson(c, s);
+});
+
+apiRoutes.patch('/sessions/:id', async (c) => {
+  const protocolHeader = readAttemptProtocolHeader(c);
+  if (!protocolHeader.ok) return measuredJson(c, { error: 'invalid_write_protocol' }, 400);
+  const expected = readExpectedAttemptQuery(c);
+  if (!expected.ok) {
+    return measuredJson(c, { error: 'invalid_fields', fields: ['expected_attempt'] }, 400);
+  }
+  if (protocolHeader.declared && expected.value === undefined) {
+    return measuredJson(c, { error: 'invalid_fields', fields: ['expected_attempt'] }, 400);
+  }
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return measuredJson(c, { error: parsed.error }, 400);
+  const b = parsed.body;
+  const invalid = invalidMutationFields(b, {}, {
+    // status remains deliberately `unknown`: patchSession owns its closed
+    // status allowlist and stable invalid_status response.
+    perceived_fatigue: isNullableNonNegativeInteger,
+    notes: isNullableString,
+    expected_feedback: (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
+      && Object.keys(value).length === 2
+      && 'notes' in value && isNullableString(value.notes)
+      && 'perceived_fatigue' in value && isNullableNonNegativeInteger(value.perceived_fatigue),
+    workout_id: (value) => value === null || isNonEmptyString(value),
+  });
+  if (hasOwn(b, 'expected_feedback') && (!hasOwn(b, 'notes') || !hasOwn(b, 'perceived_fatigue'))) {
+    invalid.push('expected_feedback');
+  }
+  if (
+    hasOwn(b, 'workout_id') &&
+    !(typeof b.status === 'string' && b.status.trim().toLowerCase() === 'planned')
+  ) {
+    invalid.push('workout_id');
+  }
+  if (invalid.length > 0) return measuredJson(c, { error: 'invalid_fields', fields: invalid }, 400);
+  const inactiveProtocol = await inactiveAttemptProtocolResponse(
+    c,
+    protocolHeader.declared,
+  );
+  if (inactiveProtocol) return inactiveProtocol;
+  if (typeof b.workout_id === 'string') {
+    const plan = await getActivePlan(c.env.DB, c.get('userId'));
+    if (!plan || !(await getWorkoutInPlan(c.env.DB, plan.id, b.workout_id))) {
+      return measuredJson(c, { error: 'unknown_day' }, 422);
+    }
+  }
+  const s = await patchSession(
+    c.env.DB,
+    c.get('userId'),
+    c.req.param('id'),
+    b,
+    expected.value,
+    protocolHeader.declared,
+  );
+  if (!s) return measuredJson(c, { error: 'not_found' }, 404);
+  if ('error' in s) {
+    // Exhaustive: invalid_status → 400 (bad request, nothing persisted);
+    // the history-integrity and discarded-terminal guards → 409.
+    if (s.error === 'invalid_status') return measuredJson(c, s, 400);
+    return measuredJson(c, s, 409);
+  }
+  if (s.status === 'completed') {
+    const summary = await getWorkoutSummary(c.env.DB, c.get('userId'), s.id).catch(() => null);
+    return measuredJson(c, { ...s, summary: summary?.attempt === s.attempt && summary.final ? summary : null });
+  }
+  return measuredJson(c, s);
+});
+
+apiRoutes.get('/sessions/:id/summary', async (c) => {
+  const summary = await getWorkoutSummary(c.env.DB, c.get('userId'), c.req.param('id'));
+  return summary ? c.json(summary) : c.json({ error: 'not_found' }, 404);
+});
+
+// Discard a session — "I didn't really do this." Soft-deletes its sets
+// and marks it 'discarded' (vanishes from the projection; excluded from
+// history/volume/conflicts). Idempotent. Restarting the same date requires
+// the explicit attempt-scoped POST /sessions restart protocol.
+apiRoutes.post('/sessions/:id/discard', async (c) => {
+  const protocolHeader = readAttemptProtocolHeader(c);
+  if (!protocolHeader.ok) return measuredJson(c, { error: 'invalid_write_protocol' }, 400);
+  const expected = readExpectedAttemptQuery(c);
+  if (!expected.ok) {
+    return measuredJson(c, { error: 'invalid_fields', fields: ['expected_attempt'] }, 400);
+  }
+  if (protocolHeader.declared && expected.value === undefined) {
+    return measuredJson(c, { error: 'invalid_fields', fields: ['expected_attempt'] }, 400);
+  }
+  const inactiveProtocol = await inactiveAttemptProtocolResponse(
+    c,
+    protocolHeader.declared,
+  );
+  if (inactiveProtocol) return inactiveProtocol;
+  const s = await discardSession(
+    c.env.DB,
+    c.get('userId'),
+    c.req.param('id'),
+    expected.value,
+    protocolHeader.declared,
+  );
+  if (!s) return measuredJson(c, { error: 'not_found' }, 404);
+  if ('error' in s) return measuredJson(c, s, 409);
+  return measuredJson(c, s);
+});
+
+apiRoutes.post('/sessions/:id/sets', async (c) => {
+  const protocolHeader = readAttemptProtocolHeader(c);
+  if (!protocolHeader.ok) return measuredJson(c, { error: 'invalid_write_protocol' }, 400);
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return measuredJson(c, { error: parsed.error }, 400);
+  const b = parsed.body;
+  // Preserve the established missing-id response while using invalid_fields
+  // for a present id (or any other field) with the wrong runtime shape.
+  if (!hasOwn(b, 'id')) return measuredJson(c, { error: 'missing_set_id' }, 400);
+  const invalid = invalidMutationFields(
+    b,
+    {
+      id: (value) => typeof value === 'string' && UUID_RE.test(value),
+      exercise_id: isNonEmptyString,
+      set_index: isPositiveInteger,
+      weight: isFiniteNumber,
+      reps: isNonNegativeInteger,
+    },
+    {
+      rpe: isNullableFiniteNumber,
+      is_warmup: (value) => typeof value === 'boolean',
+      template_exercise_id: (value) => value === null || isNonEmptyString(value),
+      notes: isNullableString,
+      logged_at: isNonNegativeInteger,
+      duration_s: isNullableNonNegativeInteger,
+      is_timed: (value) => typeof value === 'boolean',
+      weight_unit: (value) => value === 'lb' || value === 'kg',
+      expected_attempt: isNonNegativeInteger,
+      prescription: (value) => {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+        const context = value as Record<string, unknown>;
+        return isNonEmptyString(context.plan_id) && isNonEmptyString(context.day_id)
+          && isPositiveInteger(context.version);
+      },
+    },
+  );
+  if (invalid.length > 0) return measuredJson(c, { error: 'invalid_fields', fields: invalid }, 400);
+  if (protocolHeader.declared && !hasOwn(b, 'expected_attempt')) {
+    return measuredJson(c, { error: 'invalid_fields', fields: ['expected_attempt'] }, 400);
+  }
+  const inactiveProtocol = await inactiveAttemptProtocolResponse(
+    c,
+    protocolHeader.declared,
+  );
+  if (inactiveProtocol) return inactiveProtocol;
+  try {
+    const result = await logSet(c.env.DB, c.get('userId'), {
+      id: b.id as string,
+      session_id: c.req.param('id'),
+      exercise_id: b.exercise_id as string,
+      template_exercise_id: b.template_exercise_id as string | null | undefined,
+      set_index: b.set_index as number,
+      weight: b.weight as number,
+      reps: b.reps as number,
+      rpe: b.rpe as number | null | undefined,
+      is_warmup: b.is_warmup as boolean | undefined,
+      notes: b.notes as string | null | undefined,
+      logged_at: b.logged_at as number | undefined,
+      duration_s: b.duration_s as number | null | undefined,
+      is_timed: b.is_timed as boolean | undefined,
+      weight_unit: b.weight_unit as 'lb' | 'kg' | undefined,
+      expected_attempt: b.expected_attempt as number | undefined,
+      claim_attempt_protocol: protocolHeader.declared,
+      prescription: b.prescription as { plan_id: string; version: number; day_id: string } | undefined,
+      source: 'ios',
+    });
+    return measuredJson(c, result, result.deduped ? 200 : 201);
+  } catch (e) {
+    if (e instanceof SessionWriteConflictError) {
+      return measuredJson(c, e.response(), 409);
+    }
+    const error = (e as Error).message;
+    return measuredJson(c,
+      { error },
+      error === 'session_discarded' || error === 'session_attempt_conflict'
+        ? 409
+        : 404,
+    );
+  }
+});
+
+apiRoutes.patch('/sets/:id', async (c) => {
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return measuredJson(c, { error: parsed.error }, 400);
+  const { expected_session_id, expected_attempt, expected_updated_at, ...b } = parsed.body;
+  const guarded = [expected_session_id, expected_attempt, expected_updated_at].some((v) => v !== undefined);
+  if (guarded && (typeof expected_session_id !== 'string' || !expected_session_id
+      || !Number.isSafeInteger(expected_attempt) || (expected_attempt as number) < 0
+      || !Number.isSafeInteger(expected_updated_at) || (expected_updated_at as number) < 0)) {
+    return measuredJson(c, { error: 'invalid_correction_identity' }, 400);
+  }
+  const allowed = new Set(['weight', 'weight_unit', 'reps', 'rpe', 'notes', 'duration_s', 'deleted']);
+  const invalid = invalidMutationFields(b, {}, {
+    weight: isFiniteNumber,
+    weight_unit: (value) => value === 'lb' || value === 'kg',
+    reps: isNonNegativeInteger,
+    rpe: isNullableFiniteNumber,
+    notes: isNullableString,
+    duration_s: isNullableNonNegativeInteger,
+    // Tombstones are intentionally one-way. Reanimating an old row after its
+    // session was discarded/restarted would attach prior-attempt work to the
+    // current history without an attempt token.
+    deleted: (value) => value === true,
+  });
+  invalid.push(...Object.keys(b).filter((field) => !allowed.has(field)));
+  if (invalid.length > 0) return measuredJson(c, { error: 'invalid_fields', fields: invalid }, 400);
+  if (Object.keys(b).length === 0) return measuredJson(c, { error: 'no_corrections' }, 400);
+  try {
+    const row = await patchSet(c.env.DB, c.get('userId'), c.req.param('id'), b, guarded ? {
+      session_id: expected_session_id as string,
+      attempt: expected_attempt as number,
+      updated_at: expected_updated_at as number,
+    } : undefined);
+    return row ? measuredJson(c, row) : measuredJson(c, { error: 'not_found' }, 404);
+  } catch (error) {
+    if ((error as Error).message === 'set_correction_conflict') {
+      return measuredJson(c, { error: 'set_correction_conflict' }, 409);
+    }
+    throw error;
+  }
+});
+
+// ---- read models ---------------------------------------------------------
+apiRoutes.get('/exercises', async (c) => {
+  // Funnel through getExercises so the wire shape matches MCP's
+  // list_exercises — in particular, `laterality` rides along, which iOS
+  // needs to compute per-side/per-hand rollups (two-DB Bulgarian split squat
+  // 45×8 → 16 reps / 1,440 lb instead of 8 / 360).
+  return c.json(await getExercises(c.env.DB));
+});
+
+// Demo image proxy. iOS first checks its bundled asset catalog for the
+// foundational lifts; misses fall through to here, which pulls the frame
+// from the R2 bucket and returns it with a long-immutable Cache-Control
+// (slug + frame are content-addressed: when an upstream image changes
+// it ships under a new slug). Stays inside /api/* so the existing JWT
+// gate covers it — these are public-domain assets, but routing them
+// through the same auth surface keeps the worker config simple. The
+// route 404s gracefully when the catalog row has no demo_slug, when
+// the frame is anything other than 0/1, or when R2 has no object.
+apiRoutes.get('/exercises/:id/demo/:frame', async (c) => {
+  const id = c.req.param('id');
+  const frame = c.req.param('frame');
+  if (frame !== '0' && frame !== '1') {
+    return c.json({ error: 'invalid_frame' }, 400);
+  }
+  const row = await c.env.DB.prepare(
+    'SELECT demo_slug FROM exercises WHERE id = ?1',
+  )
+    .bind(id)
+    .first<{ demo_slug: string | null }>();
+  if (!row) return c.json({ error: 'unknown_exercise' }, 404);
+  if (!row.demo_slug) return c.json({ error: 'no_demo' }, 404);
+  if (!c.env.DEMOS) return c.json({ error: 'demos_unconfigured' }, 503);
+  const key = `demos/${row.demo_slug}/${frame}.webp`;
+  const obj = await c.env.DEMOS.get(key);
+  if (!obj) return c.json({ error: 'demo_missing' }, 404);
+  return new Response(obj.body, {
+    headers: {
+      'Content-Type': 'image/webp',
+      // 1 year, immutable: slug+frame is the only address; we'd ship a new
+      // slug to invalidate.
+      'Cache-Control': 'public, max-age=31536000, immutable',
+      // httpEtag, not etag: R2's `etag` is the raw hex digest; `httpEtag`
+      // is the same value quoted per RFC 7232 (e.g. "\"abc123\""), which is
+      // what a conditional-request validator expects. Sending the raw form
+      // makes caches/intermediaries ignore the header on revalidation,
+      // undercutting the immutable caching this route is built for.
+      'ETag': obj.httpEtag,
+    },
+  });
+});
+
+apiRoutes.get('/history', async (c) => {
+  const exerciseId = c.req.query('exercise_id');
+  if (!exerciseId) return c.json({ error: 'missing_exercise_id' }, 400);
+  const from = Number(c.req.query('from') ?? 0);
+  const to = Number(c.req.query('to') ?? Date.now());
+  return c.json(await getHistory(c.env.DB, c.get('userId'), exerciseId, from, to));
+});
+
+apiRoutes.get('/volume', async (c) => {
+  const muscle = c.req.query('muscle');
+  if (!muscle) return c.json({ error: 'missing_muscle' }, 400);
+  const from = Number(c.req.query('from') ?? 0);
+  const to = Number(c.req.query('to') ?? Date.now());
+  const result = await getVolume(c.env.DB, c.get('userId'), muscle, from, to);
+  if ('error' in result) return c.json(result, 400);
+  return c.json(result);
+});
+
+// ---- generic activities (M3 — pilates / cardio / yoga / walks / …) -------
+//
+// Append-only log, client-UUID idempotent (same model as POST /sessions/:id/
+// sets). The iOS outbox can retry safely; the second POST with the same `id`
+// returns the existing row instead of duplicating.
+
+apiRoutes.post('/activities', async (c) => {
+  const b = await c.req.json<{
+    id?: string;
+    date?: string;
+    type?: string;
+    title?: string | null;
+    duration_minutes?: number | null;
+    notes?: string | null;
+    logged_at?: number;
+  }>();
+  if (!b.id || typeof b.id !== 'string' || !UUID_RE.test(b.id)) {
+    return c.json({ error: 'invalid_id' }, 400);
+  }
+  if (typeof b.date !== 'string' || !ISO_DATE_RE.test(b.date)) {
+    return c.json({ error: 'invalid_date' }, 400);
+  }
+  if (typeof b.type !== 'string' || b.type.length === 0 || b.type !== b.type.toLowerCase()) {
+    return c.json({ error: 'invalid_type' }, 400);
+  }
+  if (typeof b.logged_at !== 'number' || !Number.isFinite(b.logged_at)) {
+    return c.json({ error: 'invalid_logged_at' }, 400);
+  }
+  const row = await logActivity(
+    c.env.DB,
+    c.get('userId'),
+    {
+      id: b.id,
+      date: b.date,
+      type: b.type,
+      title: b.title ?? null,
+      duration_minutes:
+        typeof b.duration_minutes === 'number' ? b.duration_minutes : null,
+      notes: b.notes ?? null,
+      logged_at: b.logged_at,
+    },
+    'ios',
+  );
+  return c.json(row, 201);
+});
+
+apiRoutes.delete('/activities/:id', async (c) => {
+  const ok = await softDeleteActivity(c.env.DB, c.get('userId'), c.req.param('id'));
+  if (!ok) return c.json({ error: 'not_found' }, 404);
+  return c.json({ ok: true });
+});
+
+// ---- Apple Health (HealthKit) workout push — iOS on-device → backend ------
+//
+// HealthKit lives ONLY on the phone; the Worker can never read it. The iOS app
+// reads HKWorkout and PUSHes each workout here, landing in the SAME
+// external_activities cache the intervals pull writes (source='healthkit').
+// Client-UUID idempotent (the HKWorkout uuid) — the iOS outbox / a re-anchored
+// sync re-POSTing the same workout lands on ON CONFLICT and updates in place.
+// The intervals reconcile is source-scoped (migration 0027), so it never
+// tombstones these pushed rows.
+apiRoutes.post('/activities/healthkit', async (c) => {
+  const b = await c.req.json<{
+    id?: string;
+    date?: string;
+    start_date_local_ms?: number | null;
+    start_date_utc_ms?: number | null;
+    source_timezone?: string | null;
+    kind?: string;
+    name?: string | null;
+    moving_time_sec?: number | null;
+    elapsed_time_sec?: number | null;
+    distance_m?: number | null;
+    average_watts?: number | null;
+    average_hr?: number | null;
+    max_hr?: number | null;
+    calories?: number | null;
+    elevation_gain_m?: number | null;
+    raw?: string | null;
+    streams?: unknown;
+    swim?: unknown;
+    provider_effort?: unknown;
+  }>();
+  if (!b.id || typeof b.id !== 'string' || !UUID_RE.test(b.id)) {
+    return c.json({ error: 'invalid_id' }, 400);
+  }
+  if (typeof b.date !== 'string' || !ISO_DATE_RE.test(b.date)) {
+    return c.json({ error: 'invalid_date' }, 400);
+  }
+  if (typeof b.kind !== 'string' || b.kind.length === 0 || b.kind !== b.kind.toLowerCase()) {
+    return c.json({ error: 'invalid_kind' }, 400);
+  }
+  // REAL (floating) columns: keep any finite value.
+  const numOrNull = (v: unknown): number | null =>
+    typeof v === 'number' && Number.isFinite(v) ? v : null;
+  // INTEGER columns. Codex P2: HealthKit yields Double (TimeInterval / HKQuantity),
+  // so e.g. moving_time_sec=1800.5 would persist as a SQLite decimal and break
+  // iOS's Int? decode of external_activities (dropping the whole feed). Round to
+  // an int before persisting. Applies to the columns iOS decodes as Int:
+  // start_date_local_ms, moving_time_sec, elapsed_time_sec, max_hr, calories.
+  const intOrNull = (v: unknown): number | null =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : null;
+  const startDateLocalMs = intOrNull(b.start_date_local_ms);
+  if (!healthKitDateMatchesStart(b.date, startDateLocalMs)) {
+    return c.json({ error: 'invalid_start_date' }, 400);
+  }
+  if (!validActivitySourceTime(b.start_date_utc_ms, b.source_timezone, b.date, startDateLocalMs)) {
+    return c.json({ error: 'invalid_source_time' }, 400);
+  }
+  const streams = parseHealthKitStreams(b.streams);
+  if (streams === 'invalid') return c.json({ error: 'invalid_streams' }, 400);
+  // A swim's detail (sport-activities P4): absent keeps what is stored, null
+  // or a detail with nothing in it clears it.
+  const swim = b.swim === undefined ? undefined : b.swim === null ? null : parseSwimDetail(b.swim);
+  if (swim === undefined && b.swim !== undefined) return c.json({ error: 'invalid_swim' }, 400);
+  if (swim && b.kind !== 'swim') return c.json({ error: 'invalid_swim' }, 400);
+  // Apple Watch's effort score (P5), 1 to 10 with a tenth: absent keeps it.
+  const providerEffort = b.provider_effort;
+  if (providerEffort !== undefined && providerEffort !== null
+      && !(typeof providerEffort === 'number' && Number.isFinite(providerEffort) && providerEffort >= 1 && providerEffort <= 10)) {
+    return c.json({ error: 'invalid_provider_effort' }, 400);
+  }
+  const row = await upsertHealthKitActivity(c.env.DB, c.get('userId'), {
+    id: b.id,
+    date: b.date,
+    start_date_local_ms: startDateLocalMs,
+    start_date_utc_ms: b.start_date_utc_ms ?? null,
+    source_timezone: b.source_timezone ?? null,
+    kind: b.kind,
+    name: typeof b.name === 'string' && b.name.length > 0 ? b.name : null,
+    moving_time_sec: intOrNull(b.moving_time_sec),
+    elapsed_time_sec: intOrNull(b.elapsed_time_sec),
+    distance_m: numOrNull(b.distance_m),
+    average_watts: numOrNull(b.average_watts),
+    average_hr: numOrNull(b.average_hr),
+    max_hr: intOrNull(b.max_hr),
+    calories: intOrNull(b.calories),
+    elevation_gain_m: numOrNull(b.elevation_gain_m),
+    raw: typeof b.raw === 'string' ? b.raw : null,
+    ...(streams === undefined ? {} : { streams }),
+    ...(swim === undefined ? {} : { swim }),
+    ...(providerEffort === undefined
+      ? {} : { provider_effort: providerEffort === null ? null : Math.round((providerEffort as number) * 10) / 10 }),
+  });
+  return c.json(row, 201);
+});
+
+/** Longest stream accepted: a day at one sample a second. */
+const MAX_STREAM_POINTS = 86_400;
+
+/**
+ * `streams` on an Apple Health push: `{ heart_rate?: {t, v}, power?: {t, v} }`
+ * with parallel arrays, `t` in seconds from the workout start. Absent means an
+ * app that sends no streams (keep what is stored); `null` or `{}` means none.
+ */
+function parseHealthKitStreams(raw: unknown): HealthKitStreams | undefined | 'invalid' {
+  if (raw === undefined) return undefined;
+  if (raw === null) return {};
+  if (typeof raw !== 'object' || Array.isArray(raw)) return 'invalid';
+  const out: HealthKitStreams = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (key !== 'heart_rate' && key !== 'power') return 'invalid';
+    if (value === null) continue;
+    if (typeof value !== 'object' || Array.isArray(value)) return 'invalid';
+    const { t, v } = value as { t?: unknown; v?: unknown };
+    if (!Array.isArray(t) || !Array.isArray(v) || t.length !== v.length || t.length > MAX_STREAM_POINTS) {
+      return 'invalid';
+    }
+    const samples: Sample[] = [];
+    for (let i = 0; i < t.length; i++) {
+      const ti = t[i];
+      const vi = v[i];
+      if (typeof ti !== 'number' || !Number.isFinite(ti) || ti < 0) return 'invalid';
+      if (typeof vi !== 'number' || !Number.isFinite(vi) || vi < 0) return 'invalid';
+      samples.push({ t: ti, v: vi });
+    }
+    out[key] = samples;
+  }
+  return out;
+}
+
+// POST /api/activities/fit — a workout file (.fit) from a bike computer,
+// watch or app such as Zwift, as multipart form data: `id` (client UUID, the
+// idempotency key), `file`, optional `name`. The Worker reads it, keeps the
+// workout and a training load computed from its power and heart rate
+// (docs/plans/endurance-training-load P4), and never stores the file. 201
+// when imported, 200 when this workout was already imported.
+const FIT_ERROR_STATUS = {
+  not_fit: 400,
+  truncated: 400,
+  not_an_activity: 422,
+  multisport: 422,
+  no_data: 422,
+} as const;
+
+apiRoutes.post('/activities/fit', async (c) => {
+  let form: FormData;
+  try {
+    form = await c.req.formData();
+  } catch {
+    return c.json({ error: 'invalid_body' }, 400);
+  }
+  const id = form.get('id');
+  if (typeof id !== 'string' || !UUID_RE.test(id)) return c.json({ error: 'invalid_id' }, 400);
+  const name = form.get('name');
+  if (name !== null && (typeof name !== 'string' || name.length > 200)) {
+    return c.json({ error: 'invalid_name' }, 400);
+  }
+  const file = form.get('file') as unknown;
+  if (!(file instanceof File) || file.size === 0) return c.json({ error: 'invalid_file' }, 400);
+  if (file.size > MAX_RECORDING_BYTES) return c.json({ error: 'file_too_large' }, 413);
+  let fit: FitActivity;
+  try {
+    fit = parseFit(new Uint8Array(await file.arrayBuffer()));
+  } catch (e) {
+    if (e instanceof FitParseError) return c.json({ error: e.code }, FIT_ERROR_STATUS[e.code]);
+    // A malformed file can fail a bounds check the reader did not foresee.
+    if (e instanceof RangeError) return c.json({ error: 'truncated' }, 400);
+    throw e;
+  }
+  const result = await importFitActivity(c.env.DB, c.get('userId'), id, fit,
+    name && name.trim().length > 0 ? name.trim() : null);
+  return c.json(result, result.deduplicated ? 200 : 201);
+});
+
+// DELETE /api/activities/fit/:id — remove a workout imported from a .fit
+// file, by the client id it was uploaded with.
+apiRoutes.delete('/activities/fit/:id', async (c) => {
+  const id = c.req.param('id');
+  if (!UUID_RE.test(id)) return c.json({ error: 'invalid_id' }, 400);
+  const ok = await deleteFitActivity(c.env.DB, c.get('userId'), id);
+  if (!ok) return c.json({ error: 'not_found' }, 404);
+  return c.json({ ok: true });
+});
+
+// POST /api/activities/recordings — a run recorded in the app, as multipart
+// form data: `id` (client UUID, the idempotency key), `date` (civil start
+// date), optional `name`, and `file` (.tcx, the recorder's format). Tres
+// Fort keeps the run and its GPS route (docs/plans/run-recorder P5), then
+// uploads the file to the member's intervals.icu account when one is
+// connected. 201 when anything new was kept or uploaded, 200 when earlier
+// attempts already did both. Without a connection the run is kept and
+// `intervals.status` says so. A provider failure keeps its error status and
+// adds `stored: true`, so the app keeps the file and retries the
+// intervals.icu copy; the retry finds the run already kept.
+const TCX_ERROR_STATUS = {
+  not_tcx: 400,
+  not_a_run: 422,
+  no_data: 422,
+} as const;
+
+const RECORDING_ERROR_STATUS = {
+  intervals_not_connected: 409,
+  intervals_write_forbidden: 409,
+  intervals_rejected: 422,
+  intervals_unavailable: 502,
+  not_found: 404,
+} as const;
+
+// Optional heart rate after the stop (P7): `recovery_hr_at_stop` and, with
+// it, `recovery_hr_after_60s` and `recovery_hr_after_120s`, each whole bpm
+// from 20 to 250. Null when absent; 'invalid' for a malformed field or a
+// later reading without the one at the stop.
+function recordingRecovery(form: FormData): HeartRateRecovery | null | 'invalid' {
+  const read = (key: string): number | null | 'invalid' => {
+    const value = form.get(key);
+    if (value === null) return null;
+    if (typeof value !== 'string' || !/^\d{2,3}$/.test(value)) return 'invalid';
+    const bpm = Number(value);
+    return bpm >= 20 && bpm <= 250 ? bpm : 'invalid';
+  };
+  const atStop = read('recovery_hr_at_stop');
+  const after60 = read('recovery_hr_after_60s');
+  const after120 = read('recovery_hr_after_120s');
+  if (atStop === 'invalid' || after60 === 'invalid' || after120 === 'invalid') return 'invalid';
+  if (atStop === null) return after60 === null && after120 === null ? null : 'invalid';
+  return { at_stop: atStop, after_60s: after60, after_120s: after120 };
+}
+
+/** More than anyone climbs in a day on foot. */
+const MAX_ELEVATION_GAIN_M = 10_000;
+
+/** The optional `elevation_gain_m` field: meters climbed while moving, which
+ * the app reads from the iPhone's barometer (P7). Whole or tenths of a meter. */
+function recordingElevationGain(form: FormData): number | null | 'invalid' {
+  const value = form.get('elevation_gain_m');
+  if (value === null) return null;
+  if (typeof value !== 'string' || !/^\d{1,5}(\.\d)?$/.test(value)) return 'invalid';
+  const meters = Number(value);
+  return meters <= MAX_ELEVATION_GAIN_M ? meters : 'invalid';
+}
+
+/** The optional `laps` field: a planned run's laps as JSON (planned-runs
+ * P9, src/runLaps.ts). */
+function recordingLaps(form: FormData): RunLap[] | null | 'invalid' {
+  const value = form.get('laps');
+  if (value === null) return null;
+  if (typeof value !== 'string' || value.length > MAX_RECORDING_LAPS_CHARS) return 'invalid';
+  return parseRunLaps(value) ?? 'invalid';
+}
+
+/** Room for every lap the plan limits allow. */
+const MAX_RECORDING_LAPS_CHARS = 128 * 1024;
+
+/** The optional `diagnostics` field: the run's pauses (tapped or automatic)
+ * and GPS speed readings as JSON (run-recorder P5(e),
+ * src/recordingDiagnostics.ts). Best effort: malformed diagnostics never
+ * block keeping the run, so the route answers `diagnostics_ignored: true`
+ * and keeps the run without them. */
+function recordingDiagnostics(form: FormData): RecordingDiagnostics | null | 'invalid' {
+  const value = form.get('diagnostics');
+  if (value === null) return null;
+  if (typeof value !== 'string' || value.length > RECORDING_DIAGNOSTICS_LIMITS.chars) return 'invalid';
+  return parseRecordingDiagnostics(value) ?? 'invalid';
+}
+
+apiRoutes.post('/activities/recordings', async (c) => {
+  let form: FormData;
+  try {
+    form = await c.req.formData();
+  } catch {
+    return c.json({ error: 'invalid_body' }, 400);
+  }
+  const id = form.get('id');
+  if (typeof id !== 'string' || !UUID_RE.test(id)) return c.json({ error: 'invalid_id' }, 400);
+  const date = form.get('date');
+  if (typeof date !== 'string' || !ISO_DATE_RE.test(date)) return c.json({ error: 'invalid_date' }, 400);
+  const name = form.get('name');
+  if (name !== null && (typeof name !== 'string' || name.length > 200)) {
+    return c.json({ error: 'invalid_name' }, 400);
+  }
+  const recovery = recordingRecovery(form);
+  if (recovery === 'invalid') return c.json({ error: 'invalid_recovery' }, 400);
+  const elevationGain = recordingElevationGain(form);
+  if (elevationGain === 'invalid') return c.json({ error: 'invalid_elevation_gain' }, 400);
+  const laps = recordingLaps(form);
+  if (laps === 'invalid') return c.json({ error: 'invalid_laps' }, 400);
+  const parsedDiagnostics = recordingDiagnostics(form);
+  const diagnostics = parsedDiagnostics === 'invalid' ? null : parsedDiagnostics;
+  // The Workers FormData typing omits File entries; check at runtime.
+  const file = form.get('file') as unknown;
+  if (!(file instanceof File) || file.size === 0) {
+    return c.json({ error: 'invalid_file' }, 400);
+  }
+  if (file.size > MAX_RECORDING_BYTES) return c.json({ error: 'file_too_large' }, 413);
+  const head = new Uint8Array(await file.slice(0, 1024).arrayBuffer());
+  if (recordingFormat(file.name, head) !== 'tcx') return c.json({ error: 'unsupported_file' }, 400);
+  let run: TcxRun;
+  try {
+    run = parseTcx(await file.text());
+  } catch (e) {
+    if (e instanceof TcxParseError) return c.json({ error: e.code }, TCX_ERROR_STATUS[e.code]);
+    throw e;
+  }
+  const userId = c.get('userId');
+  const recordingId = id.toLowerCase();
+  const trimmedName = name && name.trim().length > 0 ? name.trim() : null;
+  const stored = await storeRecordedRun(c.env.DB, userId, {
+    recording_id: recordingId, date, name: trimmedName, run, recovery,
+    elevation_gain_m: elevationGain, laps, diagnostics,
+  });
+  const kept = {
+    recording_id: recordingId, activity_id: stored.activity.id,
+    ...(parsedDiagnostics === 'invalid' ? { diagnostics_ignored: true } : {}),
+  };
+  // A run the member deleted from Tres Fort is not sent anywhere again.
+  if (stored.deleted) {
+    return c.json({
+      ok: true, destination: 'tres-fort', deduplicated: true, deleted: true, ...kept,
+      intervals_activity_id: null, intervals: { status: 'skipped' },
+    }, 200);
+  }
+
+  const upload = await uploadRecordedRun(c.env.DB, c.env, userId, {
+    recording_id: recordingId,
+    date,
+    file,
+    format: 'tcx',
+    name: trimmedName,
+  });
+  if ('error' in upload) {
+    if (upload.error === 'intervals_not_connected') {
+      return c.json({
+        ok: true, destination: 'tres-fort', deduplicated: stored.deduplicated, ...kept,
+        intervals_activity_id: null, intervals: { status: 'not_connected' },
+      }, stored.deduplicated ? 200 : 201);
+    }
+    return c.json({ ...upload, stored: true, ...kept }, RECORDING_ERROR_STATUS[upload.error]);
+  }
+  const deduplicated = stored.deduplicated && upload.deduplicated;
+  return c.json({
+    ok: true, destination: 'tres-fort', deduplicated, ...kept,
+    intervals_activity_id: upload.intervals_activity_id,
+    intervals: { status: 'uploaded', deduplicated: upload.deduplicated, activity_id: upload.intervals_activity_id },
+    refresh: upload.refresh,
+  }, deduplicated ? 200 : 201);
+});
+
+// GET /api/activities/:id/route — the GPS route of one of the member's
+// activities, encoded as src/activityRoute.ts describes. The run recorded in
+// the app behind it comes first (the recording, or the intervals.icu copy of
+// one: `source: 'recording'` with its `recording_id`, and `route: null` for
+// a run recorded without GPS), then the route the app sent for an Apple
+// Health run (`source: 'healthkit'`, docs/plans/run-recorder P6(b)).
+// Otherwise an intervals.icu activity's track is read from intervals.icu
+// (P6(a); `source: 'intervals'`, `recording_id: null`) and not stored. 404 when there is no
+// route; 502 when intervals.icu can't answer now, so a client tries again
+// later. Only the member's own routes are ever served.
+apiRoutes.get('/activities/:id/route', async (c) => {
+  c.header('Cache-Control', 'no-store');
+  const userId = c.get('userId');
+  const activityId = c.req.param('id');
+  const found = await getActivityRoute(c.env.DB, userId, activityId);
+  if (found) return c.json(found);
+  const provider = await getIntervalsActivityRoute(c.env.DB, c.env, userId, activityId);
+  if (provider.ok) {
+    return c.json({
+      activity_id: provider.activity_id, source: 'intervals', recording_id: null, route: provider.route,
+      heart_rate_recovery: null, laps: null,
+    });
+  }
+  if (provider.reason === 'unavailable') return c.json({ error: 'intervals_unavailable' }, 502);
+  return c.json({ error: 'not_found' }, 404);
+});
+
+// GET /api/activities/:id/swim — a swim's pool, lengths, sets and strokes as
+// Apple Watch saved them (docs/plans/sport-activities P4; shape in
+// src/swimDetail.ts), with a summary: length count, strokes, strokes per
+// length, SWOLF and lengths by stroke. 404 when Tres Fort keeps none. Only
+// the member's own swims are ever served.
+apiRoutes.get('/activities/:id/swim', async (c) => {
+  c.header('Cache-Control', 'no-store');
+  const found = await getActivitySwim(c.env.DB, c.get('userId'), c.req.param('id'));
+  if (!found) return c.json({ error: 'not_found' }, 404);
+  return c.json(found);
+});
+
+// GET /api/activities/:id/streams — pace, heart rate and elevation series of
+// one of the member's activities, ready to chart (docs/plans/run-detail-charts
+// P0; shape in src/activityStreams.ts). An intervals.icu activity is read from
+// intervals.icu and not stored; a run recorded in the app or an Apple Health
+// run uses the route Tres Fort keeps. 404 when there is nothing to chart; 502
+// when intervals.icu can't answer now and Tres Fort has no route, so a client
+// tries again later. Only the member's own activities are ever served.
+apiRoutes.get('/activities/:id/streams', async (c) => {
+  c.header('Cache-Control', 'no-store');
+  const found = await getActivityStreams(c.env.DB, c.env, c.get('userId'), c.req.param('id'));
+  if (found.ok) return c.json({ activity_id: found.activity_id, source: found.source, streams: found.streams });
+  if (found.reason === 'unavailable') return c.json({ error: 'intervals_unavailable' }, 502);
+  return c.json({ error: 'not_found' }, 404);
+});
+
+// PUT /api/activities/:id/effort — the member's "How hard was it?" for one of
+// their imported workouts (docs/plans/sport-activities P2). Body
+// `{ effort: 1..10 }`, or `{ effort: null }` to clear it. A workout with no
+// measured load is then scored from the rating (load_method 'effort', an
+// estimate); one with a measured load keeps it. Idempotent: the same rating
+// again changes nothing. 404 for an activity the member can't see.
+apiRoutes.put('/activities/:id/effort', async (c) => {
+  c.header('Cache-Control', 'no-store');
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const effort = parsed.body.effort;
+  if (!('effort' in parsed.body) || (effort !== null && !isEffort(effort))) {
+    return c.json({ error: 'invalid_fields', fields: ['effort'] }, 400);
+  }
+  const activity = await setActivityEffort(c.env.DB, c.get('userId'), c.req.param('id'), effort as number | null);
+  if (!activity) return c.json({ error: 'not_found' }, 404);
+  return c.json({ activity });
+});
+
+// PUT /api/activities/healthkit/:id/route — the GPS route Apple Health saved
+// with one of the member's runs, by its Health workout id (docs/plans/
+// run-recorder P6(b)). Body: { route } in src/activityRoute.ts's encoding.
+// The app sends it after the run itself (POST /api/activities/healthkit), only
+// for runs another app recorded. 404 until the run is stored, or for a run
+// the member deleted; 422 for a workout that isn't a run or a route with no
+// valid point. A later send replaces the route.
+apiRoutes.put('/activities/healthkit/:id/route', async (c) => {
+  const id = c.req.param('id');
+  if (!UUID_RE.test(id)) return c.json({ error: 'invalid_id' }, 400);
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const route = asEncodedRoute(parsed.body.route);
+  if (!route) return c.json({ error: 'invalid_route' }, 400);
+  const saved = await saveHealthKitRoute(c.env.DB, c.get('userId'), id, route);
+  if (!saved.ok) return c.json({ error: saved.error }, saved.error === 'not_found' ? 404 : 422);
+  return c.json(saved);
+});
+
+// DELETE /api/activities/recordings/:id — delete a run recorded in the app,
+// by its recording id, with every copy the app made (docs/plans/run-recorder
+// P5(d)). Its intervals.icu upload is deleted first; when intervals.icu
+// can't be reached or refuses, nothing is deleted and the error says so.
+// Then the run is tombstoned, its route deleted, and the Apple Health
+// workouts named by `health_workout_id` (the app deletes those from Health)
+// stay hidden for good.
+const MAX_HEALTH_WORKOUT_IDS = 10;
+
+apiRoutes.delete('/activities/recordings/:id', async (c) => {
+  const id = c.req.param('id');
+  if (!UUID_RE.test(id)) return c.json({ error: 'invalid_id' }, 400);
+  const healthWorkoutIds = c.req.queries('health_workout_id') ?? [];
+  if (healthWorkoutIds.length > MAX_HEALTH_WORKOUT_IDS || !healthWorkoutIds.every((h) => UUID_RE.test(h))) {
+    return c.json({ error: 'invalid_health_workout_id' }, 400);
+  }
+  const userId = c.get('userId');
+  const recordingId = id.toLowerCase();
+  const run = await getRecordedRun(c.env.DB, userId, recordingId);
+  if (!run) return c.json({ error: 'not_found' }, 404);
+  const copy = await deleteRecordedRunUpload(c.env.DB, c.env, userId, recordingId, run.date);
+  if ('error' in copy) return c.json({ ...copy, deleted: false }, RECORDING_ERROR_STATUS[copy.error]);
+  const removed = await deleteRecordedRun(c.env.DB, userId, recordingId, { healthWorkoutIds });
+  if (!removed) return c.json({ error: 'not_found' }, 404);
+  return c.json({
+    ok: true,
+    recording_id: recordingId,
+    intervals: copy.status === 'deleted'
+      ? { status: 'deleted', activity_id: copy.intervals_activity_id }
+      : { status: copy.status },
+    health_removed: removed.health_removed,
+  });
+});
+
+// POST /api/activities/endurance — a run, ride, swim or walk entered by hand
+// in the app. Like the coach's log_activity, it is created on the member's
+// intervals.icu account as a manual activity, never in the local activities
+// log, and comes back through the activity sync. A provider failure is an
+// error with nothing saved. `id` (client UUID) is the idempotency key: a
+// retry returns the activity the first attempt created (200).
+// Body: type (run|ride|swim|walk or an alias such as treadmill or spin),
+// date, duration_s; optional distance_m, indoor, start_time ("HH:MM" local,
+// default now in the member's timezone), title, notes and avg_hr.
+const ENDURANCE_MAX_S = 7 * 24 * 3600;
+apiRoutes.post('/activities/endurance', async (c) => {
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const b = parsed.body;
+  const optionalText = (max: number) => (v: unknown) => v === null || (typeof v === 'string' && v.length <= max);
+  const invalid = invalidMutationFields(b, {
+    id: (v) => typeof v === 'string' && UUID_RE.test(v),
+    date: (v) => typeof v === 'string' && ISO_DATE_RE.test(v),
+    type: (v) => typeof v === 'string' && enduranceAlias(v) !== null,
+    duration_s: (v) => typeof v === 'number' && Number.isFinite(v) && v > 0 && v <= ENDURANCE_MAX_S,
+  }, {
+    distance_m: (v) => v === null || (typeof v === 'number' && Number.isFinite(v) && v > 0),
+    indoor: (v) => typeof v === 'boolean',
+    start_time: (v) => parseClock(v) !== null,
+    title: optionalText(200),
+    notes: optionalText(4000),
+    avg_hr: (v) => v === null || (typeof v === 'number' && Number.isInteger(v) && v >= 20 && v <= 250),
+  });
+  if (invalid.length > 0) return c.json({ error: 'invalid_fields', fields: invalid }, 400);
+  const userId = c.get('userId');
+  const mapping = intervalsTypeFor(enduranceAlias(b.type as string)!,
+    typeof b.indoor === 'boolean' ? b.indoor : undefined);
+  const title = typeof b.title === 'string' && b.title.trim() ? b.title.trim() : null;
+  const notes = typeof b.notes === 'string' && b.notes.trim() ? b.notes : null;
+  const result = await logEnduranceActivity(c.env.DB, c.env, userId, {
+    activity_id: (b.id as string).toLowerCase(),
+    date: b.date as string,
+    start_time: parseClock(b.start_time) ?? clockInTz(await getUserTimezone(c.env.DB, userId)),
+    mapping,
+    name: title ?? mapping.label,
+    duration_s: Math.round(b.duration_s as number),
+    distance_m: typeof b.distance_m === 'number' ? b.distance_m : null,
+    avg_hr: typeof b.avg_hr === 'number' ? b.avg_hr : null,
+    calories: null,
+    notes,
+  });
+  if ('error' in result) return c.json(result, RECORDING_ERROR_STATUS[result.error]);
+  return c.json(result, result.deduplicated ? 200 : 201);
+});
+
+// PATCH /api/me/health-sharing — flip the Apple Health group-feed opt-in
+// (migration 0028). Off by default; the iOS Apple Health detail toggle calls
+// this. When off, the group feed/stats/series exclude this user's HealthKit rows.
+apiRoutes.patch('/me/health-sharing', async (c) => {
+  const b = await c.req.json<{ enabled?: unknown }>();
+  if (typeof b.enabled !== 'boolean') return c.json({ error: 'invalid_enabled' }, 400);
+  return c.json(await setHealthActivitySharing(c.env.DB, c.get('userId'), b.enabled));
+});
+
+// GET /api/me — account/setup snapshot for the iOS Profile tab. Read-only;
+// derives intervals + Claude-connector status from the server so the app
+// reflects env/MCP-seeded creds and the claude.ai connector (which the
+// client otherwise has no way to see). Never returns the intervals api_key.
+apiRoutes.get('/me/training-profile', async (c) => {
+  c.header('Cache-Control', 'no-store');
+  return c.json(await getTrainingProfile(c.env.DB, c.get('userId')));
+});
+
+apiRoutes.put('/me/training-profile', async (c) => {
+  c.header('Cache-Control', 'no-store');
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const b = parsed.body;
+  if (invalidMutationFields(b, { profile: v => v !== undefined, expected_version: isNonNegativeInteger }).length) {
+    return c.json({ error: 'invalid_fields' }, 400);
+  }
+  const result = await saveTrainingProfile(c.env.DB, c.get('userId'), b.profile, Number(b.expected_version));
+  if ('error' in result) return c.json(result, 400);
+  if ('conflict' in result) return c.json(result, 409);
+  return c.json(result);
+});
+
+// Garmin (docs/plans/garmin). Connecting goes through /auth/garmin; these read
+// the connection and disconnect it. Workouts arrive by Garmin's push.
+apiRoutes.get('/me/garmin', async (c) => {
+  c.header('Cache-Control', 'no-store');
+  return c.json(await getGarminStatus(c.env.DB, c.env, c.get('userId')));
+});
+
+apiRoutes.delete('/me/garmin', async (c) => {
+  c.header('Cache-Control', 'no-store');
+  const result = await disconnectGarmin(c.env.DB, c.env, c.get('userId'));
+  await writeAudit(c.env.DB, c.get('userId'), 'garmin_disconnect', { provider: 'garmin' },
+    result.disconnected ? 'disconnected' : 'not_connected', c.get('appClient'));
+  return c.json(result);
+});
+
+// WHOOP (docs/plans/whoop). Connecting goes through /auth/whoop; these read
+// the connection, disconnect it, sync now, and read the member's own daily
+// recovery and sleep. Recovery is private: no group or coach route reads it.
+apiRoutes.get('/me/whoop', async (c) => {
+  c.header('Cache-Control', 'no-store');
+  return c.json(await getWhoopStatus(c.env.DB, c.env, c.get('userId')));
+});
+
+apiRoutes.delete('/me/whoop', async (c) => {
+  c.header('Cache-Control', 'no-store');
+  const result = await disconnectWhoop(c.env.DB, c.env, c.get('userId'));
+  await writeAudit(c.env.DB, c.get('userId'), 'whoop_disconnect', { provider: 'whoop' },
+    result.disconnected ? 'disconnected' : 'not_connected', c.get('appClient'));
+  return c.json(result);
+});
+
+apiRoutes.post('/me/whoop/sync', async (c) => {
+  c.header('Cache-Control', 'no-store');
+  const result = await syncWhoop(c.env.DB, c.env, c.get('userId'), { days: WHOOP_SYNC_DAYS });
+  const status = result.status === 'ok' || result.status === 'partial' ? 200
+    : result.status === 'not_connected' || result.status === 'reauth' ? 409
+    : result.status === 'disabled' ? 503
+    : result.status === 'busy' ? 429 : 502;
+  return c.json(result, status);
+});
+
+apiRoutes.get('/me/recovery', async (c) => {
+  c.header('Cache-Control', 'no-store');
+  const from = c.req.query('from');
+  const to = c.req.query('to');
+  const bad = [...(!from || !isCivilDate(from) ? ['from'] : []), ...(!to || !isCivilDate(to) ? ['to'] : [])];
+  if (bad.length > 0) return c.json({ error: 'invalid_fields', fields: bad }, 400);
+  if (from! > to!) return c.json({ error: 'invalid_fields', fields: ['from', 'to'] }, 400);
+  if (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`) > 400 * 86_400_000) {
+    return c.json({ error: 'invalid_fields', fields: ['from'] }, 400);
+  }
+  return c.json({ days: await listRecoveryDays(c.env.DB, c.get('userId'), from!, to!) });
+});
+
+// Athlete thresholds for training load (migration 0059). Append-only history:
+// POST adds a value effective from a civil date (idempotent on the client
+// UUID), DELETE soft-deletes one row. GET ?as_of=YYYY-MM-DD reports the values
+// in effect on that date; without it, the latest values.
+apiRoutes.get('/me/thresholds', async (c) => {
+  c.header('Cache-Control', 'no-store');
+  const asOf = c.req.query('as_of');
+  if (asOf !== undefined && !isCivilDate(asOf)) return c.json({ error: 'invalid_fields', fields: ['as_of'] }, 400);
+  return c.json(await getAthleteThresholds(c.env.DB, c.get('userId'), asOf ?? null));
+});
+
+// Values from the member's intervals.icu sport settings that differ from
+// theirs (P7). Read-only: the app saves one only when the member confirms it,
+// through POST /me/thresholds with source 'intervals'.
+apiRoutes.get('/me/thresholds/suggestions', async (c) => {
+  c.header('Cache-Control', 'no-store');
+  return c.json({ suggestions: await getThresholdSuggestions(c.env.DB, c.get('userId')) });
+});
+
+apiRoutes.post('/me/thresholds', async (c) => {
+  c.header('Cache-Control', 'no-store');
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  const input = parseThresholdInput(parsed.body);
+  if (!input.ok) return c.json({ error: 'invalid_fields', fields: input.fields }, 400);
+  const result = await saveAthleteThreshold(c.env.DB, c.get('userId'), input.input);
+  if (!result.ok) return c.json({ error: result.error }, 409);
+  return c.json({ threshold: result.threshold, deduplicated: result.deduplicated }, result.deduplicated ? 200 : 201);
+});
+
+apiRoutes.delete('/me/thresholds/:id', async (c) => {
+  c.header('Cache-Control', 'no-store');
+  const result = await removeAthleteThreshold(c.env.DB, c.get('userId'), c.req.param('id'));
+  if (!result.ok) return c.json({ error: result.error }, 404);
+  return c.json({ ok: true });
+});
+
+apiRoutes.get('/starter-workouts', async (c) => {
+  c.header('Cache-Control', 'no-store');
+  return c.json(await getStarterWorkouts(c.env.DB, c.get('userId')));
+});
+
+apiRoutes.post('/starter-workouts/:id', async (c) => {
+  c.header('Cache-Control', 'no-store');
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  if (invalidMutationFields(parsed.body, { profile_version: isPositiveInteger }).length) return c.json({ error: 'invalid_fields' }, 400);
+  const result = await acceptStarterWorkout(c.env.DB, c.get('userId'), c.req.param('id'), Number(parsed.body.profile_version));
+  if ('error' in result) return c.json(result, result.error === 'starter_unavailable' ? 400 : 409);
+  return c.json(result);
+});
+
+apiRoutes.get('/me', async (c) => {
+  const userId = c.get('userId');
+  return measuredJson(c, await getMeProfile(c.env.DB, userId, c.env.OWNER_APPLE_SUB));
+});
+
+// GET /api/me/station-link-key — the caller's iPad Station link secret. The
+// iPhone and iPad each fetch it with their own session; it never leaves the
+// devices of the account it was derived for and is never cached.
+apiRoutes.get('/me/station-link-key', async (c) => {
+  c.header('Cache-Control', 'no-store');
+  const key = await deriveStationLinkKey(c.env.APP_JWT_SECRET, c.get('userId'));
+  return c.json({ version: STATION_LINK_KEY_VERSION, key });
+});
+
+// GET /api/me/export — download the authenticated caller's portable account
+// and training-data snapshot. There is deliberately no user id in either the
+// path or query contract: requireAppJwt supplies the sole export principal.
+// The attachment is never cacheable and the service projection excludes
+// credentials, tokens, invite capabilities, and other members' private data.
+apiRoutes.get('/me/export', async (c) => {
+  const exported = await exportUserData(c.env.DB, c.get('userId'));
+  if (!exported) return c.json({ error: 'not_found' }, 404);
+  const exportedAt = exported.exported_at;
+  const date =
+    typeof exportedAt === 'number' && Number.isFinite(exportedAt)
+      ? new Date(exportedAt).toISOString().slice(0, 10)
+      : 'data';
+  return new Response(JSON.stringify(exported, null, 2), {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Disposition':
+        `attachment; filename="tres-fort-account-export-${date}.json"`,
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+    },
+  });
+});
+
+// PATCH /api/me/profile — repair the display name Apple provides only on the
+// first authorization. Only the caller's user row changes; group-specific
+// nickname overrides remain independent.
+apiRoutes.patch('/me/profile', async (c) => {
+  let body: { display_name?: unknown };
+  try {
+    body = await c.req.json<{ display_name?: unknown }>();
+  } catch {
+    return c.json({ error: 'invalid_json' }, 400);
+  }
+  if (body === null || typeof body !== 'object' || typeof body.display_name !== 'string') {
+    return c.json({ error: 'invalid_display_name' }, 400);
+  }
+  const displayName = body.display_name.trim();
+  if (displayName.length < 1 || displayName.length > 80) {
+    return c.json({ error: 'invalid_display_name' }, 400);
+  }
+  const userId = c.get('userId');
+  if (!(await setUserDisplayName(c.env.DB, userId, displayName))) {
+    return c.json({ error: 'not_found' }, 404);
+  }
+  await writeAudit(
+    c.env.DB,
+    userId,
+    'update_profile',
+    { field: 'display_name' },
+    'ok',
+    'ios',
+  );
+  return c.json(await getMeProfile(c.env.DB, userId, c.env.OWNER_APPLE_SUB));
+});
+
+// DELETE /api/me — permanently delete the authenticated account.
+//
+// There is deliberately no soft-delete or recovery token: the iOS client puts
+// a plainly worded destructive confirmation in front of this request, and the
+// service transaction removes all caller-owned rows and credentials. Shared
+// groups survive under their longest-tenured remaining member; an owner
+// deletion additionally leaves the non-personal bootstrap-suppression
+// tombstone. Tests exercise seeded users only.
+apiRoutes.delete('/me', async (c) => {
+  const idempotencyKey = c.req.header('X-Account-Deletion-Key') ?? '';
+  if (!isAccountDeletionKey(idempotencyKey)) {
+    return measuredJson(c, { error: 'invalid_account_deletion_key' }, 400);
+  }
+  const userId = c.get('userId');
+  const livePrincipal = await c.env.DB
+    .prepare('SELECT 1 AS x FROM users WHERE id = ?1')
+    .bind(userId)
+    .first<{ x: number }>();
+  const continuingDeletion = await accountDeletionContinuationMatches(
+    c.env.DB,
+    userId,
+    idempotencyKey,
+  );
+  const authAgeSeconds = Math.max(
+    0,
+    Math.floor(Date.now() / 1000) - c.get('appAuthTime'),
+  );
+  if (
+    livePrincipal &&
+    !continuingDeletion &&
+    authAgeSeconds > ACCOUNT_DELETION_RECENT_AUTH_SECONDS
+  ) {
+    return measuredJson(c, { error: 'reauthentication_required' }, 401);
+  }
+  // Garmin's license asks that Garmin be told when a member leaves; best
+  // effort, and the deletion below removes the Garmin rows either way.
+  if ((await getGarminStatus(c.env.DB, c.env, userId)).connected) {
+    await disconnectGarmin(c.env.DB, c.env, userId).catch((error: unknown) => {
+      console.error({ event: 'garmin_account_deletion_disconnect_failed', error_type: diagnosticErrorType(error) });
+    });
+  }
+  const result = await deleteUserAccount(
+    c.env.DB,
+    userId,
+    c.env.OWNER_APPLE_SUB,
+    idempotencyKey,
+    { appleConfig: appleProviderConfig(c.env) },
+  );
+  if ('error' in result) {
+    return measuredJson(c,
+      {
+        error:
+          result.error === 'not_found' ? 'account_not_found' : result.error,
+      },
+      result.error === 'conflict' ? 409 : 404,
+    );
+  }
+  return measuredJson(c, result);
+});
+
+// GET /api/me/diagnostics/* — the owner's read-only diagnostics lookups
+// (docs/DIAGNOSTICS.md, src/routes/diagnostics.ts) for the web page. Anyone
+// but the owner gets the 404 an unknown route returns.
+apiRoutes.route('/me/diagnostics', ownerDiagnosticsRoutes);
+
+// POST /api/me/problem-reports — "Report a problem" in the app, as
+// multipart form data: `id` (client UUID, the idempotency key), `kind`
+// (bug | activity | feedback), `message`, optional `contact`, optional
+// `activity_id` (one of the member's own activities, not Garmin or WHOOP),
+// optional `screenshot` (JPEG or PNG, at most 1 MB), and the app's
+// `platform`, `app_version`, `build`, `os_version`, `device` and `screen`.
+// Sending an activity is the member's consent for support to read its
+// details for 14 days. The owner reads reports through the diagnostics
+// lookups (docs/DIAGNOSTICS.md). 201 when stored, 200 for a retry.
+apiRoutes.post('/me/problem-reports', async (c) => {
+  c.header('Cache-Control', 'no-store');
+  let form: FormData;
+  try {
+    form = await c.req.formData();
+  } catch {
+    return c.json({ error: 'invalid_body' }, 400);
+  }
+  const fields: Record<string, unknown> = {};
+  for (const name of ['id', 'kind', 'message', 'contact', 'activity_id', 'platform', 'app_version', 'build', 'os_version', 'device', 'screen']) {
+    const value = form.get(name);
+    if (value !== null) fields[name] = typeof value === 'string' ? value : undefined;
+  }
+  const parsed = parseProblemReport(fields);
+  if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+  let screenshot: { contentType: 'image/jpeg' | 'image/png'; bytes: Uint8Array } | null = null;
+  const file = form.get('screenshot') as unknown;
+  if (file !== null) {
+    if (!(file instanceof File) || file.size === 0) return c.json({ error: 'invalid_screenshot' }, 400);
+    if (file.size > PROBLEM_REPORT_LIMITS.screenshotBytes) return c.json({ error: 'screenshot_too_large' }, 413);
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const type = screenshotType(bytes);
+    if (!type) return c.json({ error: 'invalid_screenshot' }, 400);
+    screenshot = { contentType: type, bytes };
+  }
+  const result = await submitProblemReport(c.env.DB, c.get('userId'), parsed.input, screenshot);
+  if (!result.ok) {
+    return c.json({ error: result.error }, result.error === 'rate_limited' ? 429 : 409);
+  }
+  return c.json({ report: result.report, deduplicated: result.deduplicated }, result.deduplicated ? 200 : 201);
+});
+
+// POST /api/me/test-member -> { jwt, user }
+// DELETE /api/me/test-member -> { ok: true }
+//
+// Owner-only trial of the new-member setup (see createOwnerTestMember). Only
+// the distinguished owner may create one; anyone else gets the same 404 an
+// unknown route returns, so the feature is invisible to other members. The
+// returned bearer belongs to the test member, never the owner. DELETE is
+// called with that test member's own bearer and removes only a test member,
+// never a real account; the owner's own session is untouched throughout.
+apiRoutes.post('/me/test-member', async (c) => {
+  c.header('Cache-Control', 'no-store');
+  const result = await createOwnerTestMember(
+    c.env.DB,
+    c.get('userId'),
+    c.env.OWNER_APPLE_SUB,
+  );
+  if ('error' in result) {
+    return c.json({ error: result.error }, result.error === 'conflict' ? 409 : 404);
+  }
+  const { user } = result;
+  const jwt = await issueAppJwt(user.id, c.env.APP_JWT_SECRET);
+  return c.json(
+    {
+      jwt,
+      user: { id: user.id, email: user.email, display_name: user.display_name },
+    },
+    201,
+  );
+});
+
+apiRoutes.delete('/me/test-member', async (c) => {
+  const deleted = await deleteTestMemberSelf(
+    c.env.DB,
+    c.get('userId'),
+    c.env.OWNER_APPLE_SUB,
+  );
+  if (!deleted) return c.json({ error: 'not_found' }, 404);
+  return c.json({ ok: true });
+});
+
+// ---- integrations: intervals.icu credentials (M1 multi-user) ------------
+// Connect / disconnect THIS user's intervals.icu account. Each Apple sign-in
+// owns its own credentials so multiple users can each connect a separate
+// athlete without overwriting one another (the env-secret model could not).
+// Disconnect = pass null on either field; both columns clear together.
+apiRoutes.patch('/me/integrations/intervals', async (c) => {
+  const userId = c.get('userId');
+  let b: { api_key?: unknown; athlete_id?: unknown };
+  try {
+    b = await c.req.json<{ api_key?: unknown; athlete_id?: unknown }>();
+  } catch {
+    return c.json({ error: 'invalid_json' }, 400);
+  }
+  // Required keys (either value may be null = disconnect). Reject silently-
+  // missing keys so a typo doesn't accidentally clear a working connection.
+  if (!b || typeof b !== 'object' || Array.isArray(b) || !('api_key' in b) || !('athlete_id' in b)) {
+    return c.json({ error: 'missing_fields' }, 400);
+  }
+  const rawKey = b.api_key;
+  const rawId = b.athlete_id;
+  const okKey = rawKey === null || typeof rawKey === 'string';
+  const okId = rawId === null || typeof rawId === 'string';
+  if (!okKey || !okId) return c.json({ error: 'invalid_field_type' }, 400);
+  // Empty strings are treated as null (disconnect) — defensive against
+  // iOS form posting "" instead of null on the clear path.
+  const apiKey = typeof rawKey === 'string' && rawKey.length > 0 ? rawKey : null;
+  const athleteId = typeof rawId === 'string' && rawId.length > 0 ? rawId : null;
+  const result = await setUserIntervalsCreds(c.env.DB, userId, c.env.CREDENTIAL_ENCRYPTION_KEY, apiKey, athleteId);
+  // Audit the change without recording the API key itself (only the
+  // outcome). actor='ios' distinguishes this REST mutation from MCP audits.
+  await writeAudit(
+    c.env.DB,
+    userId,
+    'set_intervals_creds',
+    { connected: result.connected },
+    result.connected ? 'connected' : 'disconnected',
+    'ios',
+  );
+  if (result.connected) {
+    c.executionCtx.waitUntil(reconcileIntervalsConnection(
+      c.env.DB, c.env, userId, result.credential_generation,
+    ));
+  }
+  return c.json(result);
+});
+
+apiRoutes.post('/me/integrations/intervals/sync', async (c) => {
+  const body: unknown = await c.req.json().catch(() => null);
+  if (!body || typeof body !== 'object' || Array.isArray(body) ||
+      Object.keys(body).some(key => key !== 'expected_generation') ||
+      !('expected_generation' in body) || typeof body.expected_generation !== 'number' ||
+      !Number.isSafeInteger(body.expected_generation) || body.expected_generation < 0) {
+    return c.json({ error: 'invalid_expected_generation' }, 400);
+  }
+  return c.json(await reconcileIntervalsConnection(
+    c.env.DB, c.env, c.get('userId'), body.expected_generation,
+  ));
+});
+
+// ---- Single-use coach connect codes (legacy endpoint path) -------------
+// Signed-in members receive a server-generated 256-bit code, valid for ten
+// minutes and one authorization. The database stores only its digest.
+apiRoutes.post('/me/mcp-passphrase', async (c) => {
+  const body: unknown = await c.req.json().catch(() => null);
+  if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== 0) {
+    return c.json({ error: 'server_generated_code_required' }, 400);
+  }
+  const result = await createCoachConnectCode(c.env.DB, c.get('userId'));
+  await writeAudit(c.env.DB, c.get('userId'), 'create_coach_connect_code', {}, 'ok', 'ios');
+  c.header('Cache-Control', 'no-store');
+  return c.json(result);
+});
+
+// Caller-scoped coach grants. Listing exposes only opaque family and client
+// metadata; credentials never cross this REST boundary.
+apiRoutes.get('/me/coach-grants', async (c) => {
+  const grants = await listOAuthGrants(
+    c.env.DB,
+    c.get('userId'),
+    c.env.OWNER_APPLE_SUB,
+  );
+  return c.json({ grants });
+});
+
+apiRoutes.delete('/me/coach-grants/:grantId', async (c) => {
+  const grantId = c.req.param('grantId');
+  const revoked = await revokeOAuthGrant(
+    c.env.DB,
+    c.get('userId'),
+    grantId,
+    c.env.OWNER_APPLE_SUB,
+  ).catch(() => undefined);
+  if (revoked === undefined) return c.json({ error: 'server_error' }, 500);
+  if (!revoked) return c.json({ error: 'not_found' }, 404);
+  return c.json({ ok: true });
+});
+
+apiRoutes.delete('/me/coach-grants', async (c) => {
+  const revoked = await revokeAllOAuthGrants(
+    c.env.DB,
+    c.get('userId'),
+    c.env.OWNER_APPLE_SUB,
+  ).catch(() => undefined);
+  if (revoked === undefined) return c.json({ error: 'server_error' }, 500);
+  return c.json({ ok: true, revoked });
+});
+
+// ---- groups (M2 — friends/family invite-gated containers) ----------------
+apiRoutes.get('/me/group-safety', async (c) => {
+  const userId = c.get('userId');
+  return c.json({
+    blocks: await listGroupBlocks(c.env.DB, userId),
+    restriction: await getGroupSharingRestriction(c.env.DB, userId),
+    can_moderate: await isGroupSafetyOperator(c.env.DB, userId, c.env.OWNER_APPLE_SUB),
+  });
+});
+
+apiRoutes.put('/me/group-blocks/:userId', async (c) => {
+  const body = await c.req.json<{ active?: unknown }>().catch(() => null);
+  if (!body || typeof body.active !== 'boolean') return c.json({ error: 'invalid_active' }, 400);
+  const ok = await setGroupMemberBlock(c.env.DB, c.get('userId'), c.req.param('userId'), body.active);
+  return ok ? c.json({ ok: true }) : c.json({ error: 'member_unavailable' }, 404);
+});
+
+apiRoutes.put('/group-safety/restrictions/:userId', async (c) => {
+  const userId = c.get('userId');
+  if (!await isGroupSafetyOperator(c.env.DB, userId, c.env.OWNER_APPLE_SUB)) {
+    return c.json({ error: 'forbidden' }, 403);
+  }
+  const body = await c.req.json<{ active?: unknown; reason?: unknown }>().catch(() => null);
+  if (!body || typeof body.active !== 'boolean' || !isGroupReportReason(body.reason)) {
+    return c.json({ error: 'invalid_restriction' }, 400);
+  }
+  const ok = await setGroupSharingRestriction(c.env.DB, userId, c.env.OWNER_APPLE_SUB,
+    c.req.param('userId'), body.active, body.reason);
+  return ok ? c.json({ ok: true }) : c.json({ error: 'member_unavailable' }, 404);
+});
+
+//
+// All routes require requireAppJwt (mounted at the top). Membership is the
+// authorization unit: non-members see 403 on group-scoped GET/PATCH/POST,
+// 200-or-404 on leave (idempotent), 404 on unknown group id. Mutations
+// audit via writeAudit inside the db.ts helpers (actor='ios').
+
+apiRoutes.post('/groups', async (c) => {
+  const userId = c.get('userId');
+  let b: { name?: unknown };
+  try {
+    b = await c.req.json<{ name?: unknown }>();
+  } catch {
+    return c.json({ error: 'invalid_json' }, 400);
+  }
+  if (typeof b.name !== 'string' || b.name.trim().length === 0) {
+    return c.json({ error: 'invalid_name' }, 400);
+  }
+  const group = await createGroup(c.env.DB, userId, b.name.trim());
+  // Hydrate so the iOS client gets the full shape (creator listed as the
+  // sole member) without a second roundtrip.
+  const full = await getGroupWithMembers(c.env.DB, group.id, userId);
+  return c.json(full, 201);
+});
+
+apiRoutes.get('/groups', async (c) => {
+  const userId = c.get('userId');
+  return c.json({ groups: await listGroupsForUser(c.env.DB, userId) });
+});
+
+// Preview an invite by code (group name + state) so the in-app join-confirm
+// sheet can show "Join <name>?" BEFORE redeeming. Any signed-in user may
+// call it — the code is the join capability, so this exposes nothing they
+// couldn't get by redeeming. Read-only: does NOT consume the code. Registered
+// before `/groups/:id` so the literal "invite" segment can never be read as a
+// group id (group ids are UUIDs, so they never collide, but order makes it
+// unambiguous). `code` is normalized inside getInvitePreview's lookup.
+apiRoutes.get('/groups/invite/:code', async (c) => {
+  const code = c.req.param('code').trim();
+  return c.json(await getInvitePreview(c.env.DB, code));
+});
+
+apiRoutes.get('/groups/:id', async (c) => {
+  const userId = c.get('userId');
+  const groupId = c.req.param('id');
+  // Unknown group -> 404; known group the caller is not in -> 403 (do not
+  // 404, which would silently leak nothing-vs-not-mine — but also do not
+  // list members of arbitrary groups). Same ordering as the feed/stats guard.
+  const guard = await requireGroupMembership(c, userId, groupId);
+  if (guard) return guard;
+  const full = await getGroupWithMembers(c.env.DB, groupId, userId);
+  return c.json(full);
+});
+
+apiRoutes.post('/groups/:id/invites', async (c) => {
+  const userId = c.get('userId');
+  const groupId = c.req.param('id');
+  if (!(await isGroupMember(c.env.DB, userId, groupId))) {
+    // 403 (rather than 404) when the group exists but caller isn't in it;
+    // 404 when the group truly doesn't exist (we treat the missing FK as
+    // the latter from a UX point of view — the iOS client can't tell the
+    // difference and shouldn't, since the only way to know a group id is
+    // membership).
+    if (!(await groupExists(c.env.DB, groupId))) {
+      return c.json({ error: 'not_found' }, 404);
+    }
+    return c.json({ error: 'forbidden' }, 403);
+  }
+  let b: { expires_at?: unknown };
+  try {
+    b = await c.req.json<{ expires_at?: unknown }>().catch(() => ({}));
+  } catch {
+    b = {};
+  }
+  // expires_at semantics: undefined -> default +30d (db.ts), null ->
+  // never expires, number -> exact epoch ms. Anything else is rejected
+  // so a typo doesn't accidentally mint a never-expiring code.
+  let expiresAt: number | null | undefined = undefined;
+  if ('expires_at' in b) {
+    const v = b.expires_at;
+    if (v === null) expiresAt = null;
+    else if (typeof v === 'number' && Number.isFinite(v)) expiresAt = v;
+    else return c.json({ error: 'invalid_expires_at' }, 400);
+  }
+  const invite = await createInvite(c.env.DB, userId, groupId, expiresAt);
+  return c.json(
+    { code: invite.code, group_id: invite.group_id, expires_at: invite.expires_at },
+    201,
+  );
+});
+
+apiRoutes.post('/groups/join', async (c) => {
+  const userId = c.get('userId');
+  let b: { code?: unknown };
+  try {
+    b = await c.req.json<{ code?: unknown }>();
+  } catch {
+    return c.json({ error: 'invalid_json' }, 400);
+  }
+  if (typeof b.code !== 'string' || b.code.length === 0) {
+    return c.json({ error: 'invalid_code' }, 400);
+  }
+  const result = await redeemInvite(c.env.DB, b.code.trim(), userId);
+  if ('error' in result) {
+    // Map db.ts error tags to HTTP status per spec:
+    //   unknown  -> 404 (no such code)
+    //   used     -> 410 (code was consumed)
+    //   expired  -> 410 (code timed out)
+    //   already_member -> 409 (you're already in this group; code NOT consumed)
+    if (result.error === 'unknown') return c.json(result, 404);
+    if (result.error === 'already_member') return c.json(result, 409);
+    return c.json(result, 410);
+  }
+  // On success, hand back the freshly-joined group with members hydrated
+  // so the iOS client can render the group page without a follow-up GET.
+  const group = await getGroupWithMembers(c.env.DB, result.group_id, userId);
+  return c.json({ ok: true, group });
+});
+
+apiRoutes.delete('/groups/:id/members/me', async (c) => {
+  const userId = c.get('userId');
+  const groupId = c.req.param('id');
+  // Idempotent: 200 whether or not the caller was a member. leaveGroup
+  // returns false when no rows changed (already gone / never joined),
+  // but per spec we still return 200 — the postcondition holds either way.
+  const removed = await leaveGroup(c.env.DB, userId, groupId);
+  return c.json({ ok: true, removed });
+});
+
+apiRoutes.patch('/groups/:id/members/me', async (c) => {
+  const userId = c.get('userId');
+  const groupId = c.req.param('id');
+  let b: { display_name?: unknown };
+  try {
+    b = await c.req.json<{ display_name?: unknown }>();
+  } catch {
+    return c.json({ error: 'invalid_json' }, 400);
+  }
+  if (!('display_name' in b)) {
+    return c.json({ error: 'missing_display_name' }, 400);
+  }
+  const raw = b.display_name;
+  if (raw !== null && typeof raw !== 'string') {
+    return c.json({ error: 'invalid_display_name' }, 400);
+  }
+  // Empty string is treated as null (clear). Mirrors the intervals creds
+  // route's empty-string-as-null convention so an iOS form posting "" on
+  // clear doesn't end up with an empty nickname.
+  const displayName = typeof raw === 'string' && raw.length > 0 ? raw : null;
+  const ok = await setGroupDisplayName(c.env.DB, userId, groupId, displayName);
+  if (!ok) return c.json({ error: 'forbidden' }, 403);
+  // Return the hydrated group so the iOS client can update its model.
+  const full = await getGroupWithMembers(c.env.DB, groupId, userId);
+  return c.json(full);
+});
+
+// ---- M4: group feed + stats ---------------------------------------------
+//
+// Two read endpoints on top of the existing group-membership authz:
+// `/feed` (interleaved session/ride/activity stream) and `/stats` (per-
+// member workout_count + streak). Both 403 non-members, 404 unknown ids,
+// and stamp `is_me` so the iOS client doesn't compare user ids manually.
+//
+// Privacy contract enforced INSIDE the db.ts helpers (notes / RPE / set
+// notes / perceived_fatigue are never selected). See the long comment at
+// the top of the M4 section in db.ts for the full rules.
+
+/**
+ * Shared guard for /groups/:id/feed and /groups/:id/stats: 404 if the
+ * group doesn't exist, 403 if the caller isn't a member. Returns null on
+ * pass-through (call site continues), or a Response on reject (call site
+ * `return`s it). Mirrors the same 404-before-403 ordering POST
+ * /:id/invites uses.
+ */
+async function requireGroupMembership(
+  c: Context<HonoEnv>,
+  userId: string,
+  groupId: string,
+): Promise<Response | null> {
+  if (!(await groupExists(c.env.DB, groupId))) {
+    return c.json({ error: 'not_found' }, 404);
+  }
+  if (!(await isGroupMember(c.env.DB, userId, groupId))) {
+    return c.json({ error: 'forbidden' }, 403);
+  }
+  return null;
+}
+
+apiRoutes.get('/groups/:id/feed', async (c) => {
+  const userId = c.get('userId');
+  const groupId = c.req.param('id');
+  const guard = await requireGroupMembership(c, userId, groupId);
+  if (guard) return guard;
+
+  // Composite pagination cursor on (occurred_at, id): when N rows share
+  // an occurred_at at the page boundary, a plain timestamp cursor would
+  // drop the rest of the tied rows on the next page. iOS passes BOTH
+  // `since` (epoch-ms upper bound) and `since_id` (the tail item's id);
+  // server filters strictly older on the composite. Both null → no upper
+  // bound (most-recent N).
+  const sinceRaw = c.req.query('since');
+  let sinceMs: number | null = null;
+  if (sinceRaw != null) {
+    const n = Number(sinceRaw);
+    if (!Number.isFinite(n)) return c.json({ error: 'invalid_since' }, 400);
+    sinceMs = n;
+  }
+  const sinceIdRaw = c.req.query('since_id');
+  const sinceId =
+    sinceIdRaw != null && sinceIdRaw.length > 0 ? sinceIdRaw : null;
+  // `limit`: default 30, capped at 100 (FEED_LIMIT_MAX in db.ts). Out-of-
+  // range values clamp rather than 400 — the iOS client's safer to keep
+  // moving on a typo than to surface a "what did you do wrong" error.
+  let limit = 30;
+  const limitRaw = c.req.query('limit');
+  if (limitRaw != null) {
+    const n = Number(limitRaw);
+    if (Number.isFinite(n) && n > 0) limit = Math.min(100, Math.floor(n));
+  }
+
+  const items = await getGroupFeed(c.env.DB, groupId, sinceMs, sinceId, limit, userId);
+  // Composite next cursor = the LAST returned item (smallest by
+  // (occurred_at, id) DESC). iOS passes both fields back as ?since= and
+  // ?since_id= to load the next page. null both when empty → end of stream.
+  const tail = items.length === 0 ? null : items[items.length - 1]!;
+  return c.json({
+    group_id: groupId,
+    items,
+    next_since: tail?.occurred_at ?? null,
+    next_since_id: tail?.id ?? null,
+    server_time: Date.now(),
+  });
+});
+
+apiRoutes.get('/groups/:id/stats', async (c) => {
+  const userId = c.get('userId');
+  const groupId = c.req.param('id');
+  const guard = await requireGroupMembership(c, userId, groupId);
+  if (guard) return guard;
+
+  // `range`: "7d" | "14d" | "30d" (default 7d). Other suffixes (weeks,
+  // months) are rejected so the iOS surface is honest about what it
+  // accepts — 5d would silently round, etc.
+  const rangeRaw = c.req.query('range') ?? '7d';
+  const m = /^(\d+)d$/.exec(rangeRaw);
+  if (!m) return c.json({ error: 'invalid_range' }, 400);
+  const days = Number(m[1]);
+  if (!Number.isFinite(days) || days < 1 || days > 365) {
+    return c.json({ error: 'invalid_range' }, 400);
+  }
+  const members = await getGroupStats(c.env.DB, groupId, days, userId);
+  return c.json({ group_id: groupId, range: rangeRaw, members });
+});
+
+// GET /groups/:id/activity?days=N — per-member DAILY activity series for
+// the week/month/year zoom. One generous pull (default 371d ≈ 53 weeks)
+// powers all three client zooms with no refetch on toggle. Same
+// 404-before-403 membership guard as /feed and /stats.
+apiRoutes.get('/groups/:id/activity', async (c) => {
+  const userId = c.get('userId');
+  const groupId = c.req.param('id');
+  const guard = await requireGroupMembership(c, userId, groupId);
+  if (guard) return guard;
+
+  // `days`: trailing civil-day window. Default 371 (covers the year
+  // view's 53 week-buckets); clamped 1..372 in db.ts. Out-of-range
+  // clamps rather than 400 — same forgiving stance as /feed's limit.
+  let days = 371;
+  const daysRaw = c.req.query('days');
+  if (daysRaw != null) {
+    const n = Number(daysRaw);
+    if (Number.isFinite(n) && n > 0) days = Math.floor(n);
+  }
+  const members = await getGroupActivitySeries(c.env.DB, groupId, days, userId);
+  return c.json({ group_id: groupId, days, server_time: Date.now(), members });
+});
+
+// Partner setup is local pairing; these writes always use the signed-in
+// phone's own account, never an account ID or credential from the other lane.
+apiRoutes.post('/partner/workouts', async (c) => {
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({error:parsed.error},400);
+  const result = await createPartnerWorkout(c.env.DB,c.get('userId'),parsed.body);
+  return c.json(result, 'conflict' in result ? 409 : 'error' in result ?
+    result.error === 'invalid_fields' || result.error === 'invalid_exercises' || result.error === 'group_conflict' ? 400 : 409 : 201);
+});
+
+apiRoutes.post('/partner/start', async (c) => {
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({error:parsed.error},400);
+  if (!isPartnerStartInput(parsed.body)) return c.json({error:'invalid_fields',fields:['start']},400);
+  const result = await startPartnerSession(c.env.DB,c.get('userId'),parsed.body);
+  return c.json(result,'session' in result ? 200 : 409);
+});
+
+apiRoutes.post('/partner/sessions/:id/leave', async (c) => {
+  const parsed = await readMutationBody(c);
+  if (!parsed.ok) return c.json({error:parsed.error},400);
+  const b = parsed.body;
+  if (invalidMutationFields(b,{partner_workout_id:isGroupId,expected_attempt:isNonNegativeInteger,
+      cancel:(value)=>typeof value==='boolean'}).length || Object.keys(b).some(key=>!['partner_workout_id','expected_attempt','cancel'].includes(key))) return c.json({error:'invalid_fields'},400);
+  const result = await leavePartnerSession(c.env.DB,c.get('userId'),c.req.param('id'),
+    b.partner_workout_id as string,b.expected_attempt as number,b.cancel as boolean);
+  return c.json(result,'session' in result ? 200 : 409);
+});
+
+apiRoutes.post('/partner/cancel-start', async (c) => {
+  const parsed=await readMutationBody(c);
+  if (!parsed.ok) return c.json({error:parsed.error},400);
+  if (!isPartnerStartInput(parsed.body)) return c.json({error:'invalid_fields'},400);
+  const result=await cancelPartnerStart(c.env.DB,c.get('userId'),parsed.body);
+  return c.json(result,'cancelled' in result ? 200 : 409);
+});

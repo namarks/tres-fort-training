@@ -1,0 +1,36 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+*.log
+__pycache__/
+.DS_Store
+coverage/
+
+# iOS — project is generated from project.yml via XcodeGen
+ios/*.xcodeproj/
+ios/DerivedData/
+ios/build/
+ios/.dependencies/
+*.xcuserstate
+.swiftpm/
+
+# fastlane (ios/fastlane/) — local secrets and run artifacts
+ios/fastlane/.api_key.json
+ios/fastlane/report.xml
+ios/fastlane/Preview.html
+ios/fastlane/screenshots/**/*.png
+ios/fastlane/test_output/
+
+# Ruby (fastlane gems) — Gemfile.lock IS checked in for reproducibility
+ios/.bundle/
+ios/vendor/bundle/
+.env
+
+# Disposable verification evidence (never real account data)
+.artifacts/
+design/mock-kit/out/
+
+# Brand artwork supplied privately by the release maintainer.
+ios/TresFort/Assets.xcassets/Connections/logo_apple_health.imageset/
+ios/TresFort/Assets.xcassets/Connections/logo_garmin_connect.imageset/

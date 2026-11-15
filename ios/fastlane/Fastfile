@@ -1,0 +1,64 @@
+default_platform(:ios)
+
+# Existing "TresFort CI Signing" team key with App Manager access. The older
+# Developer key could upload builds but Apple rejected build selection with 403.
+# Team keys cover all apps in the account; the name does not restrict scope.
+API_KEY_ID = "VP9G3R7Q85"
+API_ISSUER_ID = "b169cd8d-cb73-4efc-8d72-8c92c5ad29ed"
+P8_PATH = File.expand_path("~/.appstoreconnect/private_keys/AuthKey_#{API_KEY_ID}.p8")
+
+platform :ios do
+  before_all do
+    UI.user_error!("Missing ASC API key at #{P8_PATH}") unless File.exist?(P8_PATH)
+    app_store_connect_api_key(
+      key_id: API_KEY_ID,
+      issuer_id: API_ISSUER_ID,
+      key_filepath: P8_PATH,
+      duration: 1200,
+      in_house: false
+    )
+  end
+
+  # No lane for creating the App Store Connect record. fastlane's `produce`
+  # action requires Apple ID password (Spaceship / Developer Portal API) — the
+  # ASC API key set above doesn't authorize entity creation, only build &
+  # metadata ops. With 2FA on the Apple ID, automating produce needs an
+  # app-specific password and a keychain dance for what's a one-time op. Do
+  # it in the App Store Connect web UI instead; see fastlane/SETUP.md.
+
+  desc "Upload an already-built IPA to TestFlight (run scripts/upload-testflight.sh first to build)"
+  lane :upload_testflight do |options|
+    upload_to_testflight(
+      ipa: options[:ipa] || "build/export/TresFort.ipa",
+      skip_waiting_for_build_processing: true,
+      skip_submission: true
+    )
+  end
+
+  desc "Submit an explicitly selected version and build for review, with manual release. Requires separate submission authorization."
+  lane :submit_for_review do |options|
+    version = options[:version].to_s
+    build = options[:build_number].to_s
+    unless version.match?(/\A[0-9]+(?:\.[0-9]+){0,2}\z/) && build.match?(/\A[1-9][0-9]*\z/)
+      UI.user_error!("Specify the verified candidate: submit_for_review version:1.0 build_number:<number>")
+    end
+    deliver(
+      app_identifier: "com.nmarkspdx.tresfort",
+      app_version: version,
+      build_number: build,
+      metadata_path: "./fastlane/metadata",
+      screenshots_path: "./fastlane/screenshots",
+      skip_binary_upload: true,
+      skip_screenshots: false,
+      skip_metadata: false,
+      submit_for_review: true,
+      automatic_release: false,
+      run_precheck_before_submit: true,
+      force: true,
+      reject_if_possible: false,
+      # Compliance, privacy and content-rights declarations must already be
+      # verified in ASC. Do not overwrite them with blanket assumptions here.
+      precheck_include_in_app_purchases: false
+    )
+  end
+end

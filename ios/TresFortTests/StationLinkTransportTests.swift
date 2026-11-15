@@ -1,0 +1,907 @@
+import Combine
+import MultipeerConnectivity
+import XCTest
+@testable import TresFort
+
+/// Connection handling for the iPhone and iPad link, driven through fake
+/// sessions and a fake clock so every reconnect path runs without radios.
+@MainActor
+final class StationLinkTransportTests: XCTestCase {
+    private let key = Data(repeating: 4, count: 32)
+    private let clock = TestClock()
+    private let ipadPeer = MCPeerID(displayName: "iPad")
+    private let phonePeer = MCPeerID(displayName: "iPhone")
+    private var tag: String { StationLink.discoveryTag(key: key) }
+
+    private func requireCameraCounting() throws {
+        #if APP_STORE_BUILD
+        throw XCTSkip("Camera counting is exercised in the beta variant; PublicStationTests verifies its exclusion.")
+        #endif
+    }
+
+    private func makeArm() -> StationLinkArm {
+        StationLinkArm(armID: UUID(), slotID: "slot-1", setNumber: 1, exercise: .squat,
+                       exerciseName: "Back Squat", targetReps: 5)
+    }
+
+    /// Both devices started with the account key and joined in one session.
+    private func pairedDevices() -> (phone: Device, ipad: Device, wire: Wire) {
+        let phone = Device(.controller, clock: clock), ipad = Device(.station, clock: clock)
+        phone.transport.start(key: key)
+        ipad.transport.start(key: key)
+        phone.transport.handleFound(ipadPeer, info: ["tag": tag])
+        return (phone, ipad, answer(phone, by: ipad))
+    }
+
+    /// The iPad accepts the phone's latest invitation and both sessions connect.
+    @discardableResult
+    private func answer(_ phone: Device, by ipad: Device) -> Wire {
+        let invitation = phone.radio.invitations[phone.radio.invitations.count - 1]
+        let channel = FakeChannel(phone.radio.localPeer.displayName)
+        var accepted = false
+        ipad.transport.handleInvitation(from: phone.radio.localPeer, context: invitation.context) { accept in
+            accepted = accept
+            return accept ? channel : nil
+        }
+        XCTAssertTrue(accepted)
+        let wire = Wire(phone: phone, phoneChannel: invitation.channel, ipad: ipad, ipadChannel: channel)
+        wire.connect()
+        return wire
+    }
+
+    /// After losing its connection the phone browses under a new identity:
+    /// it finds the iPad again, then invites it.
+    @discardableResult
+    private func reconnect(_ phone: Device, to ipad: Device) -> Wire {
+        phone.transport.handleFound(ipadPeer, info: ["tag": tag])
+        return answer(phone, by: ipad)
+    }
+
+    /// An iPhone from before heartbeats: the same handshake, run by hand.
+    private func connectOlderPhone(to ipad: Device) throws -> (channel: FakeChannel, sessionKey: Data) {
+        let channel = FakeChannel(phonePeer.displayName)
+        ipad.transport.handleInvitation(from: phonePeer, context: Data(tag.utf8)) { $0 ? channel : nil }
+        ipad.transport.handle(channel, connected: true)
+        guard case .challenge(let ipadNonce)? = channel.sent.first.flatMap({ StationLinkMessage.decode($0) }) else {
+            XCTFail("The iPad challenges every newcomer")
+            throw ChannelClosed()
+        }
+        let phoneNonce = StationLink.newNonce()
+        ipad.transport.handle(channel, received: try StationLinkMessage.challenge(phoneNonce).encoded())
+        ipad.transport.handle(channel, received: try StationLinkMessage.proof(StationLink.proof(
+            key: key, responderRole: "controller", challengerNonce: ipadNonce, responderNonce: phoneNonce)).encoded())
+        XCTAssertEqual(ipad.transport.connection, .connected("iPhone"))
+        return (channel, StationLink.sessionKey(key: key, controllerNonce: phoneNonce, stationNonce: ipadNonce))
+    }
+
+    func testPairedDevicesProveTheKeyThenExchangeOnlyTheirMessages() {
+        let (phone, ipad, wire) = pairedDevices()
+        XCTAssertEqual(phone.radio.tag, tag)
+        XCTAssertEqual(ipad.radio.tag, tag)
+        XCTAssertEqual(phone.transport.connection, .connected("iPad"))
+        XCTAssertEqual(ipad.transport.connection, .connected("iPhone"))
+        XCTAssertEqual([phone.connects, ipad.connects], [1, 1])
+        XCTAssertTrue(phone.transport.isHealthy)
+
+        let arm = makeArm()
+        phone.transport.send(.arm(arm))
+        ipad.transport.send(.station(.ready, armID: arm.armID))
+        wire.pump()
+        XCTAssertEqual(ipad.received, [.arm(arm)], "The handshake and heartbeats are never delivered")
+        XCTAssertEqual(phone.received, [.station(.ready, armID: arm.armID)])
+    }
+
+    func testThePhoneInvitesOnlyAMatchingIpadAndOneAtATime() {
+        let phone = Device(.controller, clock: clock)
+        phone.transport.handleFound(ipadPeer, info: ["tag": tag])
+        XCTAssertTrue(phone.radios.all.isEmpty, "Nothing is invited before the link starts")
+        phone.transport.start(key: key)
+        phone.transport.handleFound(MCPeerID(displayName: "Another account's iPad"), info: ["tag": "0123"])
+        phone.transport.handleFound(MCPeerID(displayName: "Unlabelled"), info: nil)
+        XCTAssertTrue(phone.radio.invitations.isEmpty)
+        phone.transport.handleFound(ipadPeer, info: ["tag": tag])
+        phone.transport.handleFound(MCPeerID(displayName: "Second iPad"), info: ["tag": tag])
+        XCTAssertEqual(phone.radio.invitations.map(\.peer), [ipadPeer])
+        XCTAssertEqual(phone.radio.invitations.first?.context, Data(tag.utf8))
+
+        let ipad = Device(.station, clock: clock)
+        ipad.transport.start(key: key)
+        var answers: [Bool] = []
+        ipad.transport.handleInvitation(from: phonePeer, context: Data("not-the-tag".utf8)) { answers.append($0); return nil }
+        ipad.transport.handleInvitation(from: phonePeer, context: nil) { answers.append($0); return nil }
+        XCTAssertEqual(answers, [false, false])
+        XCTAssertEqual(ipad.transport.connection, .searching)
+    }
+
+    func testAQuietConnectionGivesWayToTheReconnectingPhoneOnlyOnceItProvesTheKey() {
+        let (phone, ipad, first) = pairedDevices()
+        // The phone's session ended; the iPad was never told.
+        phone.transport.handle(first.phoneChannel, connected: false)
+        XCTAssertTrue(first.phoneChannel.closed)
+        XCTAssertEqual(phone.transport.connection, .searching)
+        XCTAssertEqual(phone.radios.all.count, 2, "The phone looks again under a new identity")
+        XCTAssertTrue(phone.radios.all[0].stopped)
+        XCTAssertEqual(ipad.transport.connection, .connected("iPhone"))
+
+        // The iPad has heard nothing on the old connection since.
+        clock.advance(StationLinkTransport.takeoverLimit)
+        let second = reconnect(phone, to: ipad)
+        XCTAssertTrue(first.ipadChannel.closed)
+        XCTAssertFalse(second.ipadChannel.closed)
+        XCTAssertEqual(phone.transport.connection, .connected("iPad"))
+        XCTAssertEqual(ipad.connects, 2)
+        XCTAssertFalse(ipad.states.drop(while: { !$0.isConnected }).contains(where: { !$0.isConnected }),
+                       "The iPad never showed the phone as gone, so its display didn't blank")
+
+        phone.transport.send(.display(nil))
+        second.pump()
+        XCTAssertEqual(ipad.received, [.display(nil)])
+    }
+
+    func testAnImpostorWithThePublicTagNeverDisplacesTheConnection() throws {
+        let (phone, ipad, wire) = pairedDevices()
+        let impostorPeer = MCPeerID(displayName: "Impostor")
+        var answers: [Bool] = []
+        ipad.transport.handleInvitation(from: impostorPeer, context: Data(tag.utf8)) { answers.append($0); return nil }
+        XCTAssertEqual(answers, [false], "A connection in use turns newcomers away")
+
+        // Quiet long enough to give way, but only to a newcomer that proves the key.
+        clock.advance(StationLinkTransport.takeoverLimit)
+        let impostor = FakeChannel("Impostor")
+        ipad.transport.handleInvitation(from: impostorPeer, context: Data(tag.utf8)) {
+            answers.append($0)
+            return $0 ? impostor : nil
+        }
+        XCTAssertEqual(answers, [false, true])
+        ipad.transport.handle(impostor, connected: true)
+        guard case .challenge(let ipadNonce)? = impostor.sent.first.flatMap({ StationLinkMessage.decode($0) }) else {
+            return XCTFail("The iPad challenges every newcomer")
+        }
+        let impostorNonce = StationLink.newNonce()
+        ipad.transport.handle(impostor, received: try StationLinkMessage.challenge(impostorNonce).encoded())
+        ipad.transport.handle(impostor, received: try StationLinkMessage.proof(StationLink.proof(
+            key: Data(repeating: 5, count: 32), responderRole: "controller",
+            challengerNonce: ipadNonce, responderNonce: impostorNonce)).encoded())
+        XCTAssertTrue(impostor.closed)
+        XCTAssertFalse(wire.ipadChannel.closed)
+        XCTAssertEqual(ipad.transport.connection, .connected("iPhone"))
+        XCTAssertEqual(ipad.connects, 1)
+
+        let arm = makeArm()
+        phone.transport.send(.arm(arm))
+        wire.pump()
+        XCTAssertEqual(ipad.received, [.arm(arm)])
+    }
+
+    func testASecondPhoneWaitsWhileTheFirstConnectionStaysInUse() {
+        let (phone, ipad, wire) = pairedDevices()
+        let other = Device(.controller, clock: clock)
+        other.transport.start(key: key)
+        other.transport.handleFound(ipadPeer, info: ["tag": tag])
+        let invitation = other.radio.invitations[0]
+        var answers: [Bool] = []
+        for _ in 0..<3 {
+            clock.advance(StationLinkTransport.heartbeatInterval)
+            phone.transport.tick()
+            ipad.transport.tick()
+            wire.pump()
+            ipad.transport.handleInvitation(from: other.radio.localPeer, context: invitation.context) {
+                answers.append($0)
+                return nil
+            }
+        }
+        XCTAssertEqual(answers, [false, false, false], "Heartbeats keep the connection in use")
+        XCTAssertEqual(ipad.connects, 1)
+        XCTAssertEqual(ipad.transport.connection, .connected("iPhone"))
+    }
+
+    func testATakeoverStopsIfTheConnectionInUseIsHeardBeforeTheNewcomerProvesTheKey() {
+        let (phone, ipad, wire) = pairedDevices()
+        // A gap just long enough to let a second phone try...
+        clock.advance(StationLinkTransport.takeoverLimit)
+        let other = Device(.controller, clock: clock)
+        other.transport.start(key: key)
+        other.transport.handleFound(ipadPeer, info: ["tag": tag])
+        let invitation = other.radio.invitations[0]
+        let channel = FakeChannel("Other iPhone")
+        var accepted = false
+        ipad.transport.handleInvitation(from: other.radio.localPeer, context: invitation.context) { accept in
+            accepted = accept
+            return accept ? channel : nil
+        }
+        XCTAssertTrue(accepted)
+
+        // ...but the first phone speaks up before the newcomer proves the key.
+        phone.transport.tick()
+        wire.pump()
+        Wire(phone: other, phoneChannel: invitation.channel, ipad: ipad, ipadChannel: channel).connect()
+        XCTAssertTrue(channel.closed)
+        XCTAssertFalse(wire.ipadChannel.closed)
+        XCTAssertEqual(ipad.connects, 1)
+        XCTAssertEqual(ipad.transport.connection, .connected("iPhone"))
+    }
+
+    func testAnOlderPhoneThatInvitesAgainReplacesTheSessionItAbandonedOnlyByProvingTheKey() throws {
+        let ipad = Device(.station, clock: clock)
+        ipad.transport.start(key: key)
+        let (first, _) = try connectOlderPhone(to: ipad)
+
+        // A newcomer under the same identity that can't prove the key changes nothing.
+        let impostor = FakeChannel(phonePeer.displayName)
+        ipad.transport.handleInvitation(from: phonePeer, context: Data(tag.utf8)) { $0 ? impostor : nil }
+        ipad.transport.handle(impostor, connected: true)
+        ipad.transport.handle(impostor, received: try StationLinkMessage.challenge(StationLink.newNonce()).encoded())
+        ipad.transport.handle(impostor, received: try StationLinkMessage.proof(Data(repeating: 1, count: 32)).encoded())
+        XCTAssertTrue(impostor.closed)
+        XCTAssertFalse(first.closed)
+
+        // Its session ended on the phone; the iPad still lists it. An older
+        // phone invites again under the same identity.
+        let (second, _) = try connectOlderPhone(to: ipad)
+        XCTAssertTrue(first.closed)
+        XCTAssertFalse(second.closed)
+        XCTAssertEqual(ipad.connects, 2)
+        XCTAssertFalse(ipad.states.drop(while: { !$0.isConnected }).contains(where: { !$0.isConnected }),
+                       "The old session served until the new one proved the key, so the display didn't blank")
+    }
+
+    func testANewerInvitationReplacesAnAttemptThatNeverConnected() {
+        let ipad = Device(.station, clock: clock)
+        ipad.transport.start(key: key)
+        let stuck = FakeChannel(phonePeer.displayName)
+        ipad.transport.handleInvitation(from: phonePeer, context: Data(tag.utf8)) { $0 ? stuck : nil }
+
+        let phone = Device(.controller, clock: clock)
+        phone.transport.start(key: key)
+        phone.transport.handleFound(ipadPeer, info: ["tag": tag])
+        answer(phone, by: ipad)
+        XCTAssertTrue(stuck.closed)
+        XCTAssertEqual(ipad.transport.connection, .connected("iPhone"))
+        XCTAssertEqual(phone.transport.connection, .connected("iPad"))
+    }
+
+    func testAQuietConnectionCarriesHeartbeatsSoOnlyASilentPeerIsDropped() {
+        let (phone, ipad, wire) = pairedDevices()
+        for _ in 0..<5 {
+            clock.advance(StationLinkTransport.heartbeatInterval)
+            phone.transport.tick()
+            ipad.transport.tick()
+            wire.pump()
+        }
+        XCTAssertEqual(phone.transport.connection, .connected("iPad"))
+        XCTAssertEqual(ipad.transport.connection, .connected("iPhone"))
+        XCTAssertTrue(phone.received.isEmpty && ipad.received.isEmpty)
+
+        // A connection carrying messages needs no heartbeat.
+        phone.transport.send(.display(nil))
+        let sent = wire.phoneChannel.sent.count
+        clock.advance(StationLinkTransport.heartbeatInterval / 2)
+        phone.transport.tick()
+        XCTAssertEqual(wire.phoneChannel.sent.count, sent)
+        clock.advance(StationLinkTransport.heartbeatInterval / 2)
+        phone.transport.tick()
+        XCTAssertEqual(wire.phoneChannel.sent.count, sent + 1)
+        wire.pump()
+
+        // The iPad goes silent without a disconnect, as a suspended app can.
+        ipad.transport.send(.station(.ready, armID: nil))
+        wire.pump()
+        clock.advance(StationLinkTransport.silenceLimit - 1)
+        phone.transport.tick()
+        XCTAssertEqual(phone.transport.connection, .connected("iPad"))
+        clock.advance(1)
+        phone.transport.tick()
+        XCTAssertEqual(phone.transport.connection, .searching)
+        XCTAssertTrue(wire.phoneChannel.closed)
+        XCTAssertEqual(phone.radios.all.count, 2, "The phone looks for the iPad again at once")
+    }
+
+    func testAnIphoneFromBeforeHeartbeatsIsNeverDroppedForBeingQuiet() throws {
+        let ipad = Device(.station, clock: clock)
+        ipad.transport.start(key: key)
+        let (channel, sessionKey) = try connectOlderPhone(to: ipad)
+        // What the older iPhone makes of the iPad's heartbeat: a disarm of no set.
+        let heartbeat = try XCTUnwrap(channel.sent.last)
+        XCTAssertEqual(StationLink.open(heartbeat, sessionKey: sessionKey, senderRole: "station", after: 0)?.message,
+                       .disarm(armID: StationLink.heartbeatArmID))
+
+        clock.advance(60)
+        ipad.transport.tick()
+        XCTAssertEqual(ipad.transport.connection, .connected("iPhone"))
+        XCTAssertTrue(ipad.transport.isHealthy)
+        let arm = makeArm()
+        ipad.transport.handle(channel, received: try XCTUnwrap(
+            StationLink.seal(.arm(arm), sessionKey: sessionKey, senderRole: "controller", counter: 1)))
+        XCTAssertEqual(ipad.received, [.arm(arm)])
+    }
+
+    func testContentFromANewerVersionIsSkippedButAForgedFrameDropsTheLink() throws {
+        let ipad = Device(.station, clock: clock)
+        ipad.transport.start(key: key)
+        let (channel, sessionKey) = try connectOlderPhone(to: ipad)
+        let future = Data(#"{"version":2,"message":{"hologram":{}}}"#.utf8)
+        ipad.transport.handle(channel, received: try XCTUnwrap(
+            StationLink.seal(body: future, sessionKey: sessionKey, senderRole: "controller", counter: 1)))
+        XCTAssertEqual(ipad.transport.connection, .connected("iPhone"), "A sound frame it can't read keeps the link")
+        XCTAssertTrue(ipad.received.isEmpty)
+
+        let arm = makeArm()
+        let sealed = try XCTUnwrap(StationLink.seal(.arm(arm), sessionKey: sessionKey,
+                                                    senderRole: "controller", counter: 2))
+        ipad.transport.handle(channel, received: sealed)
+        XCTAssertEqual(ipad.received, [.arm(arm)])
+
+        ipad.transport.handle(channel, received: try XCTUnwrap(
+            StationLink.seal(.arm(arm), sessionKey: Data(repeating: 9, count: 32), senderRole: "controller", counter: 3)))
+        XCTAssertTrue(channel.closed)
+        XCTAssertEqual(ipad.transport.connection, .searching)
+        XCTAssertEqual(ipad.received, [.arm(arm)])
+    }
+
+    func testAFailedSendDropsTheLinkAndThePhoneLooksAgain() {
+        let (phone, _, wire) = pairedDevices()
+        wire.phoneChannel.refusesSends = true // the session no longer lists the iPad
+        phone.transport.send(.display(nil))
+        XCTAssertTrue(wire.phoneChannel.closed)
+        XCTAssertEqual(phone.transport.connection, .searching)
+        XCTAssertEqual(phone.radios.all.count, 2)
+        phone.transport.handleFound(ipadPeer, info: ["tag": tag])
+        XCTAssertEqual(phone.radio.invitations.map(\.peer), [ipadPeer])
+    }
+
+    func testAnInvitationToAnIpadThatStoppedAdvertisingIsAbandonedAtOnce() {
+        let phone = Device(.controller, clock: clock)
+        phone.transport.start(key: key)
+        let replaced = MCPeerID(displayName: "iPad before it came back")
+        phone.transport.handleFound(replaced, info: ["tag": tag])
+        phone.transport.handleFound(ipadPeer, info: ["tag": tag])
+        XCTAssertEqual(phone.radio.invitations.map(\.peer), [replaced])
+        phone.transport.handleLost(replaced)
+        XCTAssertTrue(phone.radio.invitations[0].channel.closed)
+        XCTAssertEqual(phone.radio.invitations.map(\.peer), [replaced, ipadPeer], "No pause before the iPad that is there")
+
+        // An attempt whose session has connected no longer needs the advertisement.
+        phone.radio.invitations[1].channel.isOpen = true
+        phone.transport.handleLost(ipadPeer)
+        XCTAssertFalse(phone.radio.invitations[1].channel.closed)
+
+        // One that went away and came back is invited again like any other.
+        phone.transport.handleFound(replaced, info: ["tag": tag])
+        phone.transport.handle(phone.radio.invitations[1].channel, connected: false)
+        clock.advance(StationLinkTransport.retryDelay)
+        phone.transport.tick()
+        XCTAssertEqual(phone.radio.invitations.map(\.peer), [replaced, ipadPeer, replaced])
+        XCTAssertEqual(phone.radio.restarts, 0)
+    }
+
+    func testAStuckAttemptIsAbandonedAndAnotherIpadIsTriedBeforeItAgain() {
+        let phone = Device(.controller, clock: clock)
+        phone.transport.start(key: key)
+        let stale = MCPeerID(displayName: "Stale advertisement")
+        phone.transport.handleFound(stale, info: ["tag": tag])
+        phone.transport.handleFound(ipadPeer, info: ["tag": tag])
+        XCTAssertEqual(phone.radio.invitations.map(\.peer), [stale])
+
+        clock.advance(StationLinkTransport.attemptLimit)
+        phone.transport.tick()
+        XCTAssertTrue(phone.radio.invitations[0].channel.closed)
+        XCTAssertEqual(phone.radio.invitations.count, 1, "A short pause before the next attempt")
+        clock.advance(StationLinkTransport.retryDelay)
+        phone.transport.tick()
+        XCTAssertEqual(phone.radio.invitations.map(\.peer), [stale, ipadPeer])
+
+        // That one fails too: with every iPad in view tried, discovery starts over.
+        phone.transport.handle(phone.radio.invitations[1].channel, connected: false)
+        clock.advance(StationLinkTransport.retryDelay)
+        phone.transport.tick()
+        XCTAssertEqual(phone.radio.restarts, 1)
+        XCTAssertEqual(phone.radio.invitations.count, 2)
+        phone.transport.handleFound(ipadPeer, info: ["tag": tag])
+        XCTAssertEqual(phone.radio.invitations.map(\.peer), [stale, ipadPeer, ipadPeer])
+    }
+
+    func testResumeKeepsAHealthyConnectionAndRebuildsAStaleOne() {
+        let phone = Device(.controller, clock: clock)
+        phone.transport.resume()
+        XCTAssertTrue(phone.radios.all.isEmpty, "Nothing to resume before the link starts")
+        let (pairedPhone, ipad, wire) = pairedDevices()
+        pairedPhone.transport.resume()
+        XCTAssertEqual(pairedPhone.radios.all.count, 1, "A live connection survives a trip to the background")
+        XCTAssertFalse(wire.phoneChannel.closed)
+
+        // Suspension closed the session without a callback.
+        wire.phoneChannel.isOpen = false
+        pairedPhone.transport.resume()
+        XCTAssertEqual(pairedPhone.radios.all.count, 2)
+        XCTAssertTrue(pairedPhone.radios.all[0].stopped)
+        XCTAssertTrue(wire.phoneChannel.closed)
+        XCTAssertEqual(pairedPhone.radio.tag, tag)
+        XCTAssertEqual(pairedPhone.transport.connection, .searching)
+
+        // The iPad heard nothing while it was suspended.
+        clock.advance(StationLinkTransport.silenceLimit)
+        XCTAssertFalse(ipad.transport.isHealthy)
+        ipad.transport.resume()
+        XCTAssertEqual(ipad.radios.all.count, 2)
+        XCTAssertEqual(ipad.transport.connection, .searching)
+
+        ipad.transport.handleDiscoveryFailure()
+        XCTAssertEqual(ipad.transport.connection, .unavailable)
+        ipad.transport.restart()
+        XCTAssertEqual(ipad.transport.connection, .searching)
+    }
+
+    func testResumeLetsAnAttemptFinishAndFindingAPeerClearsADiscoveryFailure() {
+        let phone = Device(.controller, clock: clock)
+        phone.transport.start(key: key)
+        phone.transport.handleDiscoveryFailure()
+        XCTAssertEqual(phone.transport.connection, .unavailable)
+        phone.transport.handleFound(ipadPeer, info: ["tag": tag])
+        XCTAssertEqual(phone.transport.connection, .searching, "Finding the iPad shows discovery works")
+        XCTAssertEqual(phone.radio.invitations.count, 1)
+
+        // A permission alert briefly interrupted the app mid-attempt.
+        phone.transport.resume()
+        XCTAssertEqual(phone.radios.all.count, 1)
+        XCTAssertFalse(phone.radio.invitations[0].channel.closed)
+
+        let ipad = Device(.station, clock: clock)
+        ipad.transport.start(key: key)
+        ipad.transport.handleDiscoveryFailure()
+        XCTAssertEqual(ipad.transport.connection, .unavailable)
+        ipad.transport.handleInvitation(from: phonePeer, context: Data(tag.utf8)) { $0 ? FakeChannel("iPhone") : nil }
+        XCTAssertEqual(ipad.transport.connection, .searching, "An invitation shows advertising works")
+    }
+
+    func testRetryAndReturningToTheAppRestartTheLinkFromAnyTab() {
+        let phone = Device(.controller, clock: clock)
+        let controller = StationLinkController(transport: phone.transport)
+        controller.retryConnection()
+        XCTAssertTrue(phone.radios.all.isEmpty, "Without a key, Today loads one first")
+        XCTAssertEqual(controller.connectionAttempt, 1)
+
+        controller.start(key: key)
+        controller.retryConnection()
+        XCTAssertEqual(phone.radios.all.count, 2, "A loaded key restarts even while Today is off screen")
+        XCTAssertEqual(phone.radio.tag, tag)
+        XCTAssertEqual(controller.connectionAttempt, 2)
+        XCTAssertEqual(controller.connection, .searching)
+
+        controller.appBecameActive()
+        XCTAssertEqual(phone.radios.all.count, 3, "Back in the foreground, the search starts afresh")
+        XCTAssertEqual(controller.connectionAttempt, 2)
+
+        controller.keyUnavailable()
+        controller.appBecameActive()
+        XCTAssertEqual(controller.connectionAttempt, 3, "A key that failed to load is requested again")
+        XCTAssertEqual(phone.radios.all.count, 3)
+    }
+
+    /// A runner on the iPhone and a counting Station on the iPad, connected.
+    private func linkedRunner(receiptDelay: TimeInterval = 0.3) -> (
+        controller: StationLinkController, station: StationLinkStation, phone: Device, ipad: Device, wire: Wire
+    ) {
+        let phone = Device(.controller, clock: clock), ipad = Device(.station, clock: clock)
+        let controller = StationLinkController(transport: phone.transport, receiptDelay: receiptDelay)
+        let station = StationLinkStation(transport: ipad.transport)
+        controller.start(key: key)
+        station.enable(key: key)
+        phone.transport.handleFound(ipadPeer, info: ["tag": tag])
+        let wire = answer(phone, by: ipad)
+        controller.request(StationLinkTarget(slotID: "slot-1", setNumber: 1, exercise: .squat,
+                                             exerciseName: "Back Squat", targetReps: 5))
+        wire.pump()
+        return (controller, station, phone, ipad, wire)
+    }
+
+    func testAReplacedConnectionStillDeliversTheCountTheOldOneLost() throws {
+        try requireCameraCounting()
+        let (controller, station, phone, ipad, first) = linkedRunner()
+        XCTAssertNotNil(station.arm)
+        XCTAssertEqual(station.arm, controller.arm)
+        station.beginCounting()
+        first.pump()
+        XCTAssertEqual(controller.stationState, .counting)
+
+        // The phone loses the session just as the iPad sends the finished count.
+        phone.transport.handle(first.phoneChannel, connected: false)
+        XCTAssertTrue(station.trialEnded(count: 5, leftCount: nil, rightCount: nil, partial: false))
+        XCTAssertNil(controller.proposal)
+
+        clock.advance(StationLinkTransport.takeoverLimit)
+        let second = reconnect(phone, to: ipad)
+        let proposal = try XCTUnwrap(controller.proposal, "The iPad sends the count again on the new connection")
+        XCTAssertEqual(proposal.reps, 5)
+        XCTAssertTrue(proposal.logsAutomatically)
+        controller.finishProposal(proposal.eventID)
+
+        // A later reconnect repeats the count; the iPhone has already used it.
+        phone.transport.handle(second.phoneChannel, connected: false)
+        clock.advance(StationLinkTransport.takeoverLimit)
+        reconnect(phone, to: ipad)
+        XCTAssertNil(controller.proposal)
+        XCTAssertEqual(ipad.transport.connection, .connected("iPhone"))
+    }
+
+    func testAReplacedConnectionWithdrawsASetThePhoneMovedPastMeanwhile() throws {
+        try requireCameraCounting()
+        let (controller, station, phone, ipad, first) = linkedRunner()
+        XCTAssertNotNil(station.arm)
+        phone.transport.handle(first.phoneChannel, connected: false)
+        controller.request(nil) // the runner moved on; this disarm can't reach the iPad
+        XCTAssertNil(controller.arm)
+        XCTAssertNotNil(station.arm)
+
+        clock.advance(StationLinkTransport.takeoverLimit)
+        reconnect(phone, to: ipad)
+        XCTAssertNil(station.arm, "The iPad learns that the set it still held was withdrawn")
+        XCTAssertEqual(ipad.transport.connection, .connected("iPhone"))
+        XCTAssertNil(controller.stationState)
+    }
+
+    func testTheIpadKeepsCountingThroughALostConnectionAndDeliversTheCountAfter() throws {
+        try requireCameraCounting()
+        let (controller, station, phone, ipad, first) = linkedRunner()
+        station.beginCounting()
+        station.observe(count: 2, leftCount: nil, rightCount: nil, status: .ready, partial: false, at: 1)
+        first.pump()
+        XCTAssertEqual(controller.progress?.count, 2)
+
+        // The iPad is first to notice that the session ended, mid-set.
+        ipad.transport.handle(first.ipadChannel, connected: false)
+        XCTAssertEqual(station.connection, .searching)
+        XCTAssertNotNil(station.arm)
+        XCTAssertTrue(station.isCounting, "The set keeps counting while the iPhone reconnects")
+        phone.transport.handle(first.phoneChannel, connected: false)
+        XCTAssertNil(controller.progress)
+
+        let second = reconnect(phone, to: ipad)
+        XCTAssertEqual(controller.stationState, .counting)
+        XCTAssertEqual(controller.progress?.count, 2, "The live count shows again at once")
+
+        // Lost again just as the set finishes: the count waits for the next connection.
+        ipad.transport.handle(second.ipadChannel, connected: false)
+        XCTAssertTrue(station.trialEnded(count: 5, leftCount: nil, rightCount: nil, partial: false))
+        phone.transport.handle(second.phoneChannel, connected: false)
+        XCTAssertNil(controller.proposal)
+        reconnect(phone, to: ipad)
+        let proposal = try XCTUnwrap(controller.proposal)
+        XCTAssertEqual(proposal.reps, 5)
+        XCTAssertEqual(station.arm, controller.arm)
+    }
+
+    func testAReconnectRepeatsWhyTheIpadIsNotCounting() throws {
+        try requireCameraCounting()
+        let (controller, station, phone, ipad, first) = linkedRunner()
+        let arm = try XCTUnwrap(station.arm)
+        station.report(.cameraOff, armID: arm.armID)
+        first.pump()
+        XCTAssertEqual(controller.stationState, .cameraOff)
+
+        ipad.transport.handle(first.ipadChannel, connected: false)
+        phone.transport.handle(first.phoneChannel, connected: false)
+        XCTAssertNil(controller.stationState)
+        reconnect(phone, to: ipad)
+        XCTAssertEqual(controller.stationState, .cameraOff, "The re-sent arm prompts no new report, so the iPad repeats it")
+    }
+
+    // MARK: controls from the iPad
+
+    /// What an iPhone that takes the iPad's controls publishes for a set.
+    private func controlled(set: Int, phase: WorkoutDisplayState.Phase = .ready) -> WorkoutDisplayState {
+        let step = WorkoutDisplayState.Step(slotID: "slot-1", exerciseName: "Back Squat", weight: 100,
+            weightUnit: .lb, reps: 5, durationSeconds: nil, setNumber: set, totalSets: 3,
+            exerciseNumber: 1, totalExercises: 2, isWarmup: false, isBodyweight: false,
+            isUnilateral: false, isPerHand: false, groupTitle: nil, roundNumber: nil, totalRounds: nil)
+        var state = WorkoutDisplayState(phase: phase, workoutName: "Strength", current: step, next: nil,
+            restEndDate: nil, timedEndDate: nil, timedStartDate: nil, workoutStartDate: nil,
+            message: nil, isFreestyle: false)
+        state.acceptsCommands = true
+        return state
+    }
+
+    /// Lets the iPhone apply the controls it received, carrying what each side sends.
+    private func settle(_ wire: Wire) async {
+        for _ in 0..<10 {
+            await Task.yield()
+            wire.pump()
+        }
+    }
+
+    func testAnIpadControlWaitsForItsAnswerWhichFollowsTheDisplayShowingTheResult() async throws {
+        let (controller, station, _, _, wire) = linkedRunner(receiptDelay: 60)
+        var applied: [StationLinkCommand.Action] = []
+        controller.onCommand = { command in
+            applied.append(command.action)
+            return .accepted(command)
+        }
+        controller.publishDisplay(controlled(set: 1))
+        wire.pump()
+        XCTAssertTrue(station.acceptsCommands)
+        let shown = try XCTUnwrap(station.display?.current)
+        XCTAssertTrue(station.send(.logSet, for: shown))
+        XCTAssertFalse(station.send(.logSet, for: shown), "A second tap waits for the first answer")
+        await settle(wire)
+        XCTAssertEqual(applied, [.logSet])
+        XCTAssertNotNil(station.pendingCommand, "The answer waits for the display showing the logged set")
+
+        var shownWhenAnswered: WorkoutDisplayState.Step?
+        let watch = station.$pendingCommand.dropFirst().sink { pending in
+            if pending == nil { shownWhenAnswered = station.display?.current }
+        }
+        defer { watch.cancel() }
+        controller.publishDisplay(controlled(set: 2, phase: .rest))
+        wire.pump()
+        XCTAssertNil(station.pendingCommand)
+        XCTAssertEqual(shownWhenAnswered?.setNumber, 2, "The iPad never offers the logged set again")
+        XCTAssertNil(station.commandNotice)
+        XCTAssertTrue(station.acceptsCommands)
+    }
+
+    func testAControlForASetTheIphoneMovedPastIsRefusedWithAReason() async throws {
+        let (controller, station, _, _, wire) = linkedRunner()
+        var applied: [StationLinkCommand.Action] = []
+        controller.onCommand = { command in
+            applied.append(command.action)
+            return .accepted(command)
+        }
+        controller.publishDisplay(controlled(set: 1))
+        wire.pump()
+        let shown = try XCTUnwrap(station.display?.current)
+        // The member logs set 1 on the iPhone just as Log set is tapped on the iPad.
+        controller.publishDisplay(controlled(set: 2))
+        XCTAssertTrue(station.send(.logSet, for: shown))
+        await settle(wire)
+        XCTAssertTrue(applied.isEmpty, "The iPhone never applies a control to a set it no longer shows")
+        XCTAssertNil(station.pendingCommand)
+        XCTAssertEqual(station.commandNotice, StationLinkCommandReceipt.movedOn)
+        XCTAssertEqual(station.display?.current?.setNumber, 2)
+        XCTAssertTrue(station.acceptsCommands, "The next control can follow at once")
+    }
+
+    func testAnUnansweredControlTimesOutAndALateAnswerChangesNothing() async throws {
+        let (controller, station, _, _, wire) = linkedRunner()
+        var applied = 0
+        controller.onCommand = { command in
+            applied += 1
+            return .accepted(command)
+        }
+        controller.publishDisplay(controlled(set: 1, phase: .rest))
+        wire.pump()
+        XCTAssertTrue(station.send(.endRest, for: station.display?.current))
+        let unanswered = try XCTUnwrap(station.pendingCommand)
+        station.commandTimedOut(unanswered.id)
+        XCTAssertNil(station.pendingCommand)
+        let notice = try XCTUnwrap(station.commandNotice)
+        XCTAssertTrue(station.acceptsCommands, "The member can try again")
+
+        await settle(wire)
+        controller.publishDisplay(controlled(set: 1)) // the rest ended
+        wire.pump()
+        XCTAssertEqual(applied, 1)
+        XCTAssertEqual(station.display?.phase, .ready)
+        XCTAssertNil(station.pendingCommand)
+        XCTAssertEqual(station.commandNotice, notice, "An answer to a control the iPad gave up on changes nothing")
+    }
+
+    func testAShortDropKeepsTheWorkoutOnTheIpadWithItsControlsOffUntilTheIphoneIsBack() throws {
+        let (controller, station, phone, ipad, first) = linkedRunner()
+        controller.publishDisplay(controlled(set: 1))
+        first.pump()
+        XCTAssertTrue(station.send(.endRest, for: station.display?.current))
+
+        // The session drops before the iPhone answers.
+        ipad.transport.handle(first.ipadChannel, connected: false)
+        XCTAssertEqual(station.display, controlled(set: 1), "The workout stays on screen")
+        XCTAssertTrue(station.displayIsStale)
+        XCTAssertNil(station.pendingCommand, "No answer can arrive on another connection")
+        XCTAssertFalse(station.acceptsCommands)
+        XCTAssertFalse(station.send(.endRest, for: station.display?.current))
+        phone.transport.handle(first.phoneChannel, connected: false)
+
+        // The member logs a set on the iPhone meanwhile.
+        controller.publishDisplay(controlled(set: 2))
+        reconnect(phone, to: ipad)
+        XCTAssertFalse(station.displayIsStale)
+        XCTAssertEqual(station.display, controlled(set: 2), "The new connection brings the current workout")
+        XCTAssertTrue(station.acceptsCommands)
+    }
+
+    func testAConnectionThatReplacesAnUnreportedLossDropsItsUnansweredControl() throws {
+        let (controller, station, phone, ipad, first) = linkedRunner()
+        controller.publishDisplay(controlled(set: 1))
+        first.pump()
+        XCTAssertTrue(station.send(.endRest, for: station.display?.current))
+        // The iPhone loses the session before the control reaches it, and the
+        // iPad hears of no loss before the iPhone connects again.
+        phone.transport.handle(first.phoneChannel, connected: false)
+        controller.publishDisplay(controlled(set: 2))
+        clock.advance(StationLinkTransport.takeoverLimit)
+        reconnect(phone, to: ipad)
+        XCTAssertEqual(ipad.transport.connection, .connected("iPhone"))
+        XCTAssertNil(station.pendingCommand, "No answer can arrive on the new connection")
+        XCTAssertEqual(station.display, controlled(set: 2), "The new connection brings the current workout")
+        XCTAssertFalse(station.displayIsStale)
+        XCTAssertTrue(station.acceptsCommands)
+    }
+
+    func testAnIpadSendsNoControlsToAnIphoneThatDoesNotTakeThem() {
+        let (controller, station, _, _, wire) = linkedRunner()
+        var older = controlled(set: 1)
+        older.acceptsCommands = nil
+        controller.publishDisplay(older)
+        wire.pump()
+        XCTAssertEqual(station.display, older, "An older iPhone's workout still shows")
+        XCTAssertFalse(station.acceptsCommands)
+        let sent = wire.ipadChannel.sent.count
+        XCTAssertFalse(station.send(.endRest, for: station.display?.current))
+        XCTAssertNil(station.pendingCommand)
+        XCTAssertEqual(wire.ipadChannel.sent.count, sent, "Nothing goes out that an older build can't read")
+    }
+
+    func testAHeartbeatIsANoOpForBuildsThatPredateIt() throws {
+        struct OlderEnvelope: Decodable {
+            enum Message: Decodable, Equatable { case disarm(armID: UUID) }
+            let version: Int
+            let message: Message
+        }
+        let sessionKey = Data(repeating: 6, count: 32)
+        let sealed = try XCTUnwrap(StationLink.sealHeartbeat(sessionKey: sessionKey, senderRole: "station", counter: 1))
+        let frame = try XCTUnwrap(StationLink.openFrame(sealed, sessionKey: sessionKey, senderRole: "station", after: 0))
+        XCTAssertEqual(frame.counter, 1)
+        XCTAssertEqual(StationLinkMessage.inbound(frame.body), .heartbeat)
+        let older = try JSONDecoder().decode(OlderEnvelope.self, from: frame.body)
+        XCTAssertEqual(older.version, 1)
+        XCTAssertEqual(older.message, .disarm(armID: StationLink.heartbeatArmID), "Older builds read a disarm")
+
+        // Neither side of an older link acts on a disarm of a set it never armed.
+        let station = StationLinkStation()
+        let arm = makeArm()
+        station.receive(.arm(arm))
+        let armed = station.arm
+        station.receive(.disarm(armID: StationLink.heartbeatArmID))
+        XCTAssertEqual(station.arm, armed)
+        let controller = StationLinkController()
+        controller.receive(.disarm(armID: StationLink.heartbeatArmID))
+        XCTAssertNil(controller.proposal)
+        XCTAssertNil(controller.stationState)
+
+        XCTAssertEqual(StationLinkMessage.inbound(try StationLinkMessage.arm(arm).encoded()), .message(.arm(arm)))
+        XCTAssertEqual(StationLinkMessage.inbound(Data(#"{"version":2,"message":{}}"#.utf8)), .unreadable)
+        XCTAssertEqual(StationLinkMessage.inbound(Data("not json".utf8)), .unreadable)
+    }
+}
+
+private struct ChannelClosed: Error {}
+
+private final class TestClock {
+    var time = Date(timeIntervalSince1970: 2_000_000_000)
+    func advance(_ seconds: TimeInterval) { time = time.addingTimeInterval(seconds) }
+}
+
+@MainActor
+private final class FakeChannel: StationLinkChannel {
+    let peerName: String
+    var isOpen: Bool
+    var refusesSends = false
+    private(set) var closed = false
+    private(set) var sent: [Data] = []
+
+    init(_ peerName: String, open: Bool = true) {
+        self.peerName = peerName
+        isOpen = open
+    }
+
+    func send(_ data: Data) throws {
+        guard isOpen, !closed, !refusesSends else { throw ChannelClosed() }
+        sent.append(data)
+    }
+
+    func close() {
+        closed = true
+        isOpen = false
+    }
+}
+
+@MainActor
+private final class FakeRadio: StationLinkRadio {
+    struct Invitation {
+        let peer: MCPeerID
+        let context: Data
+        let channel: FakeChannel
+    }
+
+    /// The identity this radio invites under; each start has its own.
+    let localPeer = MCPeerID(displayName: "iPhone")
+    private(set) var tag: String?
+    private(set) var restarts = 0
+    private(set) var stopped = false
+    private(set) var invitations: [Invitation] = []
+
+    func startDiscovery(tag: String) { self.tag = tag }
+    func restartDiscovery() { restarts += 1 }
+    func stopDiscovery() { stopped = true }
+
+    func invite(_ peer: MCPeerID, context: Data, timeout: TimeInterval) -> StationLinkChannel {
+        let channel = FakeChannel(peer.displayName, open: false)
+        invitations.append(Invitation(peer: peer, context: context, channel: channel))
+        return channel
+    }
+}
+
+/// Every radio a transport has made: one per start.
+@MainActor
+private final class Radios {
+    private(set) var all: [FakeRadio] = []
+
+    func make() -> StationLinkRadio {
+        let radio = FakeRadio()
+        all.append(radio)
+        return radio
+    }
+}
+
+/// One device's transport and what it delivered.
+@MainActor
+private final class Device {
+    let transport: StationLinkTransport
+    let radios: Radios
+    private(set) var received: [StationLinkMessage] = []
+    private(set) var connects = 0
+    private(set) var states: [StationLinkTransport.Connection] = []
+    private var subscription: AnyCancellable?
+
+    var radio: FakeRadio { radios.all[radios.all.count - 1] }
+
+    init(_ role: StationLinkTransport.Role, clock: TestClock) {
+        let radios = Radios()
+        self.radios = radios
+        transport = StationLinkTransport(role: role, radio: { _, _ in radios.make() },
+                                         now: { clock.time }, ticksAutomatically: false)
+        transport.onMessage = { [weak self] in self?.received.append($0) }
+        transport.onConnect = { [weak self] in self?.connects += 1 }
+        subscription = transport.$connection.sink { [weak self] in self?.states.append($0) }
+    }
+}
+
+/// Carries what each side sends to the other, in order, like one session
+/// between the two devices.
+@MainActor
+private final class Wire {
+    let phone: Device
+    let phoneChannel: FakeChannel
+    let ipad: Device
+    let ipadChannel: FakeChannel
+    private var toIpad = 0
+    private var toPhone = 0
+
+    init(phone: Device, phoneChannel: FakeChannel, ipad: Device, ipadChannel: FakeChannel) {
+        self.phone = phone
+        self.phoneChannel = phoneChannel
+        self.ipad = ipad
+        self.ipadChannel = ipadChannel
+    }
+
+    func connect() {
+        phoneChannel.isOpen = true
+        ipadChannel.isOpen = true
+        phone.transport.handle(phoneChannel, connected: true)
+        ipad.transport.handle(ipadChannel, connected: true)
+        pump()
+    }
+
+    func pump() {
+        while !phoneChannel.closed, !ipadChannel.closed,
+              toIpad < phoneChannel.sent.count || toPhone < ipadChannel.sent.count {
+            if toIpad < phoneChannel.sent.count {
+                let data = phoneChannel.sent[toIpad]
+                toIpad += 1
+                ipad.transport.handle(ipadChannel, received: data)
+            } else {
+                let data = ipadChannel.sent[toPhone]
+                toPhone += 1
+                phone.transport.handle(phoneChannel, received: data)
+            }
+        }
+    }
+}

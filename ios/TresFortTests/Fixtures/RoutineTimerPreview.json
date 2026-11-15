@@ -1,0 +1,44 @@
+[
+  {
+    "name": "straight sets retain rest between exercises but omit the final rest",
+    "exercises": [{"id":"plank","name":"Plank","modality":"timed"},{"id":"dead_bug","name":"Dead Bug","modality":"bw","laterality":"unilateral"}],
+    "draft": {"sets":"2","reps":"8","seconds":"30","rest":"20","circuit":false,"timeEveryExercise":false,"transitionRest":"20","roundRest":"60"},
+    "expected": {"workOrder":["plank","plank","dead_bug","dead_bug"],"rests":[20,20,20],"timedWorkSeconds":60,"restSeconds":60,"untimedSets":2,"summary":"2 min of planned timers","firstTarget":"30 sec timer"}
+  },
+  {
+    "name": "two circuit rounds interleave members with a round rest only between rounds",
+    "exercises": [{"id":"plank","name":"Plank","modality":"timed"},{"id":"dead_bug","name":"Dead Bug","modality":"bw"}],
+    "draft": {"sets":"2","reps":"8","seconds":"40","rest":"","circuit":true,"timeEveryExercise":true,"transitionRest":"20","roundRest":"60"},
+    "expected": {"workOrder":["plank","dead_bug","plank","dead_bug"],"rests":[20,60,20],"timedWorkSeconds":160,"restSeconds":100,"untimedSets":0,"summary":"4 min 20 sec of planned timers","firstTarget":"40 sec timer"}
+  },
+  {
+    "name": "zero rest has no countdown or cue step",
+    "exercises": [{"id":"plank","name":"Plank","modality":"timed"},{"id":"hollow","name":"Hollow Hold","modality":"timed"}],
+    "draft": {"sets":"1","reps":"","seconds":"30","rest":"","circuit":true,"timeEveryExercise":false,"transitionRest":"0","roundRest":"0"},
+    "expected": {"workOrder":["plank","hollow"],"rests":[],"timedWorkSeconds":60,"restSeconds":0,"untimedSets":0,"summary":"1 min of planned timers","firstTarget":"30 sec timer"}
+  },
+  {
+    "name": "rep-only routine has no invented elapsed time",
+    "exercises": [{"id":"dead_bug","name":"Dead Bug","modality":"bw","laterality":"unilateral"}],
+    "draft": {"sets":"2","reps":"8","seconds":"","rest":"0","circuit":false,"timeEveryExercise":false,"transitionRest":"20","roundRest":"60"},
+    "expected": {"workOrder":["dead_bug","dead_bug"],"rests":[],"timedWorkSeconds":0,"restSeconds":0,"untimedSets":2,"summary":"No fixed duration","firstTarget":"8 reps each side"}
+  },
+  {
+    "name": "rep pace stays unknown when only rest is timed",
+    "exercises": [{"id":"pushup","name":"Push-Up","modality":"bw"}],
+    "draft": {"sets":"3","reps":"10","seconds":"","rest":"20","circuit":false,"timeEveryExercise":false,"transitionRest":"20","roundRest":"60"},
+    "expected": {"workOrder":["pushup","pushup","pushup"],"rests":[20,20],"timedWorkSeconds":0,"restSeconds":40,"untimedSets":3,"summary":"40 sec of planned rest","firstTarget":"10 reps"}
+  },
+  {
+    "name": "one-sided timed exercise runs one countdown per set",
+    "exercises": [{"id":"side_plank","name":"Side Plank","modality":"timed","laterality":"unilateral"}],
+    "draft": {"sets":"2","reps":"","seconds":"30","rest":"10","circuit":false,"timeEveryExercise":false,"transitionRest":"20","roundRest":"60"},
+    "expected": {"workOrder":["side_plank","side_plank"],"rests":[10],"timedWorkSeconds":60,"restSeconds":10,"untimedSets":0,"summary":"1 min 10 sec of planned timers","firstTarget":"30 sec timer"}
+  },
+  {
+    "name": "invalid rest cannot produce a plausible preview",
+    "exercises": [{"id":"plank","name":"Plank","modality":"timed"}],
+    "draft": {"sets":"2","reps":"8","seconds":"30","rest":"-1","circuit":false,"timeEveryExercise":false,"transitionRest":"20","roundRest":"60"},
+    "expected": null
+  }
+]

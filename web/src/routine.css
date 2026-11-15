@@ -1,0 +1,30 @@
+.routine-editor .routine-days {
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+}
+.routine-editor .routine-days > li { padding: 0.85rem; gap: 0.65rem; }
+.routine-days h3 { font-size: 0.875rem; margin: 0; }
+.routine-days p { margin: 0; }
+.routine-days > li > button { margin-top: auto; min-height: 44px; }
+.routine-entry { display: flex; flex-direction: column; gap: 0.15rem; overflow-wrap: anywhere; }
+.routine-entry small { font-size: 0.75rem; }
+.routine-editor .palette > li { display: block; padding: 0; border: 0; background: none; }
+.routine-editor .palette button { min-height: 44px; cursor: grab; }
+.routine-editor .palette button:disabled { cursor: default; }
+.routine-form { max-width: 720px; }
+.routine-form fieldset { border: 1px solid var(--line); border-radius: 10px; padding: 0.85rem; margin: 0 0 1rem; min-width: 0; }
+.routine-form legend { color: var(--text); font-weight: 600; font-size: 0.875rem; padding: 0 0.25rem; }
+.routine-form fieldset > label, .routine-time > label { display: block; font-size: 0.8125rem; margin-bottom: 0.35rem; }
+.routine-form select { width: 100%; min-height: 44px; }
+.routine-form button { min-height: 44px; }
+.routine-time { margin: 0.75rem 0; }
+.routine-time input { min-height: 44px; max-width: 100%; margin-right: 0.5rem; }
+.routine-form .form-actions { flex-wrap: wrap; }
+.routine-day-choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.5rem; }
+.routine-day-choices > label { display: flex; gap: 0.6rem; align-items: flex-start; padding: 0.5rem 0; min-height: 44px; }
+.routine-day-choices input { margin: 0.2rem 0 0; width: 20px; height: 20px; flex-shrink: 0; }
+.routine-day-choices span { min-width: 0; overflow-wrap: anywhere; }
+.routine-day-choices small { display: block; margin-top: 0.2rem; font-size: 0.75rem; }
+@media (max-width: 480px) {
+  .routine-editor .routine-days, .routine-day-choices { grid-template-columns: 1fr; }
+}

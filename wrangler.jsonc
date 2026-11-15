@@ -1,0 +1,97 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "tres-fort",
+  // Pin the account so wrangler never has to resolve it via the /accounts
+  // control-plane endpoint, which intermittently 503s during Cloudflare
+  // dashboard incidents and would otherwise fail every deploy/migrate/dev.
+  // This is an identifier, not a secret (it appears in dashboard URLs).
+  "account_id": "f8d78ce7cbf48da4f2a3ac9d9a63a5d5",
+  "main": "src/index.ts",
+  // CREDENTIAL_ENCRYPTION_KEY: 32 random bytes, base64, provisioned via
+  // wrangler secret put; never a var. See docs/audits/security-2026-11-release.md.
+  "compatibility_date": "2024-12-30",
+  "compatibility_flags": ["nodejs_compat"],
+  // Approved first-release policy: aggregate platform metrics only.
+  "observability": {
+    "enabled": false,
+    "logs": { "enabled": false, "persist": false, "invocation_logs": false, "destinations": [] },
+    "traces": { "enabled": false, "persist": false, "destinations": [] }
+  },
+  "logpush": false,
+  "tail_consumers": [],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "tres-fort-db",
+      "database_id": "35bb3a9c-7bb5-40ac-9958-1d3c99df8fc5",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // R2 bucket fronts the exercise demo images (free-exercise-db frames,
+  // public domain). iOS first checks its bundled asset catalog for the
+  // foundational lifts; misses fall through to GET /api/exercises/:id/demo/:frame,
+  // which proxies from this bucket. Keys are `demos/{demo_slug}/{0|1}.webp`.
+  // Bucket must be created out-of-band: `wrangler r2 bucket create tres-fort-demos`.
+  "r2_buckets": [
+    {
+      "binding": "DEMOS",
+      "bucket_name": "tres-fort-demos"
+    }
+  ],
+  // Cron: SAFETY NET only. Real-time intervals.icu sync is push-based — the
+  // webhook receiver (POST /webhooks/intervals, registered on the Manage App
+  // page for OAuth client #431) reconciles caches the moment an athlete's data
+  // changes. This hourly cron is the backstop that catches anything push
+  // missed (an undelivered webhook). Invokes the `scheduled` handler in
+  // src/index.ts (syncExternalEvents / syncExternalActivities). Was */15 as
+  // an interim
+  // measure before the webhook shipped; hourly cuts intervals call volume ~4x
+  // (the pooled OAuth daily limit is the binding constraint as users grow).
+  "triggers": { "crons": ["0 * * * *"] },
+  "vars": {
+    "APPLE_BUNDLE_ID": "com.nmarkspdx.tresfort",
+    // Sign in with Apple Services ID for the web app at app.tresfort.app,
+    // grouped with the app's primary App ID so both yield the same Apple
+    // subject (docs/plans/web-app). Non-sensitive.
+    "APPLE_WEB_SERVICES_ID": "com.nmarkspdx.tresfort.web",
+    // intervals.icu OAuth client id (non-sensitive — appears in authorize
+    // URLs). Issued by the provider for app #431. The paired secret
+    // INTERVALS_OAUTH_CLIENT_SECRET is set via `wrangler secret put`.
+    "INTERVALS_OAUTH_CLIENT_ID": "431"
+  }
+  // Secrets (set via `wrangler secret put`, NOT committed):
+  //   APP_JWT_SECRET        - HS256 signing key for app JWTs
+  //   APPLE_TEAM_ID         - Apple Developer Team ID for client-secret JWTs
+  //   APPLE_KEY_ID          - Sign in with Apple private-key identifier
+  //   APPLE_PRIVATE_KEY     - PKCS#8 ES256 private signing key; owner-managed
+  //   MCP_STATIC_TOKEN      - static bearer accepted at /mcp (Claude Code / curl)
+  //   DIAGNOSTICS_TOKEN     - optional read-only bearer for the owner's own
+  //                           diagnostics lookups at /diagnostics/*
+  //                           (docs/DIAGNOSTICS.md). Unset = 404.
+  //   OWNER_APPLE_SUB       - allowlisted Apple `sub`; only this user may sign in
+  //   DEV_AUTH_SECRET       - if set, enables POST /auth/dev (local + tests only)
+  //   REVIEW_CONNECT_CODE   - optional standing connect code for the synthetic
+  //                           connector-directory review member only
+  //                           (plugins/tres-fort/claude-directory.md). Unset = off.
+  //   REVIEW_USER_ID        - that review member's user id; set with the code.
+  //   OPENAI_APPS_CHALLENGE - optional domain token from OpenAI's plugin portal,
+  //                           served at /.well-known/openai-apps-challenge
+  //                           (plugins/tres-fort/submission.md). Unset = 404.
+  //   INTERVALS_ICU_API_KEY    - intervals.icu API key; enables cycling
+  //                              awareness. Feature is a dormant no-op if unset.
+  //   INTERVALS_ICU_ATHLETE_ID - intervals.icu athlete id. A secret (NOT a
+  //                              committed var) because this repo is public —
+  //                              a personal id should not live in git history.
+  //                              env.INTERVALS_ICU_ATHLETE_ID resolves to it
+  //                              identically whether secret or var.
+  //   INTERVALS_WEBHOOK_SECRET - shared secret for POST /webhooks/intervals;
+  //                              MUST equal the "Webhook Secret" on the
+  //                              intervals.icu Manage App page. Unset → the
+  //                              webhook receiver 401s every request (dormant)
+  //                              and automatic sync relies on the hourly
+  //                              stale-cache backstop (manual refresh remains).
+  //   INTERVALS_WEBHOOK_AUTH_HEADER - optional second factor; when set, the
+  //                              webhook request's Authorization header must
+  //                              also match the page's "Webhook Authorization
+  //                              Header". Unset → only the body secret checked.
+}

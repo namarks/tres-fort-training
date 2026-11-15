@@ -1,0 +1,1107 @@
+import AuthenticationServices
+import Foundation
+import SwiftUI
+
+/// Existing, read-only account endpoints. Default /me fields exist at sign-in
+/// and are not evidence that the member has used or completed setup.
+@MainActor
+protocol OnboardingAccountReading {
+    func trainingProfile(jwt: String) async throws -> TrainingProfileState
+    func getMe(jwt: String) async throws -> MeProfile
+    func listGroups(jwt: String) async throws -> [GroupSummary]
+}
+
+extension APIClient: OnboardingAccountReading {}
+
+@MainActor
+final class AuthModel: ObservableObject {
+    private struct ServerErrorEnvelope: Decodable {
+        let error: String
+    }
+
+    enum Phase: Equatable {
+        case signedOut
+        case working(String)
+        case signedIn
+        case error(String)
+    }
+
+    enum OnboardingResolution: Equatable {
+        case unresolved
+        case checking
+        case needsSetup
+        case failed(String)
+    }
+
+    @Published var phase: Phase = .signedOut
+    @Published var jwt: String?
+    var isReviewAccount: Bool { jwt.flatMap(Self.claims)?["app_review"] as? Bool == true }
+    @Published private(set) var isRenewing = false
+    @Published private(set) var appleCredentialUserID: String?
+    @Published private(set) var reauthenticationReason: String?
+    /// One-shot post-deletion handoff shown from RootView. Only this
+    /// non-sensitive boolean is persisted so terminating the app cannot lose
+    /// required Apple cleanup directions; no authorization code or provider
+    /// credential is stored, and dismissal does not mutate authentication.
+    @Published private(set) var postDeletionAppleRevocationRequired = false
+    /// A durable DELETE /api/me attempt has not yet been acknowledged. While
+    /// this is true the current bearer is the only credential that can replay
+    /// the key-bound deletion receipt after a lost response, so background
+    /// 401s and explicit sign-out must not discard it.
+    @Published private(set) var accountDeletionPending = false
+    /// Pause ordinary requests while deletion or protected local storage needs
+    /// recovery. Keep the bearer available to AuthModel for deletion retries.
+    var featureJWT: String? {
+        accountDeletionPending || defaults.hasFailure(userID: userID) ? nil : jwt
+    }
+    /// Process-local identity for one continuously active feature session.
+    /// It changes across sign-out, reauthentication teardown, deletion, and a
+    /// subsequent sign-in, but not ordinary same-account bearer renewal. Feature
+    /// models capture it so an old task cannot become current again after a
+    /// sign-out/same-user-sign-in ABA.
+    private(set) var featureSessionEpoch: UInt64 = 0
+    /// Cross-model, account-scoped signal that server-side activity data
+    /// changed. It survives a same-user sign-out/sign-in boundary so a new
+    /// SyncModel can refresh when an older Group/Health task finishes late.
+    @Published private(set) var activityPersistenceGeneration: UInt64 = 0
+    /// Server user id, captured from /auth/apple's `user.id` and persisted
+    /// in LocalPersistence so GroupModel can survive an app relaunch with the
+    /// keychain JWT alone. Used as the fallback for `is_me` comparisons
+    /// against /api/groups members (the M2 list endpoint doesn't stamp
+    /// `is_me` — only /feed and /stats do).
+    @Published var userID: String?
+    @Published private(set) var signingOut = false
+    @Published private(set) var signOutError: String?
+
+    func noteActivityPersisted(for accountID: String?) {
+        noteAccountStatePersisted(for: accountID)
+    }
+
+    /// Cross-model refresh signal for any successful same-account server
+    /// mutation completed by a feature model from an older session epoch.
+    /// The publisher retains its original activity-oriented name for source
+    /// compatibility with the existing subscribers.
+    func noteAccountStatePersisted(for accountID: String?) {
+        guard let accountID, userID == accountID, featureJWT != nil else {
+            return
+        }
+        activityPersistenceGeneration &+= 1
+    }
+
+    /// Drives whether RootView shows the first-run `OnboardingView` or the
+    /// main app. `false` means this installation has not completed setup;
+    /// it does not prove that the server account is new. Persisted so it
+    /// survives relaunch and never re-fires once completed. See `init`.
+    @Published var onboardingComplete = false
+    /// Empty server state cannot distinguish a new member from someone who
+    /// previously skipped every optional step. Let either enter directly.
+    @Published private(set) var canContinueWithoutSetup = false
+    @Published private(set) var onboardingResolution: OnboardingResolution = .unresolved
+    /// RootView keys its resolution task on invalidations, not on .checking:
+    /// a cancelled task's deferred reset may occur after a replacement task
+    /// has observed .checking and returned. This schedules that replacement
+    /// again without making a request cancel itself when it starts.
+    @Published private(set) var onboardingResolutionRevision: UInt64 = 0
+    private var onboardingRequestID = UUID()
+
+    /// The owner's account id while they try setup as a throwaway test
+    /// member. Their own session waits in `parkedTokenStore` until
+    /// `endTestMember` deletes the test account and restores it.
+    @Published private(set) var testMemberOwnerID: String?
+    @Published private(set) var isSwitchingTestMember = false
+    @Published var testMemberError: String?
+    var isTestMember: Bool { testMemberOwnerID != nil }
+
+    @Published private(set) var pendingEntryIntents: [MemberEntryIntent] = []
+    @Published private(set) var entryPersistenceError: String?
+    static let pendingEntryKey = "com.nmarkspdx.liftcoach.pending-entry.v1"
+    private var signInRequestID = UUID()
+
+    var pendingInviteCode: String? {
+        pendingEntryIntents.compactMap {
+            if case let .invite(code) = $0.destination { return code }
+            return nil
+        }.first
+    }
+
+    var nextEntryIntent: MemberEntryIntent? {
+        guard featureJWT != nil, onboardingComplete else { return nil }
+        return pendingEntryIntents.first { $0.accountID == userID }
+    }
+
+    func isCurrentFeatureSession(accountID: String?, epoch: UInt64) -> Bool {
+        accountID != nil && userID == accountID && featureJWT != nil && featureSessionEpoch == epoch
+    }
+
+    var trainingSetupPersistence: LocalPersistence { defaults }
+
+    @discardableResult
+    func requestEntry(_ destination: MemberEntryIntent.Destination) -> Bool {
+        guard let current = readEntryIntents() else { return entrySaveFailed() }
+        // Repeated Universal Link delivery does not duplicate a sheet.
+        guard !current.contains(where: {
+            $0.destination == destination && $0.accountID == userID
+        }) else { return true }
+        let replacement = current + [MemberEntryIntent(id: UUID(), destination: destination, accountID: userID)]
+        guard persistEntryIntents(replacement) else { return false }
+        pendingEntryIntents = replacement
+        entryPersistenceError = nil
+        return true
+    }
+
+    @discardableResult
+    func finishEntry(_ intent: MemberEntryIntent, epoch: UInt64) -> Bool {
+        guard isCurrentFeatureSession(accountID: intent.accountID, epoch: epoch) else { return false }
+        guard let current = readEntryIntents() else { return entrySaveFailed() }
+        let replacement = current.filter { $0.id != intent.id }
+        guard persistEntryIntents(replacement) else { return false }
+        pendingEntryIntents = replacement
+        entryPersistenceError = nil
+        return true
+    }
+
+    private func readEntryIntents() -> [MemberEntryIntent]? {
+        let data = defaults.data(forKey: Self.pendingEntryKey)
+        guard !defaults.hasFailure(forKey: Self.pendingEntryKey) else { return nil }
+        guard let data else { return [] }
+        guard let intents = try? JSONDecoder().decode([MemberEntryIntent].self, from: data) else {
+            defaults.recordInvalidData(data, forKey: Self.pendingEntryKey)
+            return nil
+        }
+        return intents
+    }
+
+    private func persistEntryIntents(_ intents: [MemberEntryIntent]) -> Bool {
+        let saved: Bool
+        if intents.isEmpty { saved = defaults.removeObject(forKey: Self.pendingEntryKey) }
+        else if let data = try? JSONEncoder().encode(intents) {
+            saved = defaults.set(data, forKey: Self.pendingEntryKey)
+        } else {
+            defaults.recordWriteFailure(forKey: Self.pendingEntryKey)
+            saved = false
+        }
+        return saved ? true : entrySaveFailed()
+    }
+
+    @discardableResult
+    private func entrySaveFailed() -> Bool {
+        entryPersistenceError = "Your navigation change could not be saved. Retry saved data, then open the link or choose the destination again."
+        return false
+    }
+
+    func dismissEntryPersistenceError() { entryPersistenceError = nil }
+
+    /// AuthModel survives the feature-view remount after storage recovery.
+    /// Reload its navigation state too, including an interrupted account bind.
+    func recoverEntryIntents() {
+        if let accountID = userID, jwt != nil { bindEntryIntents(to: accountID) }
+        else if let current = readEntryIntents() {
+            pendingEntryIntents = current.filter { $0.accountID == nil || $0.accountID == userID }
+        }
+    }
+
+    private func bindEntryIntents(to accountID: String) {
+        guard let current = readEntryIntents() else { entrySaveFailed(); return }
+        let replacement = current.filter {
+            $0.accountID == nil || $0.accountID == accountID
+        }.map { intent in
+            var bound = intent
+            bound.accountID = accountID
+            return bound
+        }
+        guard replacement == current || persistEntryIntents(replacement) else {
+            // Do not expose the previous account's destinations while the
+            // durable bind is waiting for storage recovery.
+            pendingEntryIntents = []
+            return
+        }
+        pendingEntryIntents = replacement
+    }
+
+    private let api: any AuthAPI
+    private let tokenStore: any AppTokenStore
+    private let parkedTokenStore: any AppTokenStore
+    private let appleCredentialChecker: any AppleCredentialStateChecking
+    private let defaults: LocalPersistence
+    private let now: () -> Date
+    private let onboardingStateReader: @MainActor (String) async throws -> StateResponse
+    private let onboardingAccountReader: any OnboardingAccountReading
+    /// Weak-owner callbacks registered by mounted feature models. AuthModel
+    /// invokes them immediately before an account boundary makes their epoch
+    /// stale, so process-shared UI such as Live Activities cannot outlive the
+    /// signed-in account. A `false` result prunes a deallocated observer.
+    private var featureSessionBoundaryObservers: [UUID: () -> Bool] = [:]
+    static let userIDKey = "com.nmarkspdx.liftcoach.user-id.v1"
+    static let onboardedKey = "com.nmarkspdx.liftcoach.onboarded.v1"
+    static let testMemberOwnerKey = "com.nmarkspdx.liftcoach.test-member-owner.v1"
+    static let postDeletionAppleRevocationKey =
+        "com.nmarkspdx.liftcoach.post-deletion-apple-revocation.v1"
+    static let renewalWindow: TimeInterval = 7 * 24 * 60 * 60
+
+    @discardableResult
+    func observeFeatureSessionBoundary(
+        _ observer: @escaping () -> Bool
+    ) -> UUID {
+        let id = UUID()
+        featureSessionBoundaryObservers[id] = observer
+        return id
+    }
+
+    private func notifyFeatureSessionBoundary() {
+        featureSessionBoundaryObservers =
+            featureSessionBoundaryObservers.filter { $0.value() }
+    }
+
+    private static func serverErrorCode(in body: String) -> String? {
+        guard let data = body.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(
+            ServerErrorEnvelope.self,
+            from: data
+        ).error
+    }
+
+    init(
+        api: any AuthAPI = APIClient(),
+        tokenStore: any AppTokenStore = KeychainTokenStore(),
+        parkedTokenStore: any AppTokenStore =
+            KeychainTokenStore(account: Keychain.parkedOwnerTokenAccount),
+        appleCredentialChecker: any AppleCredentialStateChecking =
+            AppleCredentialStateChecker(),
+        defaults: LocalPersistence = .standard,
+        now: @escaping () -> Date = Date.init,
+        onboardingStateReader: @escaping @MainActor (String) async throws -> StateResponse = {
+            try await APIClient().getState(jwt: $0)
+        },
+        onboardingAccountReader: any OnboardingAccountReading = APIClient()
+    ) {
+        self.api = api
+        self.tokenStore = tokenStore
+        self.parkedTokenStore = parkedTokenStore
+        self.appleCredentialChecker = appleCredentialChecker
+        self.defaults = defaults
+        self.now = now
+        self.onboardingStateReader = onboardingStateReader
+        self.onboardingAccountReader = onboardingAccountReader
+        postDeletionAppleRevocationRequired = defaults.bool(
+            forKey: Self.postDeletionAppleRevocationKey)
+        let token = tokenStore.load()
+        let persistedUserID = defaults.string(forKey: Self.userIDKey)
+        if let ownerID = defaults.string(forKey: Self.testMemberOwnerKey) {
+            if parkedTokenStore.load() != nil, persistedUserID != ownerID {
+                testMemberOwnerID = ownerID
+            } else {
+                // Nothing to return to, or already back: leave test mode.
+                parkedTokenStore.clear()
+                defaults.removeObject(forKey: Self.testMemberOwnerKey)
+            }
+        }
+        if let token, Self.claims(of: token)?["app_review"] as? Bool == true,
+           let reviewID = Self.subject(of: token) {
+            guard defaults.set(true, forKey: AccountLocalState.reviewAccountKey(userID: reviewID)) else {
+                phase = .error("Saved data needs recovery before reviewer sign-in.")
+                return
+            }
+        }
+        userID = persistedUserID
+        if let current = readEntryIntents() {
+            pendingEntryIntents = current.filter { $0.accountID == nil || $0.accountID == userID }
+        }
+        if let persistedUserID {
+            // Bind process-global values to their preexisting owner before a
+            // mismatched or malformed bearer can be rejected and replaced by
+            // a different Apple account.
+            AccountLocalState.bindLegacyState(
+                userID: persistedUserID, defaults: defaults)
+        }
+        if let token, let tokenUserID = Self.subject(of: token) {
+            if let persistedUserID, persistedUserID != tokenUserID {
+                // A crash between the separate Keychain and LocalPersistence
+                // writes can leave account A's local namespace beside account
+                // B's bearer. Never enter the signed-in surface with that
+                // mixed pair; preserve A's pointer for explicit recovery.
+                tokenStore.clear()
+                reauthenticationReason =
+                    "Your saved session could not be matched to this account. Sign in again to reconnect it."
+            } else {
+                if persistedUserID == nil {
+                    // Upgrade older installs that have a valid app JWT but
+                    // predate the persisted account namespace.
+                    defaults.set(tokenUserID, forKey: Self.userIDKey)
+                    userID = tokenUserID
+                    AccountLocalState.bindLegacyState(
+                        userID: tokenUserID, defaults: defaults)
+                }
+                jwt = token
+                phase = .signedIn
+            }
+        } else if token != nil {
+            // Server app JWTs always carry `sub`. A malformed or legacy
+            // credential cannot safely be paired with account-scoped state.
+            tokenStore.clear()
+            reauthenticationReason =
+                "Your saved session needs to be renewed. Sign in again to reconnect this account."
+        }
+        // Migrate the prior install flag only to its known account. A newly
+        // signed-in independent member must not inherit another member's setup.
+        if let accountID = userID {
+            let key = AccountLocalState.onboardedKey(userID: accountID)
+            if defaults.object(forKey: key) == nil {
+                defaults.set(defaults.object(forKey: Self.onboardedKey) as? Bool ?? (jwt != nil), forKey: key)
+            }
+            onboardingComplete = defaults.bool(forKey: key)
+            defaults.removeObject(forKey: Self.onboardedKey)
+        } else {
+            onboardingComplete = false
+            defaults.removeObject(forKey: Self.onboardedKey)
+        }
+        if let accountID = userID, jwt != nil { bindEntryIntents(to: accountID) }
+        if let accountID = userID {
+            appleCredentialUserID = defaults.string(
+                forKey: AccountLocalState.appleCredentialUserKey(
+                    userID: accountID))
+            accountDeletionPending = defaults.string(
+                forKey: AccountLocalState.accountDeletionKey(
+                    userID: accountID)) != nil
+        }
+    }
+
+    /// Mark first-run setup done (finished or skipped through). Persists so
+    /// `OnboardingView` never shows again on this device.
+    func completeOnboarding() {
+        guard let accountID = userID, featureJWT != nil else { return }
+        defaults.set(true, forKey: AccountLocalState.onboardedKey(userID: accountID))
+        onboardingComplete = true
+        resetOnboardingResolution()
+    }
+
+    func continueWithoutSetup() {
+        guard canContinueWithoutSetup, let accountID = userID, featureJWT != nil else { return }
+        // A setup sheet may have created a draft since the initial account
+        // read. It still owns any uncertain starter acceptance.
+        let draft = defaults.data(forKey: AccountLocalState.trainingProfileDraftKey(userID: accountID))
+        guard draft == nil, !defaults.hasFailure(userID: accountID) else {
+            canContinueWithoutSetup = false
+            return
+        }
+        completeOnboarding()
+    }
+
+    /// A fresh installation has no account-scoped completion flag. Read the
+    /// server with zero sync cursors and, if needed, existing account setup
+    /// before offering guidance, so a returning member can use a fresh device.
+    /// These reads do not create feature models, flush outboxes, or mutate
+    /// server data.
+    func resolveOnboarding() async {
+        guard !onboardingComplete, let token = featureJWT, let accountID = userID,
+              onboardingResolution != .checking, onboardingResolution != .needsSetup,
+              !Task.isCancelled
+        else { return }
+        let draftKey = AccountLocalState.trainingProfileDraftKey(userID: accountID)
+        let localDraft = defaults.data(forKey: draftKey)
+        guard !defaults.hasFailure(userID: accountID) else { return }
+        if localDraft != nil {
+            // Resume this installation's unfinished setup. Its draft may own
+            // an uncertain starter acceptance that TrainingSetupModel must
+            // reconcile, even when its server-side plan was already created.
+            onboardingResolution = .needsSetup
+            return
+        }
+        let epoch = featureSessionEpoch
+        let requestID = UUID()
+        onboardingRequestID = requestID
+        onboardingResolution = .checking
+        defer {
+            // View-task cancellation can occur during navigation or storage
+            // recovery. A later mount must be able to start a fresh request.
+            if onboardingRequestID == requestID, featureSessionEpoch == epoch,
+               userID == accountID, onboardingResolution == .checking {
+                resetOnboardingResolution()
+            }
+        }
+        do {
+            let hasExistingSetup = try await withTaskCancellationHandler {
+                @MainActor func validateRead() throws {
+                    try Task.checkCancellation()
+                    guard onboardingRequestID == requestID,
+                          isCurrentFeatureSession(accountID: accountID, epoch: epoch)
+                    else { throw CancellationError() }
+                }
+                let state = try await onboardingStateReader(token)
+                try validateRead()
+                if Self.hasExistingTraining(state) { return true }
+                return try await hasExistingAccountSetup(token: token, validateRead: validateRead)
+            } onCancel: { [weak self] in
+                Task { @MainActor in
+                    guard let self, self.onboardingRequestID == requestID,
+                          self.featureSessionEpoch == epoch, self.userID == accountID,
+                          self.onboardingResolution == .checking
+                    else { return }
+                    self.resetOnboardingResolution()
+                }
+            }
+            try Task.checkCancellation()
+            guard onboardingRequestID == requestID,
+                  isCurrentFeatureSession(accountID: accountID, epoch: epoch),
+                  !onboardingComplete
+            else { return }
+            if hasExistingSetup {
+                completeOnboarding()
+            } else {
+                canContinueWithoutSetup = true
+                onboardingResolution = .needsSetup
+            }
+        } catch {
+            guard !Task.isCancelled, !(error is CancellationError),
+                  onboardingRequestID == requestID,
+                  isCurrentFeatureSession(accountID: accountID, epoch: epoch),
+                  !onboardingComplete
+            else { return }
+            if case let APIError.http(code, _) = error, code == 401,
+               featureJWT == token {
+                requireReauthentication()
+            } else {
+                onboardingResolution = .failed(
+                    "We couldn’t check your account. Check your connection and try again.")
+            }
+        }
+    }
+
+    private static func hasExistingTraining(_ state: StateResponse) -> Bool {
+        let discardedSessions = Set(state.sessions.filter { $0.status == "discarded" }.map(\.id))
+        return state.plan != nil
+            || state.sessions.contains { $0.status == "completed" || $0.status == "in_progress" }
+            || state.sets.contains { $0.deleted_at == nil && !discardedSessions.contains($0.session_id) }
+            || state.activities.contains { $0.deleted_at == nil }
+            || state.external_activities.contains { !$0.isDeleted }
+    }
+
+    private func hasExistingAccountSetup(token: String, validateRead: @MainActor () throws -> Void) async throws -> Bool {
+        let training = try await onboardingAccountReader.trainingProfile(jwt: token)
+        try validateRead()
+        if training.profile != nil && training.version > 0 { return true }
+
+        let profile = try await onboardingAccountReader.getMe(jwt: token)
+        try validateRead()
+        // Only explicit setup or integration history counts. Apple supplies a
+        // name/email on first sign-in; bootstrap ownership is also not setup.
+        if profile.intervals.connected || profile.intervals.needs_reauth == true
+            || (profile.intervals.credential_generation ?? 0) > 0
+            || profile.intervals.last_synced_at != nil
+            || profile.coach.connected || profile.coach.last_active != nil
+            || profile.health?.sharing_in_group == true {
+            return true
+        }
+
+        let groups = try await onboardingAccountReader.listGroups(jwt: token)
+        try validateRead()
+        return !groups.isEmpty
+    }
+
+    private func resetOnboardingResolution() {
+        onboardingRequestID = UUID()
+        canContinueWithoutSetup = false
+        onboardingResolution = .unresolved
+        onboardingResolutionRevision &+= 1
+    }
+
+    func handleAppleResult(_ result: Result<ASAuthorization, Error>) {
+        switch result {
+        case let .failure(error):
+            phase = .error(error.localizedDescription)
+        case let .success(auth):
+            guard let cred = auth.credential as? ASAuthorizationAppleIDCredential else {
+                phase = .error("No Apple identity token")
+                return
+            }
+            let name = cred.fullName.flatMap { comps -> String? in
+                let s = PersonNameComponentsFormatter().string(from: comps)
+                return s.isEmpty ? nil : s
+            }
+            handleAppleCredential(
+                identityToken: cred.identityToken.flatMap {
+                    String(data: $0, encoding: .utf8)
+                },
+                authorizationCode: cred.authorizationCode.flatMap {
+                    String(data: $0, encoding: .utf8)
+                },
+                fullName: name,
+                appleUserID: cred.user)
+        }
+    }
+
+    /// The native Sign in with Apple UI must supply both values. Keeping this
+    /// validation in a small internal seam makes the user-visible failure
+    /// deterministic without constructing AuthenticationServices objects in
+    /// unit tests.
+    func handleAppleCredential(
+        identityToken: String?,
+        authorizationCode: String?,
+        fullName: String?,
+        appleUserID: String
+    ) {
+        guard let identityToken, !identityToken.isEmpty else {
+            phase = .error("No Apple identity token")
+            return
+        }
+        guard let authorizationCode, !authorizationCode.isEmpty else {
+            phase = .error(
+                "Apple did not provide the authorization code required to sign in. Please try again.")
+            return
+        }
+        Task {
+            await exchange(
+                identityToken: identityToken,
+                fullName: fullName,
+                appleUserID: appleUserID,
+                authorizationCode: authorizationCode)
+        }
+    }
+
+    func exchange(
+        identityToken: String,
+        fullName: String?,
+        appleUserID: String? = nil,
+        authorizationCode: String? = nil
+    ) async {
+        let requestID = UUID()
+        signInRequestID = requestID
+        let epoch = featureSessionEpoch
+        phase = .working("Signing in…")
+        do {
+            let res = try await api.authApple(
+                identityToken: identityToken,
+                authorizationCode: authorizationCode,
+                fullName: fullName)
+            guard signInRequestID == requestID, featureSessionEpoch == epoch else { return }
+            guard Self.subject(of: res.jwt) == res.user.id else {
+                // This is an authentication-integrity failure, not malformed
+                // response JSON. Keep the user-facing state specific instead
+                // of routing it through APIError.decoding's "Decode failed"
+                // prefix.
+                phase = .error("session identity mismatch")
+                return
+            }
+            finishSignIn(res, appleUserID: appleUserID)
+        } catch {
+            guard signInRequestID == requestID, featureSessionEpoch == epoch else { return }
+            phase = .error(error.localizedDescription)
+        }
+    }
+
+#if DEBUG && targetEnvironment(simulator)
+    func signInLocally(using configuration: LocalDevelopmentConfiguration) async {
+        let requestID = UUID()
+        signInRequestID = requestID
+        let epoch = featureSessionEpoch
+        phase = .working("Signing in locally…")
+        do {
+            let response = try await api.authLocal(configuration: configuration)
+            guard signInRequestID == requestID, featureSessionEpoch == epoch else { return }
+            guard Self.subject(of: response.jwt) == response.user.id else {
+                phase = .error("Local session identity mismatch.")
+                return
+            }
+            finishSignIn(response, appleUserID: nil)
+        } catch {
+            guard signInRequestID == requestID, featureSessionEpoch == epoch else { return }
+            phase = .error(configuration.signInError(error))
+        }
+    }
+#endif
+
+    private func finishSignIn(_ res: AuthResponse, appleUserID: String?) {
+        // A failed bind may leave previously unbound links on disk. Do
+        // not let a different account claim them after reauthentication.
+        if let previousAccount = userID, previousAccount != res.user.id {
+            guard persistEntryIntents([]) else {
+                phase = .error("Saved navigation needs recovery before changing accounts.")
+                return
+            }
+            pendingEntryIntents = []
+            PartnerLaneKeyStore.clear(accountID: previousAccount)
+        }
+        if featureJWT != nil {
+            notifyFeatureSessionBoundary()
+        }
+        AccountLocalState.bindLegacyState(userID: res.user.id, defaults: defaults)
+        if appleUserID != nil, testMemberOwnerID != nil {
+            // Signing in with Apple returns to a real account directly.
+            parkedTokenStore.clear()
+            defaults.removeObject(forKey: Self.testMemberOwnerKey)
+            testMemberOwnerID = nil
+        }
+        featureSessionEpoch &+= 1
+        resetOnboardingResolution()
+        tokenStore.save(res.jwt)
+        jwt = res.jwt
+        userID = res.user.id
+        defaults.set(res.user.id, forKey: Self.userIDKey)
+        accountDeletionPending = defaults.string(
+            forKey: AccountLocalState.accountDeletionKey(
+                userID: res.user.id)) != nil
+        appleCredentialUserID = appleUserID
+        if let appleUserID {
+            defaults.set(
+                appleUserID,
+                forKey: AccountLocalState.appleCredentialUserKey(
+                    userID: res.user.id))
+        }
+        reauthenticationReason = nil
+        let onboardingKey = AccountLocalState.onboardedKey(userID: res.user.id)
+        if defaults.object(forKey: onboardingKey) == nil {
+            defaults.set(false, forKey: onboardingKey)
+        }
+        onboardingComplete = defaults.bool(forKey: onboardingKey)
+        bindEntryIntents(to: res.user.id)
+        phase = .signedIn
+    }
+
+    /// Decode unverified claims only to bind local account state and schedule
+    /// renewal. The Worker remains the authority and verifies the signature on
+    /// every authenticated request.
+    private static func claims(of token: String) -> [String: Any]? {
+        let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 3 else { return nil }
+        var encoded = String(parts[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let padding = (4 - encoded.count % 4) % 4
+        encoded += String(repeating: "=", count: padding)
+        guard let data = Data(base64Encoded: encoded) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
+    static func subject(of token: String) -> String? {
+        guard let subject = claims(of: token)?["sub"] as? String,
+              !subject.isEmpty
+        else { return nil }
+        return subject
+    }
+
+    static func expirationDate(of token: String) -> Date? {
+        guard let exp = claims(of: token)?["exp"] as? NSNumber else { return nil }
+        return Date(timeIntervalSince1970: exp.doubleValue)
+    }
+
+    static func shouldRenew(_ token: String, now: Date) -> Bool {
+        guard let expiry = expirationDate(of: token) else { return true }
+        return expiry.timeIntervalSince(now) <= renewalWindow
+    }
+
+    /// Renew before expiry while keeping the current signed-in surface usable.
+    /// A network/offline failure preserves the existing JWT and local state;
+    /// an authoritative 401 transitions to same-user reauthentication.
+    func renewSessionIfNeeded(force: Bool = false) async {
+        guard !isRenewing, let token = jwt else { return }
+        guard force || Self.shouldRenew(token, now: now()) else { return }
+        let initiatingUserID = userID
+        isRenewing = true
+        defer { isRenewing = false }
+        do {
+            let renewed = try await api.renewAppSession(jwt: token)
+            guard jwt == token, userID == initiatingUserID else { return }
+            guard Self.subject(of: renewed.jwt) == initiatingUserID else {
+                requireReauthentication(
+                    reason: "Your renewed session could not be matched to this account. Sign in again to reconnect it.")
+                return
+            }
+            tokenStore.save(renewed.jwt)
+            jwt = renewed.jwt
+        } catch let APIError.http(code, _) where code == 401 {
+            guard jwt == token, userID == initiatingUserID else { return }
+            requireReauthentication()
+        } catch {
+            // Offline/transport failure is intentionally soft. The existing
+            // token may still be valid and account-scoped state must survive.
+        }
+    }
+
+    /// Ask Apple whether the persisted Sign in with Apple grant is still
+    /// authorized. Revoked/not-found credentials move to a recoverable sign-in
+    /// state while retaining the account id and all scoped queued data.
+    /// Provider errors and transferred-team identities are soft: Apple's
+    /// transferred subject requires a server-side migration, so ordinary
+    /// reauthentication must not create a fresh empty account.
+    func checkAppleCredentialState() async {
+        guard
+            let initiatingToken = jwt,
+            let initiatingUserID = userID,
+            let initiatingAppleUserID = appleCredentialUserID
+        else { return }
+        let state = await appleCredentialChecker.state(for: initiatingAppleUserID)
+        guard
+            jwt == initiatingToken,
+            userID == initiatingUserID,
+            appleCredentialUserID == initiatingAppleUserID
+        else { return }
+        switch state {
+        case .authorized, .unavailable, .transferred:
+            return
+        case .revoked, .notFound:
+            requireReauthentication(
+                reason: "Your Apple authorization needs to be renewed. Sign in again to reconnect this account. Your queued workouts remain on this device.")
+        }
+    }
+
+    /// Called on a 401. Drop only the invalid bearer: retain userID so the
+    /// next Apple exchange can recover the same account namespace without
+    /// erasing its outboxes, connection flags, or HealthKit anchor.
+    func requireReauthentication(reason: String? = nil) {
+        if accountDeletionPending, jwt != nil, userID != nil {
+            reauthenticationReason = reason
+                ?? "Account deletion is awaiting confirmation. Retry account deletion to finish."
+            phase = .signedIn
+            return
+        }
+        notifyFeatureSessionBoundary()
+        featureSessionEpoch &+= 1
+        resetOnboardingResolution()
+        tokenStore.clear()
+        jwt = nil
+        reauthenticationReason = reason
+        phase = .signedOut
+    }
+
+    /// User-facing sign-out first revokes the whole bearer-renewal family.
+    func signOutOnServer() async {
+        guard !signingOut, !accountDeletionPending, let token = jwt, let accountID = userID else { return }
+        let epoch = featureSessionEpoch
+        signingOut = true
+        signOutError = nil
+        defer { signingOut = false }
+        do {
+            try await api.revokeAppSession(jwt: token)
+        } catch {
+            guard userID == accountID, featureSessionEpoch == epoch else { return }
+            if case APIError.http(401, _) = error {
+                // The server already rejects this credential, including a lost
+                // successful logout acknowledgement followed by a retry.
+            } else {
+                signOutError = "Couldn’t sign out. Check your connection and try again."
+                return
+            }
+        }
+        guard userID == accountID, featureSessionEpoch == epoch else { return }
+        signOut()
+    }
+
+    /// Local session teardown after revocation or an authentication boundary.
+    /// User-facing buttons call signOutOnServer. Feature state is
+    /// keyed by user id and remains isolated for a later return to that account.
+    func signOut() {
+        guard !accountDeletionPending else {
+            reauthenticationReason =
+                "Account deletion is awaiting confirmation. Retry account deletion to finish."
+            return
+        }
+        guard persistEntryIntents([]) else { return }
+        if let userID { PartnerLaneKeyStore.clear(accountID: userID) }
+        notifyFeatureSessionBoundary()
+        featureSessionEpoch &+= 1
+        resetOnboardingResolution()
+        tokenStore.clear()
+        defaults.removeObject(forKey: Self.userIDKey)
+        pendingEntryIntents = []
+        entryPersistenceError = nil
+        onboardingComplete = false
+        jwt = nil
+        userID = nil
+        appleCredentialUserID = nil
+        reauthenticationReason = nil
+        signOutError = nil
+        phase = .signedOut
+    }
+
+    /// Owner only, TestFlight only: switch to a fresh, empty test account so
+    /// the owner can go through new-member setup on their own phone. The
+    /// server creates the account (Sign in with Apple always returns the
+    /// owner's own identity) and refuses everyone else. The owner's session
+    /// is parked in the Keychain, untouched, until `endTestMember`.
+    func startTestMember() async {
+        guard testMemberOwnerID == nil, !isSwitchingTestMember,
+              let token = featureJWT, let ownerID = userID else { return }
+        let epoch = featureSessionEpoch
+        isSwitchingTestMember = true
+        defer { isSwitchingTestMember = false }
+        testMemberError = nil
+        do {
+            let res = try await api.createTestMember(jwt: token)
+            guard isCurrentFeatureSession(accountID: ownerID, epoch: epoch),
+                  let ownerToken = jwt else { return }
+            guard Self.subject(of: res.jwt) == res.user.id, res.user.id != ownerID else {
+                testMemberError = "The test account could not be matched. Try again."
+                return
+            }
+            parkedTokenStore.save(ownerToken)
+            guard parkedTokenStore.load() == ownerToken,
+                  defaults.set(ownerID, forKey: Self.testMemberOwnerKey) else {
+                parkedTokenStore.clear()
+                testMemberError = "Your session could not be saved on this iPhone, so nothing changed."
+                return
+            }
+            testMemberOwnerID = ownerID
+            finishSignIn(res, appleUserID: nil)
+        } catch {
+            guard isCurrentFeatureSession(accountID: ownerID, epoch: epoch) else { return }
+            testMemberError = "The test account could not be created. Check your connection and try again."
+        }
+    }
+
+    /// Delete the test account on the server and on this iPhone, then return
+    /// to the owner's parked session. A test account the server no longer
+    /// knows (401/404) is already gone, so returning continues.
+    func endTestMember() async {
+        guard let ownerID = testMemberOwnerID, !isSwitchingTestMember else { return }
+        isSwitchingTestMember = true
+        defer { isSwitchingTestMember = false }
+        testMemberError = nil
+        if let testID = userID, testID != ownerID {
+            if let token = jwt {
+                do {
+                    _ = try await api.deleteTestMember(jwt: token)
+                } catch let APIError.http(code, _) where code == 401 || code == 404 {
+                    // Already removed, for example by starting a newer one.
+                } catch {
+                    testMemberError = "The test account could not be removed. Check your connection and try again."
+                    return
+                }
+            }
+            guard testMemberOwnerID == ownerID, userID == testID else { return }
+            // Stay in test mode until this iPhone's copy is gone too. A retry
+            // finds the server account already removed and cleans up again.
+            guard AccountLocalState.clear(userID: testID, defaults: defaults) else {
+                testMemberError = "The test account was deleted, but its saved data could not be removed from this iPhone. Unlock it, check available storage, and try again."
+                return
+            }
+        }
+        restoreTestMemberOwner(ownerID)
+    }
+
+    private func restoreTestMemberOwner(_ ownerID: String) {
+        let ownerToken = parkedTokenStore.load()
+        if featureJWT != nil { notifyFeatureSessionBoundary() }
+        if persistEntryIntents([]) { pendingEntryIntents = [] }
+        featureSessionEpoch &+= 1
+        resetOnboardingResolution()
+        parkedTokenStore.clear()
+        defaults.removeObject(forKey: Self.testMemberOwnerKey)
+        testMemberOwnerID = nil
+        AccountLocalState.bindLegacyState(userID: ownerID, defaults: defaults)
+        userID = ownerID
+        defaults.set(ownerID, forKey: Self.userIDKey)
+        appleCredentialUserID = defaults.string(
+            forKey: AccountLocalState.appleCredentialUserKey(userID: ownerID))
+        accountDeletionPending = defaults.string(
+            forKey: AccountLocalState.accountDeletionKey(userID: ownerID)) != nil
+        onboardingComplete = defaults.bool(
+            forKey: AccountLocalState.onboardedKey(userID: ownerID))
+        if let ownerToken, Self.subject(of: ownerToken) == ownerID {
+            tokenStore.save(ownerToken)
+            jwt = ownerToken
+            reauthenticationReason = nil
+            bindEntryIntents(to: ownerID)
+            phase = .signedIn
+        } else {
+            // The parked session is gone; signing in with Apple returns to
+            // the same account and keeps its saved data.
+            tokenStore.clear()
+            jwt = nil
+            reauthenticationReason = "Sign in again to return to your account."
+            phase = .signedOut
+        }
+    }
+
+    /// Permanently delete the server account, then erase only that account's
+    /// local namespace. Nothing is cleared before the Worker confirms the
+    /// account is gone through an acknowledgement or authenticated absence: a
+    /// network/server failure leaves the signed-in account and every queued
+    /// write intact so the user can retry safely.
+    func deleteAccount() async throws {
+        guard let token = jwt, let accountID = userID else {
+            throw APIError.http(401, "missing_session")
+        }
+        let requiresAppleRevocation = !isReviewAccount
+        let deletionKeyName = AccountLocalState.accountDeletionKey(userID: accountID)
+        let idempotencyKey: String
+        if let existingKey = defaults.string(forKey: deletionKeyName) {
+            idempotencyKey = existingKey
+        } else {
+            idempotencyKey = UUID().uuidString
+            defaults.set(idempotencyKey, forKey: deletionKeyName)
+        }
+        if userID == accountID, !accountDeletionPending {
+            notifyFeatureSessionBoundary()
+        }
+        if userID == accountID {
+            accountDeletionPending = true
+            resetOnboardingResolution()
+        }
+        let response: AccountDeletionResponse
+        do {
+            response = try await api.deleteAccount(
+                jwt: token,
+                idempotencyKey: idempotencyKey)
+        } catch let APIError.http(code, body) where code == 401 {
+            // A key-bound receipt retry is accepted even after the account row
+            // is gone. An authoritative 401 means this bearer/key pair cannot
+            // complete the deletion and ordinary reauthentication is needed.
+            // Other failures preserve the key and bearer so an uncertain
+            // request can be retried exactly.
+            defaults.removeObject(forKey: deletionKeyName)
+            if userID == accountID {
+                accountDeletionPending = false
+                let reason = body.contains("reauthentication_required")
+                    ? (requiresAppleRevocation
+                        ? "Sign in with Apple again to confirm account deletion."
+                        : "Sign in again to confirm account deletion.")
+                    : nil
+                requireReauthentication(reason: reason)
+            }
+            throw APIError.http(code, body)
+        } catch let APIError.http(code, body)
+            where code == 404
+                && Self.serverErrorCode(in: body) == "account_not_found" {
+            // Only the Worker's typed absence contract proves the account no
+            // longer exists and this device's receipt is unknown. A generic or
+            // misrouted 404 must propagate so it cannot erase queued local
+            // training while the server account may still exist. The explicit
+            // confirmation that started this request authorizes cleanup once
+            // this exact absence is returned.
+            try completeAccountDeletion(
+                for: accountID,
+                requiresManualAppleRevocation: requiresAppleRevocation)
+            return
+        }
+        guard response.ok else {
+            throw APIError.decoding("account deletion was not acknowledged")
+        }
+
+        try completeAccountDeletion(
+            for: accountID,
+            requiresManualAppleRevocation:
+                requiresAppleRevocation && response.apple_revocation != .revoked)
+    }
+
+    /// Always erase the account that initiated deletion, even if a different
+    /// account became current while the request was in flight. Current auth
+    /// state is reset only when it still belongs to the deleted account.
+    private func completeAccountDeletion(
+        for accountID: String,
+        requiresManualAppleRevocation: Bool
+    ) throws {
+        let entryCleanup = userID != accountID || defaults.eraseAfterAccountDeletion(forKey: Self.pendingEntryKey)
+        guard entryCleanup, AccountLocalState.clear(userID: accountID, defaults: defaults) else {
+            throw APIError.decoding("The account was deleted, but saved data could not be removed from this iPhone. Unlock it, check available storage, and retry Delete account.")
+        }
+        // The explicitly confirmed deletion event owns this handoff even if a
+        // different account became current while the request was in flight.
+        // The UI handoff never mutates the replacement account.
+        if requiresManualAppleRevocation {
+            defaults.set(true, forKey: Self.postDeletionAppleRevocationKey)
+            postDeletionAppleRevocationRequired = true
+        }
+        guard userID == accountID else { return }
+        featureSessionEpoch &+= 1
+        resetOnboardingResolution()
+        accountDeletionPending = false
+        tokenStore.clear()
+        defaults.removeObject(forKey: Self.userIDKey)
+        defaults.removeObject(forKey: Self.onboardedKey)
+        pendingEntryIntents = []
+        entryPersistenceError = nil
+        jwt = nil
+        userID = nil
+        appleCredentialUserID = nil
+        reauthenticationReason = nil
+        onboardingComplete = false
+        phase = .signedOut
+    }
+
+    func dismissPostDeletionAppleRevocationHandoff() {
+        defaults.removeObject(forKey: Self.postDeletionAppleRevocationKey)
+        postDeletionAppleRevocationRequired = false
+    }
+
+    /// Fetch a portable snapshot for the currently signed-in account. Export
+    /// is an ordinary feature request (never allowed while deletion is
+    /// pending), and an account change or feature-session removal while the
+    /// request is in flight discards the old account's bytes instead of
+    /// presenting them in a different account's Profile UI. A same-account
+    /// token renewal is safe: the export principal did not change.
+    func downloadAccountExport() async throws -> AccountExportFile {
+        guard let token = featureJWT, let accountID = userID else {
+            throw APIError.http(401, "missing_session")
+        }
+        do {
+            let file = try await api.downloadAccountExport(jwt: token)
+            guard userID == accountID, featureJWT != nil else {
+                throw APIError.decoding(
+                    "the signed-in account changed while the export was downloading")
+            }
+            return file
+        } catch let APIError.http(code, body) where code == 401 {
+            if userID == accountID, featureJWT == token {
+                requireReauthentication()
+            }
+            throw APIError.http(code, body)
+        }
+    }
+
+    // MARK: - Universal Link invites
+
+    /// Preserve validated invite navigation across interrupted sign-in and
+    /// onboarding. Signed-in intents remain bound to that account.
+    func handleDeepLink(_ url: URL) {
+        // Widget taps only bring Today forward; a signed-out launch already
+        // lands on sign-in, so nothing is stored for later.
+        if TrainingAgendaLink.isTodayURL(url) {
+            NotificationCenter.default.post(name: TrainingAgendaLink.openToday, object: nil)
+            return
+        }
+        if let record = WorkoutRecordLink(url: url) {
+            requestEntry(.workoutRecord(record))
+            return
+        }
+        if StationLink.isSetupURL(url) {
+            requestEntry(.ipadDisplay)
+            return
+        }
+        if let request = Self.coachApprovalID(from: url) {
+            requestEntry(.coachApproval(request))
+            return
+        }
+        guard let code = Self.inviteCode(from: url) else { return }
+        requestEntry(.invite(code))
+    }
+
+    /// Pure parser (no side effects, so the rule is obvious and testable):
+    /// the host must match the API host and the path must be exactly
+    /// `/join/<code>`, where <code> normalizes to 6 chars of the invite
+    /// alphabet. Returns nil otherwise.
+    static func coachApprovalID(from url: URL) -> String? {
+        guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              parts.scheme == "https", parts.host == "tresfort.app", parts.port == nil,
+              parts.user == nil, parts.password == nil, parts.fragment == nil,
+              parts.percentEncodedPath == "/coach/authorize",
+              let items = parts.queryItems, items.count == 1,
+              items[0].name == "request", let id = items[0].value,
+              id.count == 64, id.allSatisfy({ "0123456789abcdef".contains($0) }) else { return nil }
+        return id
+    }
+
+    static func inviteCode(from url: URL) -> String? {
+        guard let host = url.host, host == Config.apiBaseURL.host else { return nil }
+        let parts = url.pathComponents.filter { $0 != "/" } // ["join", "ABC123"]
+        guard parts.count == 2, parts[0] == "join" else { return nil }
+        return normalizedInviteCode(parts[1])
+    }
+
+    /// Uppercase, strip to the 6-char base-32 invite alphabet (no I/L/O/0/1),
+    /// require exactly 6. Mirrors the server's `normalizeInviteCode`
+    /// (src/routes/invites.ts) and the in-app code fields.
+    static func normalizedInviteCode(_ raw: String) -> String? {
+        let alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+        let cleaned = raw.uppercased().filter { alphabet.contains($0) }
+        return cleaned.count == 6 ? cleaned : nil
+    }
+}

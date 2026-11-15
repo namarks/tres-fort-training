@@ -1,0 +1,1176 @@
+import Foundation
+
+// Codable mirrors of the REST DTOs (server is source of truth).
+
+struct AuthResponse: Decodable {
+    let jwt: String
+    let user: UserDTO
+}
+
+struct TestMemberDeletionResponse: Decodable {
+    let ok: Bool
+}
+
+struct SessionRenewalResponse: Decodable {
+    let jwt: String
+}
+
+enum AppleRevocationOutcome: String, Decodable, Equatable {
+    case revoked
+    case manualRequired = "manual_required"
+}
+
+struct AccountDeletionResponse: Decodable {
+    let ok: Bool
+    let owner_tombstoned: Bool
+    /// Optional for compatibility with a previous Worker during app/server
+    /// version skew. A missing outcome cannot prove provider revocation and
+    /// therefore takes the same safe UI path as `manual_required`.
+    let apple_revocation: AppleRevocationOutcome?
+}
+
+struct UserDTO: Decodable {
+    let id: String
+    let display_name: String?
+    let email: String?
+}
+
+struct TemplateExercise: Codable, Identifiable, Equatable {
+    var progression: String? = nil
+    let id: String
+    let exercise_id: String
+    let exercise_name: String
+    let exercise_unit: String
+    let order_index: Int
+    let target_sets: Int
+    let target_reps: Int
+    let target_reps_max: Int?
+    let target_rpe: Double?
+    let rest_seconds: Int
+    let target_weight: Double?
+    let cues: String?
+    let exercise_modality: String
+    /// "bilateral" (default) | "unilateral". Optional so older payloads
+    /// (pre-0011 migration) still decode — defaults to bilateral.
+    let exercise_laterality: String?
+    /// "total" (default) | "per_hand". per_hand → weight is ONE dumbbell;
+    /// display "X each hand". Optional so pre-0014 payloads still decode.
+    let exercise_load_mode: String?
+    /// free-exercise-db slug (e.g. "Barbell_Squat"). Optional: null when the
+    /// catalog row has no upstream demo (planks/holds/band primitives), or
+    /// when the payload is pre-0020. Drives the demo sheet lookup against
+    /// the bundled asset catalog and the Worker /api/exercises/:id/demo
+    /// route — falls back to cue text when nil.
+    let exercise_demo_slug: String?
+    /// Planned hold seconds for timed slots (planks, holds). Optional;
+    /// when null, fall back to target_reps (the legacy timed convention).
+    let target_duration_s: Int?
+    /// 1 = this slot is a PRESCRIBED warm-up (erg, mobility, ramp-up). Its
+    /// logged sets stay out of working-set rollups / session RPE. Optional so
+    /// pre-0026 payloads decode → defaults to a working slot. (Migration 0026.)
+    let is_warmup: Int?
+    /// Unit of `target_weight` ("lb" | "kg"), owned by this slot: a plan can
+    /// mix lb and kg slots. Optional so payloads without it still decode;
+    /// read it through `targetWeightUnit`, never through `exercise_unit`.
+    var target_weight_unit: String? = nil
+
+    /// Group-owned round/transition rests leave the ordinary slot rest intact.
+    /// Mutable defaults preserve older memberwise initializers while synthesized
+    /// Codable still reads both absent/null legacy fields and current values.
+    var group_id: String? = nil
+    var group_rest_seconds: Int? = nil
+    var group_transition_seconds: Int? = nil
+    /// A planned run's steps as JSON text, only on the outdoor run slot
+    /// (migration 0058). Read it through `runPlan`.
+    var run_steps: String? = nil
+
+    /// A prescribed warm-up slot (erg, mobility). Renders in a warm-up style
+    /// and its logged sets are flagged is_warmup.
+    var isWarmup: Bool { is_warmup == 1 }
+
+    // Timed when the catalog modality is "timed"/"cardio" OR the slot pins an
+    // explicit target_duration_s. Cardio ergs (rowing/bike/ski, treadmill) are
+    // duration-driven like holds, so they use the same countdown runner.
+    // Safe to honor target_duration_s now that LOGGED sets carry an
+    // authoritative per-set is_timed flag (backend migration 0024): the runner
+    // declares is_timed when logging (= this property), and history/agenda
+    // render off set.is_timed (SyncModel.isTimedSet), so a duration-pinned hold
+    // reads as "Ns" everywhere — no longer the cross-view "0 × 45"
+    // inconsistency (Codex P2 on #58) that forced modality-only.
+    var isTimed: Bool {
+        exercise_modality == "timed" || exercise_modality == "cardio"
+            || target_duration_s != nil
+    }
+    // Key off MODALITY, not unit: bw exercises (Pull-Up, Dead Bug) are
+    // seeded with unit "lb" in the catalog, so checking the unit left the
+    // weight field showing for them (bug #2). Modality is the truth.
+    var isBodyweight: Bool { exercise_modality == "bw" }
+    /// Bodyweight reps and the catalog's static-hold exercises interpret
+    /// `weight` relative to bodyweight, so negative values mean assistance.
+    /// Cardio also uses the timed runner but has no meaningful load control.
+    var allowsAssistance: Bool {
+        isBodyweight || exercise_modality == "timed"
+    }
+    /// Duration-pinned loaded exercises still need their positive load, while
+    /// cardio efforts do not expose a synthetic weight field.
+    var showsLoadControl: Bool { exercise_modality != "cardio" }
+    var isUnilateral: Bool { exercise_laterality == "unilateral" }
+    var isPerHand: Bool { exercise_load_mode == "per_hand" }
+    /// The unit `target_weight` is stored in, and therefore the unit the
+    /// runner keeps its draft load in and logs with. The catalog
+    /// `exercise_unit` (which can even be "sec"/"min") never decides this;
+    /// a slot without a declared unit is lb, matching the server default.
+    var targetWeightUnit: WeightUnit { WeightUnit(rawValue: target_weight_unit ?? "") ?? .lb }
+    /// Prescribed hold/effort for a timed or cardio set, in seconds. Uses
+    /// target_duration_s (the real field) and falls back to target_reps for
+    /// older slots that stored the hold there. Min 1s so the timer is never
+    /// zero-length.
+    var holdSeconds: Int { max(1, target_duration_s ?? target_reps) }
+
+    /// Human duration for a timed/cardio slot: "45s" for short holds, "5 min"
+    /// for a whole-minute effort, "1:30" otherwise. Keeps a 5-min erg from
+    /// reading "300s".
+    var holdLabel: String {
+        let s = holdSeconds
+        if s >= 60 && s % 60 == 0 { return "\(s / 60) min" }
+        if s >= 60 { return String(format: "%d:%02d", s / 60, s % 60) }
+        return "\(s)s"
+    }
+
+    /// Rep targets include their per-side convention; durations keep their own units.
+    var targetLabel: String {
+        if isTimed {
+            // A single-set timed effort (a warm-up erg, one plank) reads
+            // cleaner as just the duration than "1×5 min".
+            return target_sets <= 1 ? holdLabel : "\(target_sets)×\(holdLabel)"
+        }
+        let side = isUnilateral ? " per side" : ""
+        if let hi = target_reps_max, hi != target_reps {
+            return "\(target_sets)×\(target_reps)–\(hi)\(side)"
+        }
+        return "\(target_sets)×\(target_reps)\(side)"
+    }
+}
+
+struct Workout: Codable, Identifiable, Equatable {
+    var tags: String? = nil
+    var archived_at: Int? = nil
+    var isArchived: Bool { archived_at != nil }
+    /// A one-time workout's date (docs/plans/workout-library P3): made for
+    /// that day only, never in the library, Your week or a block. Nil for a
+    /// saved, reusable workout.
+    var one_time_date: String? = nil
+    var isOneTime: Bool { one_time_date != nil }
+    var workoutTags: [String] {
+        guard let tags, let data = tags.data(using: .utf8) else { return [] }
+        return (try? JSONDecoder().decode([String].self, from: data)) ?? []
+    }
+    let id: String
+    let name: String
+    let day_label: String?
+    let order_index: Int
+    let exercises: [TemplateExercise]
+
+    var title: String { day_label.map { "\($0) · \(name)" } ?? name }
+}
+
+/// `meta.schedule` — the weekly recurrence map (FROZEN CONTRACT).
+///
+/// Wire shape (inside the plan's `meta` JSON string):
+///   "schedule": { "version": 1,
+///     "week": { "mon": "<workout_id|null>", "tue": …, … "sun": … } }
+///
+/// Keyed by weekday; null / absent = rest day; values are `workout_id`.
+/// Both the Routine screen and Claude edit this same versioned map through
+/// their respective thin API wrappers; neither owns a client-only schedule.
+struct PlanSchedule: Decodable, Equatable {
+    let version: Int
+    let week: [String: String?]
+    /// Activities a weekday holds alongside its main workout (morning
+    /// stretching, core before bed), by workout id. Absent on plans that
+    /// never used them.
+    var extras: [String: [String]]? = nil
+    /// Optional times of day for what a weekday holds: weekday → workout id
+    /// → "HH:MM" (24-hour, local). Most items have none; absent on plans
+    /// that never set one (docs/plans/app-design-pass P19).
+    var times: [String: [String: String]]? = nil
+
+    /// Lowercase 3-letter keys, in the contract's order.
+    static let weekdayKeys = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+    /// workout_id scheduled for a weekday key, or nil (rest / absent).
+    func templateID(forWeekdayKey key: String) -> String? {
+        // `week[key]` is `String??`: outer = key present, inner = JSON null.
+        guard let inner = week[key] else { return nil }
+        return inner
+    }
+
+    /// Extras saved for a weekday key, in their saved order ([] if none).
+    func extraIDs(forWeekdayKey key: String) -> [String] {
+        extras?[key] ?? []
+    }
+
+    /// The "HH:MM" time set for a workout on a weekday key, if any.
+    func time(forWeekdayKey key: String, workoutID: String) -> String? {
+        times?[key]?[workoutID]
+    }
+}
+
+/// `meta.program`: a block of weeks that replaces the repeating week for a
+/// stretch of dates (docs/plans/progressive-plans/spec.md). Week 1 starts on
+/// the `start` Monday; a one-off block ends after its last week and the
+/// repeating week takes over again, while a cycle starts over. Parsed with
+/// the same envelope rules as the server's `normalizeProgram`, so a stored
+/// block that is malformed falls back to the repeating week.
+struct PlanProgram: Equatable {
+    struct Week: Equatable {
+        let label: String?
+        let week: [String: String?]
+        let extras: [String: [String]]?
+        /// Slot id → this week's targets (P1); nil when the week changes none.
+        var targets: [String: SlotTargets]? = nil
+    }
+
+    let id: String
+    let name: String?
+    let start: String
+    let repeats: Bool
+    let weeks: [Week]
+
+    /// The server's limits (`MAX_PROGRAM_*`).
+    static let maxWeeks = 52
+    static let maxLabel = 40
+    static let maxName = 60
+
+    init(id: String, name: String?, start: String, repeats: Bool, weeks: [Week]) {
+        self.id = id
+        self.name = name
+        self.start = start
+        self.repeats = repeats
+        self.weeks = weeks
+    }
+
+    /// Mirror of `normalizeProgram` (src/types.ts); nil when malformed.
+    init?(json: Any?) {
+        guard let p = json as? [String: Any],
+              let id = p["id"] as? String, !id.isEmpty,
+              let start = p["start"] as? String, PlanProgram.isYMD(start),
+              let items = p["weeks"] as? [Any]
+        else { return nil }
+        var weeks: [Week] = []
+        for item in items.prefix(PlanProgram.maxWeeks) {
+            guard let w = item as? [String: Any] else { return nil }
+            var week: [String: String?] = [:]
+            let rawWeek = w["week"] as? [String: Any] ?? [:]
+            for key in PlanSchedule.weekdayKeys {
+                if let id = rawWeek[key] as? String, !id.isEmpty { week[key] = .some(id) } else { week[key] = .some(nil) }
+            }
+            var extras: [String: [String]] = [:]
+            if let rawExtras = w["extras"] as? [String: Any] {
+                for key in PlanSchedule.weekdayKeys {
+                    guard let list = rawExtras[key] as? [Any] else { continue }
+                    var kept: [String] = []
+                    for case let id as String in list
+                    where !id.isEmpty && id != (week[key] ?? nil) && !kept.contains(id) {
+                        if kept.count < ScheduleExtras.maxPerDay { kept.append(id) }
+                    }
+                    if !kept.isEmpty { extras[key] = kept }
+                }
+            }
+            let label = (w["label"] as? String).map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(PlanProgram.maxLabel)) }
+            var targets: [String: SlotTargets] = [:]
+            for (slot, value) in w["targets"] as? [String: Any] ?? [:] where !slot.isEmpty {
+                if let parsed = SlotTargets(json: value) { targets[slot] = parsed }
+            }
+            weeks.append(Week(label: label?.isEmpty == false ? label : nil, week: week,
+                              extras: extras.isEmpty ? nil : extras, targets: targets.isEmpty ? nil : targets))
+        }
+        guard !weeks.isEmpty else { return nil }
+        let name = (p["name"] as? String).map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(PlanProgram.maxName)) }
+        self.init(id: id, name: name?.isEmpty == false ? name : nil, start: start,
+                  repeats: (p["repeat"] as? Bool) == true, weeks: weeks)
+    }
+
+    private static func isYMD(_ s: String) -> Bool {
+        s.range(of: #"^\d{4}-\d{2}-\d{2}$"#, options: .regularExpression) != nil
+    }
+
+    /// Which week of the block `ymd` falls in (0-based), or nil before the
+    /// start or after a one-off block ends. Mirror of `programWeekOn`.
+    func weekIndex(on ymd: String) -> Int? {
+        guard !weeks.isEmpty,
+              let from = CalendarProjection.dayNumber(start),
+              let to = CalendarProjection.dayNumber(ymd)
+        else { return nil }
+        let span = to - from
+        if span < 0 { return nil }
+        let n = span / 7
+        if repeats { return n % weeks.count }
+        return n < weeks.count ? n : nil
+    }
+}
+
+/// `meta.race`, as far as the app shows it: the event a block builds to.
+struct PlanEvent: Decodable, Equatable {
+    let name: String
+    let date: String
+}
+
+struct PlanTree: Codable, Equatable {
+    var availableWorkouts: [Workout] { workouts.filter { !$0.isArchived } }
+    /// Saved workouts a member picks from: live and not made for one date.
+    /// Look a session's workout up in `availableWorkouts`, which includes
+    /// one-time workouts.
+    var libraryWorkouts: [Workout] { availableWorkouts.filter { !$0.isOneTime } }
+    let id: String
+    let name: String
+    let version: Int
+    let workouts: [Workout]
+    /// Raw plan `meta` JSON, delivered by the backend as a JSON-encoded
+    /// *string* (`plans.meta TEXT`). Schedule lives inside it; decoded
+    /// lazily via `schedule` so a malformed/absent meta never breaks sync.
+    let meta: String?
+
+    /// Parsed weekly schedule, or nil if meta is absent/!schedule/malformed.
+    var schedule: PlanSchedule? {
+        guard let meta, let data = meta.data(using: .utf8) else { return nil }
+        struct MetaEnvelope: Decodable { let schedule: PlanSchedule? }
+        return try? JSONDecoder().decode(MetaEnvelope.self, from: data).schedule
+    }
+
+    /// The member's goal event (`meta.race`): its name and date, or nil.
+    var event: PlanEvent? {
+        guard let meta, let data = meta.data(using: .utf8) else { return nil }
+        struct MetaEnvelope: Decodable { let race: PlanEvent? }
+        return (try? JSONDecoder().decode(MetaEnvelope.self, from: data))?.race
+    }
+
+    /// Parsed block of weeks (`meta.program`), or nil when absent/malformed.
+    var program: PlanProgram? {
+        guard let meta, let data = meta.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return PlanProgram(json: object["program"])
+    }
+
+    /// The week pattern that applies on a date: the block's week when a block
+    /// covers it, else the repeating week. Mirror of `weekPatternOn`.
+    func schedule(on ymd: String) -> PlanSchedule? {
+        guard let program, let index = program.weekIndex(on: ymd) else { return schedule }
+        let week = program.weeks[index]
+        // Times belong to a weekday and a workout, so a block week keeps them.
+        return PlanSchedule(version: schedule?.version ?? 1, week: week.week, extras: week.extras,
+                            times: schedule?.times)
+    }
+
+    /// Parsed availability/blackout ranges from `meta.trips` (M4), or [] when
+    /// absent/malformed. Mirrors the backend `Trip` → `CalendarProjection.TripRange`
+    /// so the composite projection can mark trip days `.unavailable`/`.light`.
+    /// The backend already validates these (normalizeTrips), so defaults rarely
+    /// fire; `can_train_light` defaults to true (only an explicit false blacks out).
+    var trips: [TripRange] {
+        guard let meta, let data = meta.data(using: .utf8) else { return [] }
+        struct WireTrip: Decodable {
+            let id: String
+            let start: String
+            let end: String
+            let type: String?
+            let can_train_light: Bool?
+        }
+        struct MetaEnvelope: Decodable { let trips: [WireTrip]? }
+        guard let wire = try? JSONDecoder().decode(MetaEnvelope.self, from: data).trips else { return [] }
+        return wire.map {
+            TripRange(id: $0.id, start: $0.start, end: $0.end,
+                      type: $0.type ?? "other",
+                      canTrainLight: $0.can_train_light ?? true)
+        }
+    }
+}
+
+/// One away-dates range from `meta.trips`, with the fields the member edits.
+/// The calendar reads the same rows through `PlanTree.trips` (`TripRange`).
+struct PlanTrip: Decodable, Identifiable, Equatable {
+    let id: String
+    let start: String
+    let end: String
+    let type: String?
+    let can_train_light: Bool?
+    let note: String?
+}
+
+extension PlanTree {
+    /// Away dates in date order, for the editor. [] when meta has none.
+    var awayDates: [PlanTrip] {
+        guard let meta, let data = meta.data(using: .utf8) else { return [] }
+        struct MetaEnvelope: Decodable { let trips: [PlanTrip]? }
+        let trips = (try? JSONDecoder().decode(MetaEnvelope.self, from: data).trips) ?? []
+        return trips.sorted { ($0.start, $0.end) < ($1.start, $1.end) }
+    }
+}
+
+struct PlanChangeSummary: Codable, Equatable {
+    let plan_fields: Int
+    let schedule_days: Int
+    let days_added: Int
+    let days_removed: Int
+    let days_changed: Int
+    let exercises_added: Int
+    let exercises_removed: Int
+    let exercises_changed: Int
+
+    var total: Int {
+        plan_fields + schedule_days + days_added + days_removed + days_changed
+            + exercises_added + exercises_removed + exercises_changed
+    }
+}
+
+struct PlanHistoryItem: Codable, Identifiable, Equatable {
+    var id: Int { version }
+    let version: Int
+    let actor: String
+    let operation: String
+    let reason: String?
+    let created_at: Int
+    let summary: PlanChangeSummary?
+    var previous_version: Int? = nil
+    var affected: [String]? = nil
+}
+
+struct PlanHistoryResponse: Codable, Equatable {
+    let plan_id: String
+    let current_version: Int
+    let items: [PlanHistoryItem]
+    let next_before_version: Int?
+}
+
+struct PlanVersionChange: Codable, Equatable {
+    let kind: String
+    let path: String
+    let before: JSONValue?
+    let after: JSONValue?
+}
+
+enum JSONValue: Codable, Equatable {
+    case string(String), number(Double), bool(Bool), object([String: JSONValue])
+    case array([JSONValue]), null
+
+    init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer()
+        if value.decodeNil() { self = .null }
+        else if let v = try? value.decode(Bool.self) { self = .bool(v) }
+        else if let v = try? value.decode(Double.self) { self = .number(v) }
+        else if let v = try? value.decode(String.self) { self = .string(v) }
+        else if let v = try? value.decode([String: JSONValue].self) { self = .object(v) }
+        else { self = .array(try value.decode([JSONValue].self)) }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var value = encoder.singleValueContainer()
+        switch self {
+        case let .string(v): try value.encode(v)
+        case let .number(v): try value.encode(v)
+        case let .bool(v): try value.encode(v)
+        case let .object(v): try value.encode(v)
+        case let .array(v): try value.encode(v)
+        case .null: try value.encodeNil()
+        }
+    }
+}
+
+extension JSONValue {
+    var displayText: String {
+        switch self {
+        case let .string(value): return value
+        case let .number(value):
+            // JSON numbers decode as Double. Only bridge to Int inside the
+            // exactly representable integer range; Int(1e100) traps.
+            let largestExactInteger = 9_007_199_254_740_991.0
+            if value.isFinite, value.rounded() == value,
+               abs(value) <= largestExactInteger {
+                return String(Int(value))
+            }
+            return String(value)
+        case let .bool(value): return value ? "Yes" : "No"
+        case .null: return "None"
+        case let .array(values): return values.map(\.displayText).joined(separator: ", ")
+        case let .object(value):
+            return value
+                .filter { !Self.isInternalIdentifier($0.key) && $0.value != .null }
+                .sorted { Self.displayOrder($0.key) < Self.displayOrder($1.key) }
+                .map { "\(Self.fieldLabel($0.key)): \($0.value.displayText)" }
+                .joined(separator: ", ")
+        }
+    }
+
+    private static func isInternalIdentifier(_ key: String) -> Bool {
+        key == "id" || key.hasSuffix("_id")
+    }
+
+    private static func fieldLabel(_ key: String) -> String {
+        let labels = [
+            "day_name": "Workout", "day_label": "Label", "exercise_name": "Exercise",
+            "target_sets": "Sets", "target_reps": "Reps", "target_reps_max": "Maximum reps",
+            "target_rpe": "Effort", "target_weight": "Load", "target_weight_unit": "Load unit",
+            "target_duration_s": "Duration",
+            "rest_seconds": "Rest", "is_warmup": "Warm-up", "order_index": "Order",
+            "progression": "Progression", "cues": "Cues", "exercises": "Exercises",
+        ]
+        return labels[key] ?? key.replacingOccurrences(of: "_", with: " ").capitalized
+    }
+
+    private static func displayOrder(_ key: String) -> Int {
+        let keys = ["day_name", "day_label", "exercise_name", "target_sets", "target_reps",
+                    "target_reps_max", "target_weight", "target_weight_unit", "target_duration_s", "target_rpe",
+                    "rest_seconds", "is_warmup", "progression", "cues", "exercises", "order_index"]
+        return keys.firstIndex(of: key) ?? keys.count
+    }
+}
+
+struct PlanComparisonResponse: Codable, Equatable {
+    let plan_id: String
+    let from_version: Int
+    let to_version: Int
+    let changes: [PlanVersionChange]
+    let summary: PlanChangeSummary
+}
+
+struct SessionRow: Codable, Identifiable {
+    var slot: Int? = nil
+    var partner_workout_id: String? = nil
+    var kind: String? = nil
+    var isFreestyle: Bool { kind == "freestyle" }
+    var exercise_swaps: String? = nil
+    var notes: String? = nil
+    var perceived_fatigue: Int? = nil
+    var summary: WorkoutSummary? = nil
+    var started_at: Int? = nil
+    var completed_at: Int? = nil
+    let id: String
+    let date: String
+    let status: String
+    /// Present in `/api/state` (backend `SELECT * FROM sessions`); lets a
+    /// real planned/in-progress session resolve to its template in the
+    /// agenda. Optional so older payloads still decode.
+    let workout_id: String?
+    /// Server mutation ordering for this canonical session. Optional for
+    /// rolling compatibility, but new Workers return it on state, set, finish,
+    /// and discard responses so delayed callbacks cannot outrank later state.
+    var updated_at: Int? = nil
+    /// Monotonic generation of the single (user,date) row. Discard retains the
+    /// current attempt; explicit same-day revival increments it.
+    var attempt: Int? = nil
+    /// Present on compatibility Workers. Optional so the app can still decode
+    /// the pre-attempt Worker during the required Worker-first rollout.
+    var write_protocol: String? = nil
+}
+
+struct SetLog: Codable, Identifiable {
+    let id: String
+    let session_id: String
+    let exercise_id: String
+    /// The plan slot this set was logged against, when known. Completion and
+    /// the "completed sets" chips key on THIS (the slot) rather than
+    /// exercise_id, so the same movement appearing in two slots — or sets
+    /// logged out of order — never cross-attribute completion (#3). Null for
+    /// sets logged by Claude/MCP or before this build → callers fall back to
+    /// exercise_id matching.
+    let template_exercise_id: String?
+    let set_index: Int
+    let weight: Double
+    let reps: Int
+    let rpe: Double?
+    let is_warmup: Int
+    let logged_at: Int
+    /// Server-owned mutation ordering for inserts, corrections, and deletes.
+    /// Optional only for rolling compatibility with pre-0034 Workers.
+    let updated_at: Int?
+    let duration_s: Int?
+    /// 1 = a deliberate timed hold (render as "Ns"); 0/absent = a rep set.
+    /// Backend migration 0024. Optional so sets from a pre-0024 server still
+    /// decode — callers fall back to catalog modality when nil (see
+    /// SyncModel.isTimedSet).
+    let is_timed: Int?
+    let deleted_at: Int?
+    /// Unit `weight` was logged in ("lb" | "kg"). Optional so rows from a
+    /// Worker without per-set units still decode; read it via `weightUnit`.
+    let weight_unit: String?
+
+    init(
+        id: String,
+        session_id: String,
+        exercise_id: String,
+        template_exercise_id: String?,
+        set_index: Int,
+        weight: Double,
+        reps: Int,
+        rpe: Double?,
+        is_warmup: Int,
+        logged_at: Int,
+        duration_s: Int?,
+        is_timed: Int?,
+        deleted_at: Int?,
+        updated_at: Int? = nil,
+        weight_unit: String? = nil
+    ) {
+        self.id = id
+        self.session_id = session_id
+        self.exercise_id = exercise_id
+        self.template_exercise_id = template_exercise_id
+        self.set_index = set_index
+        self.weight = weight
+        self.reps = reps
+        self.rpe = rpe
+        self.is_warmup = is_warmup
+        self.logged_at = logged_at
+        self.updated_at = updated_at
+        self.duration_s = duration_s
+        self.is_timed = is_timed
+        self.deleted_at = deleted_at
+        self.weight_unit = weight_unit
+    }
+
+    /// The set's own load unit. Rows without one predate per-set units and
+    /// were logged in lb.
+    var weightUnit: WeightUnit { WeightUnit(rawValue: weight_unit ?? "") ?? .lb }
+}
+
+extension SetLog {
+    /// One-line value for a logged set: a timed hold reads "45s"; a bodyweight
+    /// rep set reads "BW+45 × 5", "BW−30 × 8", or "BW × 8"; a weighted set
+    /// reads "85 × 5". A SetLog carries
+    /// no modality or laterality, so the caller resolves the flags from the exercise's
+    /// catalog row (see SyncModel.isTimedExercise / isBodyweightExercise) —
+    /// "BW" keys off modality == "bw", NOT weight == 0, so a weighted lift
+    /// logged at 0 load (unloaded warmup, machine/cable at zero) still reads
+    /// "0 × reps", not "BW × reps". #30 A loaded hold's suffix names the
+    /// set's own unit, and a kg rep load names it too ("24 kg × 15") so it
+    /// never reads as the same number of pounds; lb loads keep "85 × 5".
+    func valueLabel(timed: Bool, bodyweight: Bool, unilateral: Bool) -> String {
+        SetValueFormatter.value(
+            weight: weight,
+            reps: reps,
+            durationSeconds: duration_s,
+            timed: timed,
+            bodyweight: bodyweight,
+            unit: weightUnit.rawValue,
+            unilateral: unilateral,
+            repLoadUnit: weightUnit == .kg ? weightUnit.rawValue : nil)
+    }
+}
+
+/// Minimal `Identifiable` box so a bare `String` id — a workout id, a
+/// `YYYY-MM-DD` — can drive a `.sheet(item:)` presentation.
+struct IdentifiedString: Identifiable, Hashable {
+    let id: String
+}
+
+/// One formatter for persisted, pending, history, agenda, and group-feed set
+/// values. `weight` is external load for bodyweight work: positive is added
+/// load, negative is assistance, and zero is strict bodyweight.
+enum SetValueFormatter {
+    static func number(_ value: Double) -> String {
+        value.rounded() == value
+            ? String(Int(value))
+            : String(format: "%.1f", value)
+    }
+
+    static func value(
+        weight: Double,
+        reps: Int,
+        durationSeconds: Int?,
+        timed: Bool,
+        bodyweight: Bool,
+        unit: String = "lb",
+        unilateral: Bool = false,
+        repLoadUnit: String? = nil
+    ) -> String {
+        if timed {
+            // Legacy MCP timed sets stored elapsed seconds in reps before the
+            // dedicated duration field existed.
+            let seconds = durationSeconds ?? reps
+            if seconds > 0 {
+                let load = weight == 0 ? "" : weight > 0
+                    ? " · +\(number(weight)) \(unit)" : " · \(number(abs(weight))) \(unit) assist"
+                return "\(seconds)s\(load)"
+            }
+        }
+        let side = unilateral && !timed ? " per side" : ""
+        // Rep loads are unlabelled unless the caller names one (a kg set);
+        // a zero load is the same in either unit.
+        var load = ""
+        if weight != 0, let repLoadUnit { load = " \(repLoadUnit)" }
+        if bodyweight {
+            if weight > 0 { return "BW+\(number(weight))\(load) × \(reps)\(side)" }
+            if weight < 0 { return "BW−\(number(abs(weight)))\(load) × \(reps)\(side)" }
+            return "BW × \(reps)\(side)"
+        }
+        return "\(number(weight))\(load) × \(reps)\(side)"
+    }
+}
+
+struct ExerciseCatalog: Codable, Identifiable {
+    let id: String
+    let name: String
+    let primary_muscle: String
+    let modality: String
+    let unit: String
+    /// "bilateral" | "unilateral". Unilateral exercises log reps per-side;
+    /// rollups (set count, total reps, volume) double for unilateral so the
+    /// 45×8 Bulgarian split squat reads as 16 reps / 720 lb of work, not
+    /// 8 reps / 360 lb. Optional for older payloads (pre-0011 migration)
+    /// — defaults to bilateral.
+    let laterality: String?
+    /// "total" | "per_hand". per_hand two-dumbbell lifts log one dumbbell's
+    /// weight; display "X each hand". Optional (pre-0014 payloads).
+    let load_mode: String?
+    /// Demo slug — see TemplateExercise.exercise_demo_slug. Optional
+    /// (pre-0020 payloads).
+    let demo_slug: String?
+    var aliases: String? = nil
+
+}
+
+/// An externally-sourced training event (e.g. an intervals.icu planned
+/// ride) surfaced read-only in the lift calendar. FROZEN CONTRACT — wire
+/// shape mirrors the backend exactly; the app NEVER writes these.
+///
+/// Wire shape (a NEW array alongside `sessions`/`sets` in `/api/state`):
+///   { "id": "intervals:{event_id}", "source": "intervals",
+///     "external_id": "{event_id}", "date": "YYYY-MM-DD",
+///     "kind": "ride|run|swim|other", "title": "...",
+///     "description": "...", "planned_duration_sec": 5400,
+///     "training_load": 95, "intensity": 0.78,
+///     "synced_at": 1716000000000, "deleted_at": null }
+///
+/// `deleted_at` non-null ⇒ the event is tombstoned and must be hidden.
+/// All optional fields are tolerant: a thin/older payload still decodes.
+struct ExternalEvent: Codable, Identifiable, Equatable {
+    let id: String
+    let source: String
+    let external_id: String
+    let date: String                 // YYYY-MM-DD (device-local civil date)
+    let kind: String                 // ride / run / swim / other
+    let title: String?
+    let description: String?
+    let planned_duration_sec: Int?
+    let training_load: Int?          // TSS
+    let intensity: Double?           // IF
+    let synced_at: Int?
+    let deleted_at: Int?             // non-null ⇒ hidden
+
+    /// A tombstoned event must never be shown or counted in conflicts.
+    var isDeleted: Bool { deleted_at != nil }
+
+    /// "1h 30m" / "45m" from `planned_duration_sec` (nil → nil).
+    var durationLabel: String? {
+        guard let s = planned_duration_sec, s > 0 else { return nil }
+        let h = s / 3600
+        let m = (s % 3600) / 60
+        if h > 0 { return m > 0 ? "\(h)h \(m)m" : "\(h)h" }
+        return "\(m)m"
+    }
+
+    /// Display title, falling back to a humanised kind when absent.
+    var displayTitle: String {
+        if let t = title, !t.isEmpty { return t }
+        return kind.capitalized
+    }
+}
+
+/// A COMPLETED endurance activity (e.g. an intervals.icu recorded ride or
+/// run) surfaced read-only in the lift calendar as a "workout completed".
+/// FROZEN CONTRACT — wire shape mirrors the backend exactly (see
+/// migrations/0015); the app NEVER writes these.
+///
+/// Wire shape (a NEW array alongside `external_events` in `/api/state`):
+///   { "id": "intervals:activity:{id}", "source": "intervals",
+///     "external_id": "{id}", "date": "YYYY-MM-DD",
+///     "kind": "ride|run|swim|other", "name": "...",
+///     "moving_time_sec": 5400, "elapsed_time_sec": 5700,
+///     "distance_m": 42000, "average_watts": 185,
+///     "weighted_avg_watts": 205, "average_hr": 142, "max_hr": 171,
+///     "training_load": 88, "intensity": 0.74, "calories": 760,
+///     "elevation_gain_m": 430, "synced_at": ..., "deleted_at": null }
+///
+/// `deleted_at` non-null ⇒ tombstoned and must be hidden. All actuals are
+/// optional: a thin/older payload still decodes.
+struct ExternalActivity: Codable, Identifiable, Equatable {
+    var source_attribution: String? = nil
+    var attribution_version: Int? = nil
+    let id: String
+    let source: String
+    let external_id: String
+    let date: String                 // YYYY-MM-DD (device-local civil date)
+    let kind: String                 // ride / run / swim / other
+    let name: String?
+    let moving_time_sec: Int?
+    let elapsed_time_sec: Int?
+    let distance_m: Double?
+    let average_watts: Double?
+    let weighted_avg_watts: Double?  // normalized power
+    let average_hr: Double?
+    let max_hr: Int?
+    let training_load: Int?          // TSS
+    let intensity: Double?           // IF
+    let calories: Int?
+    let elevation_gain_m: Double?
+    let synced_at: Int?
+    let deleted_at: Int?             // non-null ⇒ hidden
+    /// The load Très Fort shows (migration 0060): the provider's own, else
+    /// one computed from the member's thresholds. Nil when nothing usable
+    /// exists; older Workers omit all three.
+    var effective_load: Double? = nil
+    var effective_intensity: Double? = nil
+    /// provider / power / power_summary / heart_rate / heart_rate_average /
+    /// pace, or effort: an estimate from the member's rating.
+    var load_method: String? = nil
+    /// The member's own 1 to 10 "How hard was it?" (migration 0066,
+    /// `EffortScale`). Older Workers omit it.
+    var effort: Int? = nil
+    /// Apple Watch's workout effort score, 1 to 10 (migration 0072): the
+    /// member's rating in Apple's Fitness app, else the watch's estimate.
+    /// Scores the workout when the member gave no rating here. Older
+    /// Workers omit it.
+    var provider_effort: Double? = nil
+    /// What it was: soccer, tennis, swim, … (migration 0064, `Sports`).
+    /// Older Workers omit it.
+    var sport: String? = nil
+    /// WHOOP's own 0 to 21 strain for a WHOOP workout (migration 0070).
+    /// WHOOP's figure, shown beside the load and never used as one.
+    var strain: Double? = nil
+    /// When it started, as the local wall clock written as if it were UTC
+    /// (milliseconds), so a date's activities can be put in order. Older
+    /// payloads and snapshots omit it.
+    var start_date_local_ms: Int? = nil
+
+    /// A tombstoned activity must never be shown.
+    var isDeleted: Bool { deleted_at != nil }
+
+    /// "12.3" for a WHOOP workout WHOOP scored.
+    var strainLabel: String? {
+        guard let strain, strain.isFinite, strain >= 0, strain <= 21 else { return nil }
+        return String(format: "%.1f", strain)
+    }
+
+    /// Display title: its own name, else its sport, else a humanised kind.
+    var displayTitle: String { Sports.title(name: name, sport: sport, kind: kind) }
+
+    /// SF Symbol per activity kind (calendar glyph, agenda header, and the
+    /// group feed's ride rows). Mirrors the kinds emitted by `kindOf` in the
+    /// backend's src/intervals.ts — keep them in sync.
+    static func glyph(forKind kind: String) -> String {
+        switch kind {
+        case "ride":       return "bicycle"
+        case "run":        return "figure.run"
+        case "swim":       return "figure.pool.swim"
+        case "walk":       return "figure.walk"
+        case "hike":       return "figure.hiking"
+        case "row":        return "figure.rower"
+        case "ski":        return "figure.skiing.downhill"
+        case "yoga":       return "figure.mind.and.body"
+        case "elliptical": return "figure.elliptical"
+        case "strength":   return "dumbbell.fill"
+        default:           return "figure.mixed.cardio"
+        }
+    }
+
+    var glyph: String { Sports.named(sport)?.glyph ?? ExternalActivity.glyph(forKind: kind) }
+
+    /// "1h 30m" / "45m" from `moving_time_sec` (nil → nil).
+    var durationLabel: String? {
+        guard let s = moving_time_sec, s > 0 else { return nil }
+        let h = s / 3600
+        let m = (s % 3600) / 60
+        if h > 0 { return m > 0 ? "\(h)h \(m)m" : "\(h)h" }
+        return "\(m)m"
+    }
+
+    var avgPowerLabel: String? {
+        guard let w = average_watts, w > 0 else { return nil }
+        return "\(Int(w.rounded())) W"
+    }
+
+    var normPowerLabel: String? {
+        guard let w = weighted_avg_watts, w > 0 else { return nil }
+        return "\(Int(w.rounded())) W"
+    }
+
+    /// "142 / 171 bpm" — omits max when absent; nil when no HR at all.
+    var hrLabel: String? {
+        let avg = (average_hr ?? 0) > 0 ? Int(average_hr!.rounded()) : nil
+        let mx = (max_hr ?? 0) > 0 ? max_hr! : nil
+        if let a = avg, let x = mx { return "\(a) / \(x) bpm" }
+        if let a = avg { return "\(a) bpm" }
+        if let x = mx { return "\(x) bpm" }
+        return nil
+    }
+
+    /// Elevation in feet ("1,410 ft").
+    var elevationLabel: String? {
+        guard let m = elevation_gain_m, m > 0 else { return nil }
+        let ft = Int((m * 3.28084).rounded())
+        return "\(ft) ft"
+    }
+
+    /// The training load to show: Très Fort's effective load, else the
+    /// provider's own (an older Worker sends only that). Nil, never zero,
+    /// when the load is unknown.
+    var shownLoad: Int? {
+        if let load = effective_load, load.isFinite, load >= 0 { return Int(load.rounded()) }
+        if load_method == nil, let t = training_load, t > 0 { return t }
+        return nil
+    }
+
+    /// How the load was found, in a word or two: "power", "heart rate",
+    /// "avg heart rate", "pace", "effort estimate" from the member's rating,
+    /// or "intervals.icu" for its own load.
+    var loadMethodLabel: String? {
+        guard shownLoad != nil else { return nil }
+        switch load_method {
+        case "power", "power_summary": return "power"
+        case "heart_rate": return "heart rate"
+        case "heart_rate_average": return "avg heart rate"
+        case "pace": return "pace"
+        case "effort": return effort == nil && provider_effort != nil ? "Apple Watch effort" : "effort estimate"
+        default: return source == "intervals" ? "intervals.icu" : nil
+        }
+    }
+
+    var caloriesLabel: String? {
+        guard let c = calories, c > 0 else { return nil }
+        return "\(c) cal"
+    }
+}
+
+struct StateResponse: Codable {
+    static let externalSyncCursorsCapabilityVersion = 2
+    static let planGroupsCapabilityVersion = 1
+
+    /// Wire proof that a full plan uses the group-aware representation. The
+    /// snapshot store separately records which committed plan it certifies;
+    /// this field alone never upgrades an older cached compatibility view.
+    let planGroupsVersion: Int?
+
+    /// P2 Workers send version 2 once both external cache `synced_at`
+    /// columns are true change cursors. Older Workers omit this field and
+    /// must continue receiving zero/full-reload external cursors.
+    let externalSyncCursorsVersion: Int?
+    let plan: PlanTree?
+    let plan_version: Int
+    let sessions: [SessionRow]
+    let sets: [SetLog]
+    /// NEW (FROZEN CONTRACT): external training events (read-only ride
+    /// overlay). Absent or empty in older/thin payloads → `[]`, never a
+    /// decode failure.
+    let external_events: [ExternalEvent]
+    /// NEW (FROZEN CONTRACT): completed endurance activities (read-only
+    /// "workouts completed"). Same defensive decode as external_events.
+    let external_activities: [ExternalActivity]
+    /// User-authored manual activities (Pilates / walk / yoga / "lift
+    /// elsewhere" …) logged from the app or MCP. Keyed on user_id, NOT a
+    /// group — these render on the personal calendar regardless of group
+    /// membership. `/api/state` returns the full current rows when
+    /// `log_since=0`, or updated rows and tombstones for an active cursor.
+    /// Absent/null → []; malformed non-null data rejects the response.
+    let activities: [ActivityRow]
+    /// True only when the wire payload contained a non-null `activities`
+    /// collection, or when that fact survived a local snapshot round-trip.
+    /// This prevents a legacy absent/null payload from advancing `log_since`.
+    let manualActivityCursorCapable: Bool
+    let server_time: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case plan, plan_version, sessions, sets
+        case external_events, external_activities, activities, server_time
+        case externalSyncCursorsVersion = "external_sync_cursors_version"
+        case planGroupsVersion = "plan_groups_version"
+        case manualActivityCursorCapable = "_manual_activity_cursor_capable"
+    }
+
+    init(
+        plan: PlanTree?,
+        plan_version: Int,
+        sessions: [SessionRow],
+        sets: [SetLog],
+        external_events: [ExternalEvent],
+        external_activities: [ExternalActivity],
+        activities: [ActivityRow],
+        server_time: Int,
+        manualActivityCursorCapable: Bool = true,
+        externalSyncCursorsVersion: Int? = nil,
+        planGroupsVersion: Int? = nil
+    ) {
+        self.planGroupsVersion = planGroupsVersion
+        self.externalSyncCursorsVersion = externalSyncCursorsVersion
+        self.plan = plan
+        self.plan_version = plan_version
+        self.sessions = sessions
+        self.sets = sets
+        self.external_events = external_events
+        self.external_activities = external_activities
+        self.activities = activities
+        self.manualActivityCursorCapable = manualActivityCursorCapable
+        self.server_time = server_time
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        planGroupsVersion = try c.decodeIfPresent(
+            Int.self, forKey: .planGroupsVersion)
+        externalSyncCursorsVersion = try c.decodeIfPresent(
+            Int.self, forKey: .externalSyncCursorsVersion)
+        plan = try c.decodeIfPresent(PlanTree.self, forKey: .plan)
+        plan_version = try c.decode(Int.self, forKey: .plan_version)
+        sessions = try c.decode([SessionRow].self, forKey: .sessions)
+        sets = try c.decode([SetLog].self, forKey: .sets)
+        if (externalSyncCursorsVersion ?? 0)
+            >= Self.externalSyncCursorsCapabilityVersion
+        {
+            // A cursor-capable response must contain valid, non-null arrays.
+            // Otherwise accepting [] could commit server_time past rows the
+            // client failed to decode, or erase a full-reload baseline.
+            external_events = try c.decode(
+                [ExternalEvent].self, forKey: .external_events)
+            external_activities = try c.decode(
+                [ExternalActivity].self, forKey: .external_activities)
+        } else {
+            // Legacy/thin responses retain their historical defensive shape.
+            external_events =
+                (try? c.decodeIfPresent(
+                    [ExternalEvent].self, forKey: .external_events))
+                .flatMap { $0 } ?? []
+            external_activities =
+                (try? c.decodeIfPresent(
+                    [ExternalActivity].self,
+                    forKey: .external_activities))
+                .flatMap { $0 } ?? []
+        }
+        // Absence/null is backward-compatible, but malformed present data must
+        // fail the response. Treating it as [] could commit server_time and
+        // advance log_since past manual-activity rows the client never decoded.
+        let activitiesWasNonNull: Bool
+        if c.contains(.activities) {
+            activitiesWasNonNull = !(try c.decodeNil(forKey: .activities))
+        } else {
+            activitiesWasNonNull = false
+        }
+        activities = try c.decodeIfPresent(
+            [ActivityRow].self, forKey: .activities) ?? []
+        manualActivityCursorCapable = try c.decodeIfPresent(
+            Bool.self, forKey: .manualActivityCursorCapable)
+            ?? activitiesWasNonNull
+        server_time = try c.decode(Int.self, forKey: .server_time)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(planGroupsVersion, forKey: .planGroupsVersion)
+        try c.encodeIfPresent(
+            externalSyncCursorsVersion,
+            forKey: .externalSyncCursorsVersion)
+        try c.encodeIfPresent(plan, forKey: .plan)
+        try c.encode(plan_version, forKey: .plan_version)
+        try c.encode(sessions, forKey: .sessions)
+        try c.encode(sets, forKey: .sets)
+        try c.encode(external_events, forKey: .external_events)
+        try c.encode(external_activities, forKey: .external_activities)
+        try c.encode(activities, forKey: .activities)
+        try c.encode(
+            manualActivityCursorCapable,
+            forKey: .manualActivityCursorCapable)
+        try c.encode(server_time, forKey: .server_time)
+    }
+}
+
+// New snapshots use workout names. Read old persisted snapshots without
+// discarding their plan, session identity or attempt tokens.
+extension PlanTree {
+    private enum CodingKeys: String, CodingKey { case id, name, version, workouts, days, meta }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        version = try c.decode(Int.self, forKey: .version)
+        meta = try c.decodeIfPresent(String.self, forKey: .meta)
+        if c.contains(.workouts) {
+            workouts = try c.decode([Workout].self, forKey: .workouts)
+            if c.contains(.days), try c.decode([Workout].self, forKey: .days) != workouts {
+                throw DecodingError.dataCorruptedError(forKey: .workouts, in: c, debugDescription: "Conflicting workout collections")
+            }
+        } else {
+            workouts = try c.decode([Workout].self, forKey: .days)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(version, forKey: .version)
+        try c.encode(workouts, forKey: .workouts)
+        try c.encodeIfPresent(meta, forKey: .meta)
+    }
+}
+
+extension SessionRow {
+    private enum CodingKeys: String, CodingKey {
+        case slot, kind, partner_workout_id
+        case notes, perceived_fatigue, exercise_swaps, started_at, completed_at
+        case id, date, status, workout_id, day_template_id, summary, updated_at, attempt, write_protocol
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        slot = try c.decodeIfPresent(Int.self, forKey: .slot)
+        if let slot, slot < 0 { throw DecodingError.dataCorruptedError(forKey: .slot, in: c, debugDescription: "Invalid session slot") }
+        kind = try c.decodeIfPresent(String.self, forKey: .kind)
+        partner_workout_id = try c.decodeIfPresent(String.self, forKey: .partner_workout_id)
+        exercise_swaps = try c.decodeIfPresent(String.self, forKey: .exercise_swaps)
+        notes = try c.decodeIfPresent(String.self, forKey: .notes)
+        perceived_fatigue = try c.decodeIfPresent(Int.self, forKey: .perceived_fatigue)
+        id = try c.decode(String.self, forKey: .id)
+        date = try c.decode(String.self, forKey: .date)
+        status = try c.decode(String.self, forKey: .status)
+        summary = try c.decodeIfPresent(WorkoutSummary.self, forKey: .summary)
+        started_at = try c.decodeIfPresent(Int.self, forKey: .started_at)
+        completed_at = try c.decodeIfPresent(Int.self, forKey: .completed_at)
+        updated_at = try c.decodeIfPresent(Int.self, forKey: .updated_at)
+        attempt = try c.decodeIfPresent(Int.self, forKey: .attempt)
+        write_protocol = try c.decodeIfPresent(String.self, forKey: .write_protocol)
+        if c.contains(.workout_id) {
+            workout_id = try c.decodeIfPresent(String.self, forKey: .workout_id)
+            if c.contains(.day_template_id), try c.decodeIfPresent(String.self, forKey: .day_template_id) != workout_id {
+                throw DecodingError.dataCorruptedError(forKey: .workout_id, in: c, debugDescription: "Conflicting workout identity")
+            }
+        } else {
+            workout_id = try c.decodeIfPresent(String.self, forKey: .day_template_id)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(slot, forKey: .slot)
+        try c.encodeIfPresent(kind, forKey: .kind)
+        try c.encodeIfPresent(partner_workout_id, forKey: .partner_workout_id)
+        try c.encodeIfPresent(exercise_swaps, forKey: .exercise_swaps)
+        try c.encodeIfPresent(notes, forKey: .notes)
+        try c.encodeIfPresent(perceived_fatigue, forKey: .perceived_fatigue)
+        try c.encode(id, forKey: .id)
+        try c.encode(date, forKey: .date)
+        try c.encode(status, forKey: .status)
+        try c.encodeIfPresent(workout_id, forKey: .workout_id)
+        try c.encodeIfPresent(summary, forKey: .summary)
+        try c.encodeIfPresent(started_at, forKey: .started_at)
+        try c.encodeIfPresent(completed_at, forKey: .completed_at)
+        try c.encodeIfPresent(updated_at, forKey: .updated_at)
+        try c.encodeIfPresent(attempt, forKey: .attempt)
+        try c.encodeIfPresent(write_protocol, forKey: .write_protocol)
+    }
+}
+
+extension WorkoutFeedback {
+    func matches(_ session: SessionRow) -> Bool {
+        notes == session.notes && perceivedFatigue == session.perceived_fatigue
+    }
+}

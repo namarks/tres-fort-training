@@ -1,0 +1,268 @@
+import Foundation
+
+/// A planned run's steps, as the coach wrote them into the plan
+/// (`template_exercises.run_steps`; the server's src/runSteps.ts validates
+/// the format). Paces are seconds per kilometer and distances are meters.
+struct RunPlan: Equatable {
+    /// The catalog's outdoor run, the only slot that carries steps.
+    static let exerciseID = "ex_outdoor_run"
+
+    enum Kind: String, Equatable {
+        case warmup, work, recovery, cooldown
+    }
+
+    enum Target: Equatable {
+        case pace(fastestSecondsPerKm: Int, slowestSecondsPerKm: Int)
+        case heartRate(minBPM: Int, maxBPM: Int)
+    }
+
+    struct Step: Equatable {
+        var kind: Kind
+        var durationSeconds: Int?
+        var distanceMeters: Double?
+        var target: Target?
+    }
+
+    enum Item: Equatable {
+        case step(Step)
+        case repeated(times: Int, steps: [Step])
+    }
+
+    var items: [Item]
+
+    init(items: [Item]) { self.items = items }
+
+    /// Nil when the text isn't a step list this app can read, such as a
+    /// format a newer server added. The slot then shows as a plain run.
+    init?(json: String) {
+        guard let data = json.data(using: .utf8),
+              let array = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+              !array.isEmpty else { return nil }
+        var items: [Item] = []
+        for object in array {
+            if let times = object["repeat"] as? Int {
+                guard let raw = object["steps"] as? [[String: Any]], !raw.isEmpty else { return nil }
+                let steps = raw.compactMap(Self.step)
+                guard steps.count == raw.count else { return nil }
+                items.append(.repeated(times: times, steps: steps))
+            } else {
+                guard let step = Self.step(object) else { return nil }
+                items.append(.step(step))
+            }
+        }
+        self.items = items
+    }
+
+    private static func step(_ object: [String: Any]) -> Step? {
+        guard let kind = (object["kind"] as? String).flatMap(Kind.init(rawValue:)) else { return nil }
+        let duration = object["duration_s"] as? Int
+        let distance = (object["distance_m"] as? NSNumber)?.doubleValue
+        guard (duration == nil) != (distance == nil) else { return nil }
+        var target: Target?
+        if let raw = object["target"] as? [String: Any] {
+            switch raw["type"] as? String {
+            case "pace":
+                guard let fastest = raw["fastest_s_per_km"] as? Int,
+                      let slowest = raw["slowest_s_per_km"] as? Int else { return nil }
+                target = .pace(fastestSecondsPerKm: fastest, slowestSecondsPerKm: slowest)
+            case "heart_rate":
+                guard let low = raw["min_bpm"] as? Int, let high = raw["max_bpm"] as? Int else { return nil }
+                target = .heartRate(minBPM: low, maxBPM: high)
+            default:
+                return nil
+            }
+        }
+        return Step(kind: kind, durationSeconds: duration, distanceMeters: distance, target: target)
+    }
+}
+
+/// How planned runs read in the app: paces and longer distances in the
+/// recorder's miles or kilometers, track distances in meters.
+enum RunPlanFormat {
+    /// One line per step; a repeat group is a header line followed by its
+    /// indented steps.
+    struct Line: Equatable, Identifiable {
+        var id: Int
+        var text: String
+        var indented: Bool
+    }
+
+    static func lines(_ plan: RunPlan, unit: RunDistanceUnit) -> [Line] {
+        var lines: [Line] = []
+        for item in plan.items {
+            switch item {
+            case .step(let step):
+                lines.append(Line(id: lines.count, text: text(step, unit: unit), indented: false))
+            case .repeated(let times, let steps):
+                lines.append(Line(id: lines.count, text: "\(times) ×", indented: false))
+                for step in steps {
+                    lines.append(Line(id: lines.count, text: text(step, unit: unit), indented: true))
+                }
+            }
+        }
+        return lines
+    }
+
+    /// The whole plan on one line, for places with room for a single label.
+    static func summary(_ plan: RunPlan, unit: RunDistanceUnit) -> String {
+        plan.items.map { item in
+            switch item {
+            case .step(let step):
+                return text(step, unit: unit)
+            case .repeated(let times, let steps):
+                let inner = steps.map { text($0, unit: unit) }.joined(separator: ", ")
+                return steps.count == 1 ? "\(times) × \(inner)" : "\(times) × (\(inner))"
+            }
+        }
+        .joined(separator: " · ")
+    }
+
+    /// What the step lasts: "0.5 mi", "800 m", "10 min".
+    static func amount(_ step: RunPlan.Step, unit: RunDistanceUnit) -> String {
+        step.distanceMeters.map { distance($0, unit: unit) } ?? duration(step.durationSeconds ?? 0)
+    }
+
+    /// The step type as a structured workout labels it.
+    static func kindTitle(_ kind: RunPlan.Kind) -> String {
+        switch kind {
+        case .warmup: return "Warm up"
+        case .work: return "Run"
+        case .recovery: return "Recover"
+        case .cooldown: return "Cool down"
+        }
+    }
+
+    /// "Heart rate 130–145 bpm", "Pace 8:03–8:51 /mi".
+    static func targetTitle(_ target: RunPlan.Target, unit: RunDistanceUnit) -> String {
+        switch target {
+        case .pace: return "Pace " + self.target(target, unit: unit)
+        case .heartRate: return "Heart rate " + self.target(target, unit: unit)
+        }
+    }
+
+    static func repeatTitle(_ times: Int) -> String { "REPEAT \(times)×" }
+
+    /// The whole run once repeats are counted: "3.5 mi", "20 min + 2 mi",
+    /// or nil for an empty plan.
+    static func total(_ plan: RunPlan, unit: RunDistanceUnit) -> String? {
+        var meters = 0.0, seconds = 0
+        for expanded in plan.expandedSteps {
+            if let distance = expanded.step.distanceMeters { meters += distance }
+            else { seconds += expanded.step.durationSeconds ?? 0 }
+        }
+        var parts: [String] = []
+        if seconds > 0 { parts.append(duration(seconds)) }
+        if meters > 0 { parts.append(distance(meters, unit: unit)) }
+        return parts.isEmpty ? nil : parts.joined(separator: " + ")
+    }
+
+    /// "10 min warm-up", "800 m at 4:05–4:15 /km", "40 min at 130–145 bpm".
+    static func text(_ step: RunPlan.Step, unit: RunDistanceUnit) -> String {
+        let amount = Self.amount(step, unit: unit)
+        let kind: String
+        switch step.kind {
+        case .warmup: kind = " warm-up"
+        case .work: kind = ""
+        case .recovery: kind = " recovery"
+        case .cooldown: kind = " cool-down"
+        }
+        return amount + kind + (step.target.map { " at " + target($0, unit: unit) } ?? "")
+    }
+
+    static func target(_ target: RunPlan.Target, unit: RunDistanceUnit) -> String {
+        switch target {
+        case .pace(let fastest, let slowest):
+            let scale = unit.meters / 1_000
+            let low = RunFormat.pace(Double(fastest) * scale)
+            let high = RunFormat.pace(Double(slowest) * scale)
+            return (low == high ? low : "\(low)–\(high)") + " /\(unit.abbreviation)"
+        case .heartRate(let low, let high):
+            return (low == high ? "\(low)" : "\(low)–\(high)") + " bpm"
+        }
+    }
+
+    /// Under a kilometer reads in meters, as track intervals are planned,
+    /// except a short distance planned in miles, such as a half-mile warm-up.
+    static func distance(_ meters: Double, unit: RunDistanceUnit) -> String {
+        if readsInMeters(meters, unit: unit) { return "\(Int(meters.rounded())) m" }
+        return "\(number(meters / unit.meters)) \(unit.abbreviation)"
+    }
+
+    /// True under a kilometer, unless the run is in miles and the distance is
+    /// within a meter of a tenth or a quarter of a mile (0.5 mi is 804.7 m;
+    /// track distances such as 400 m and 800 m are not).
+    static func readsInMeters(_ meters: Double, unit: RunDistanceUnit) -> Bool {
+        guard meters < 1_000 else { return false }
+        guard unit == .miles, meters >= 150 else { return true }
+        let miles = meters / unit.meters
+        for step in [0.1, 0.25] {
+            let nearest = (miles / step).rounded() * step
+            if abs(nearest * unit.meters - meters) <= 1 { return false }
+        }
+        return true
+    }
+
+    /// "45 s", "10 min", "2 min 30 s", "1 h 15 min".
+    static func duration(_ seconds: Int) -> String {
+        let h = seconds / 3600, m = (seconds % 3600) / 60, s = seconds % 60
+        var parts: [String] = []
+        if h > 0 { parts.append("\(h) h") }
+        if m > 0 { parts.append("\(m) min") }
+        if s > 0 || parts.isEmpty { parts.append("\(s) s") }
+        return parts.joined(separator: " ")
+    }
+
+    /// Up to two decimals without trailing zeros: "5", "5.5", "3.11".
+    private static func number(_ value: Double) -> String {
+        let rounded = (value * 100).rounded() / 100
+        var text = String(format: "%.2f", rounded)
+        while text.hasSuffix("0") { text.removeLast() }
+        if text.hasSuffix(".") { text.removeLast() }
+        return text
+    }
+}
+
+extension RunDistanceUnit {
+    /// The recorder's miles-or-kilometers choice, shared with plan views.
+    static let preferenceKey = "runRecorder.distanceUnit"
+
+    static func preferred(_ defaults: UserDefaults = .standard) -> RunDistanceUnit {
+        defaults.string(forKey: preferenceKey).flatMap(RunDistanceUnit.init(rawValue:)) ?? .miles
+    }
+}
+
+/// A plan slot the member starts in the run recorder.
+struct PlannedRun: Equatable, Identifiable {
+    var sessionSlot: Int? = nil
+    /// The slot's id.
+    let id: String
+    /// The workout it belongs to, such as "Track Tuesday".
+    let workoutName: String
+    /// Nil for a run the coach planned without steps.
+    let plan: RunPlan?
+    /// The steps as the plan stores them; the recorder keeps this text in
+    /// the run's checkpoint.
+    var runSteps: String? = nil
+    let durationSeconds: Int?
+}
+
+extension TemplateExercise {
+    /// An outdoor run slot, with or without planned steps.
+    var isOutdoorRun: Bool { exercise_id == RunPlan.exerciseID }
+
+    var runPlan: RunPlan? { run_steps.flatMap(RunPlan.init(json:)) }
+
+    /// "Planned run · 10 min warm-up · 4 × (800 m at …)", or "Run · 30 min"
+    /// without steps.
+    func runPrescriptionLabel(in unit: RunDistanceUnit) -> String {
+        if let plan = runPlan { return RunPlanFormat.summary(plan, unit: unit) }
+        if let seconds = target_duration_s { return "Run · " + RunPlanFormat.duration(seconds) }
+        return "Run at your own pace"
+    }
+
+    func plannedRun(in workoutName: String) -> PlannedRun {
+        let plan = runPlan
+        return PlannedRun(id: id, workoutName: workoutName, plan: plan,
+                          runSteps: plan == nil ? nil : run_steps, durationSeconds: target_duration_s)
+    }
+}

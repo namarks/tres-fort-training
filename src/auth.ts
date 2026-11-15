@@ -1,0 +1,219 @@
+// Two credentials, one user_id. iOS -> Sign in with Apple -> app JWT.
+// MCP (milestone b) -> OAuth or static bearer. This file owns the app-JWT
+// side + the iOS auth middleware.
+import { sign, verify } from 'hono/jwt';
+import { createMiddleware } from 'hono/factory';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
+import { APP_REVIEW_SUB } from './appReview';
+import { credentialDigest, randomSecret } from './credentials';
+import type { AppClient, HonoEnv } from './types';
+import {
+  accountDeletionContinuationMatches,
+  setUserTimezoneIfChanged,
+  isAppSessionRevoked,
+  recordAppUse,
+} from './db';
+
+const APPLE_ISS = 'https://appleid.apple.com';
+export const APP_JWT_TTL_SECONDS = 60 * 60 * 24 * 60; // 60 days
+export const APP_JWT_MAX_SESSION_SECONDS = 60 * 60 * 24 * 180; // 180 days
+
+let appleJwks: ReturnType<typeof createRemoteJWKSet> | null = null;
+function jwks() {
+  if (!appleJwks) appleJwks = createRemoteJWKSet(new URL(`${APPLE_ISS}/auth/keys`));
+  return appleJwks;
+}
+
+/**
+ * Verify Apple's identity token; return the stable subject + email, plus the
+ * audience it was issued to and its nonce (the web flow binds one).
+ */
+export async function verifyAppleToken(
+  identityToken: string,
+  audience: string | string[],
+): Promise<{ sub: string; email: string | null; audience: string | null; nonce: string | null }> {
+  const { payload } = await jwtVerify(identityToken, jwks(), {
+    issuer: APPLE_ISS,
+    audience,
+  });
+  if (!payload.sub) throw new Error('apple_token_missing_sub');
+  const aud = typeof payload.aud === 'string' ? payload.aud : null;
+  const nonce = typeof payload.nonce === 'string' ? payload.nonce : null;
+  return { sub: payload.sub, email: (payload.email as string) ?? null, audience: aud, nonce };
+}
+
+export async function issueAppJwt(
+  userId: string,
+  secret: string,
+  options: {
+    nowSeconds?: number;
+    ttlSeconds?: number;
+    authTimeSeconds?: number;
+    appReview?: boolean;
+    /** Marks a web sign-in so its writes are attributed to the web. */
+    client?: AppClient;
+    sessionId?: string;
+  } = {},
+): Promise<string> {
+  const nowSec = options.nowSeconds ?? Math.floor(Date.now() / 1000);
+  const ttlSeconds = options.ttlSeconds ?? APP_JWT_TTL_SECONDS;
+  const authTimeSec = options.authTimeSeconds ?? nowSec;
+  return sign(
+    {
+      sub: userId,
+      sid: options.sessionId ?? randomSecret(),
+      ...(options.appReview ? { app_review: true } : {}),
+      ...(options.client === 'web' ? { client: 'web' } : {}),
+      iat: nowSec,
+      auth_time: authTimeSec,
+      exp: Math.min(
+        nowSec + ttlSeconds,
+        authTimeSec + APP_JWT_MAX_SESSION_SECONDS,
+      ),
+    },
+    secret,
+    'HS256',
+  );
+}
+
+type AppJwtPayload = Awaited<ReturnType<typeof verify>>;
+
+function appJwtPrincipal(
+  payload: AppJwtPayload,
+): { userId: string; authTime: number; client: AppClient } | null {
+  if (!payload.sub || typeof payload.sub !== 'string') return null;
+  // Tokens issued before auth_time shipped fall back to their original iat.
+  // Renewal then stamps that value into auth_time, so a legacy bearer cannot
+  // reset the absolute session lifetime merely by crossing the rollout.
+  const authTime =
+    typeof payload.auth_time === 'number'
+      ? payload.auth_time
+      : typeof payload.iat === 'number'
+        ? payload.iat
+        : null;
+  if (authTime === null || !Number.isFinite(authTime)) return null;
+  // Only a web sign-in carries a client claim; every other token is the app's.
+  return { userId: payload.sub, authTime, client: payload.client === 'web' ? 'web' : 'ios' };
+}
+
+/** Bearer-app-JWT middleware for /api/*. Sets `userId` on the context. */
+export const requireAppJwt = createMiddleware<HonoEnv>(async (c, next) => {
+  const header = c.req.header('Authorization') ?? '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : '';
+  if (!token) return c.json({ error: 'missing_bearer' }, 401);
+  const isDeletionRequest =
+    c.req.method === 'DELETE' && new URL(c.req.url).pathname === '/api/me';
+  const isLogoutRequest =
+    c.req.method === 'POST' && new URL(c.req.url).pathname === '/auth/logout';
+  let payload: AppJwtPayload;
+  try {
+    payload = await verify(token, c.env.APP_JWT_SECRET, 'HS256');
+  } catch {
+    // A deletion can commit while its success response is lost. The account
+    // and renewal path are then gone, so a later receipt retry must be able to
+    // finish local cleanup even if the original app JWT has expired. Accept an
+    // expired bearer only when its signature/iat/nbf remain valid, this is the
+    // exact DELETE endpoint, and the high-entropy key matches that subject's
+    // already-claimed intent or committed receipt. It cannot authorize an
+    // initial deletion or any other feature request.
+    // An expired original may have a still-valid renewed successor. Logout
+    // may authenticate that original solely to revoke its session family.
+    if (!isDeletionRequest && !isLogoutRequest) return c.json({ error: 'invalid_token' }, 401);
+    try {
+      payload = await verify(token, c.env.APP_JWT_SECRET, {
+        alg: 'HS256',
+        exp: false,
+      });
+      const principal = appJwtPrincipal(payload);
+      const exp = payload.exp;
+      const key = c.req.header('X-Account-Deletion-Key') ?? '';
+      if (
+        !principal ||
+        typeof exp !== 'number' ||
+        !Number.isFinite(exp) ||
+        exp > Math.floor(Date.now() / 1000) ||
+        (!isLogoutRequest && !(await accountDeletionContinuationMatches(
+          c.env.DB,
+          principal.userId,
+          key,
+        )))
+      ) {
+        return c.json({ error: 'invalid_token' }, 401);
+      }
+    } catch {
+      return c.json({ error: 'invalid_token' }, 401);
+    }
+  }
+  const principal = appJwtPrincipal(payload);
+  if (!principal) return c.json({ error: 'invalid_token' }, 401);
+  // Browser cookies can change in another tab while a reviewed draft stays
+  // open. Bind a client-owned operation/read to the account that reviewed it,
+  // rather than silently applying it to the cookie's new principal.
+  const expectedAccount = c.req.header('X-TresFort-Account');
+  if (expectedAccount !== undefined && expectedAccount !== principal.userId) {
+    return c.json({ error: 'account_changed' }, 409);
+  }
+  c.set('userId', principal.userId);
+  c.set('appAuthTime', principal.authTime);
+  c.set('appClient', principal.client);
+  // Old tokens and their renewals share a deterministic family identifier.
+  // It is derived only from signed claims, never a caller-supplied identifier.
+  if (payload.sid !== undefined && (typeof payload.sid !== 'string' || !/^(?:[A-Za-z0-9_-]{43}|[0-9a-f]{64})$/.test(payload.sid))) {
+    return c.json({ error: 'invalid_token' }, 401);
+  }
+  const sessionId = typeof payload.sid === 'string' ? payload.sid :
+    await credentialDigest(JSON.stringify(['legacy-session', principal.userId, principal.authTime, principal.client]));
+  c.set('appSessionId', sessionId);
+  c.set('appSessionExpiresAt', Math.max(Number(payload.exp) || 0,
+    principal.authTime + APP_JWT_MAX_SESSION_SECONDS) * 1000);
+  if (await isAppSessionRevoked(c.env.DB, principal.userId, sessionId) &&
+      !(isDeletionRequest && await accountDeletionContinuationMatches(c.env.DB, principal.userId,
+        c.req.header('X-Account-Deletion-Key') ?? ''))) {
+    return c.json({ error: 'invalid_token' }, 401);
+  }
+  // App JWTs are stateless, so deleting an account cannot revoke one bearer
+  // from a token table. Requiring the subject row on every authenticated call
+  // makes all outstanding app tokens unusable immediately after DELETE /api/me
+  // commits (and prevents rolling renewal from resurrecting the session).
+  const livePrincipal = await c.env.DB
+    .prepare(
+      `SELECT apple_sub FROM users
+        WHERE id = ?1
+          AND NOT EXISTS (
+                SELECT 1 FROM account_deletion_intents
+                 WHERE user_id = ?1
+              )
+          AND NOT EXISTS (
+                SELECT 1 FROM account_deletion_receipts
+                 WHERE user_id = ?1
+              )`,
+    )
+    .bind(c.get('userId'))
+    .first<{ apple_sub: string }>();
+  if (!livePrincipal) {
+    // Once deletion is claimed, a signed JWT is accepted only for an exact
+    // continuation of that same DELETE. The service verifies the durable
+    // high-entropy key; every other endpoint remains revoked immediately.
+    if (!isDeletionRequest) return c.json({ error: 'invalid_token' }, 401);
+    await next();
+    return;
+  }
+  // The retired sample login must not remain usable through old beta tokens
+  // or rolling renewal. Keep its reserved identity excluded from the owner.
+  c.set('appReview', false);
+  if (livePrincipal.apple_sub === APP_REVIEW_SUB || payload.app_review === true) {
+    return c.json({ error: 'invalid_token' }, 401);
+  }
+  // The device sends its IANA timezone on EVERY authenticated request, so
+  // "today" on the MCP side tracks the user across zones even when they only
+  // do non-/state actions (logging sets) after travelling. Best-effort:
+  // setUserTimezoneIfChanged only writes on change and ignores invalid values.
+  const tz = c.req.header('X-Device-TZ');
+  if (tz) await setUserTimezoneIfChanged(c.env.DB, c.get('userId'), tz);
+  // Which client and app build the member uses, for the owner's Members page
+  // (migration 0078). Throttled per isolate and best-effort: it never fails
+  // the request. The build comes from the User-Agent every iOS build sends.
+  await recordAppUse(c.env.DB, c.get('userId'), principal.client === 'web' ? 'web' : 'ios',
+    c.req.header('User-Agent'));
+  await next();
+});

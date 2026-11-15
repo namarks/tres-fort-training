@@ -1,0 +1,15 @@
+{
+  "name": "C \u00b7 Bone with a navy frame",
+  "light": {
+    "bgTop": "#fdfbf6",
+    "bg": "#f7f2e9",
+    "surface": "#fdfbf6",
+    "surface2": "#ebe3d9",
+    "text": "#122237",
+    "muted": "#645850",
+    "dim": "#a39a90",
+    "accent": "#182e4b"
+  },
+  "dark": {},
+  "css": "body .status, body .nav-inline { background: var(--fort-navy); color: #f6f1e8; } body.dark .status, body.dark .nav-inline { background: #050c17; } body .nav-inline .back, body .nav-inline .glass-btn { color: #f6f1e8; } body .nav-inline .glass-btn { background: rgb(255 255 255 / .1); box-shadow: none; } body .tabbar { background: var(--fort-navy); border-color: var(--fort-idle); } body.dark .tabbar { background: #050c17; } body .tabbar .tab { color: var(--fort-label); } body .tabbar .tab.on { color: var(--fort-orange-text); background: rgb(255 255 255 / .08); } .scroll { padding-top: 14px; }"
+}

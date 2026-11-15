@@ -1,0 +1,40 @@
+{
+  "name": "tres-fort",
+  "version": "0.2.0",
+  "description": "Plan, review and adapt your Très Fort training in ChatGPT and Codex.",
+  "author": {
+    "name": "Nicholas Marks",
+    "email": "nick@tresfort.app",
+    "url": "https://tresfort.app"
+  },
+  "homepage": "https://tresfort.app",
+  "repository": "https://github.com/namarks/tres-fort",
+  "keywords": [
+    "fitness",
+    "training",
+    "workouts"
+  ],
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Très Fort",
+    "shortDescription": "Plan training from your log",
+    "longDescription": "Très Fort keeps lifting, runs, rides, swims and other sports on one training plan. Connect your Très Fort account to review your schedule, workout history and imported activities, then adapt workouts, schedules and targets when you ask. Every change is saved to your plan history and can be put back. You approve the connection in Très Fort and can disconnect it from Profile at any time. Très Fort has no built-in AI and never asks for an AI key.",
+    "developerName": "Nicholas Marks",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://tresfort.app",
+    "privacyPolicyURL": "https://tresfort.app/privacy",
+    "termsOfServiceURL": "https://tresfort.app/terms",
+    "defaultPrompt": [
+      "Review my recent training and suggest next week’s workouts.",
+      "What is planned for today, and how did my last workout go?",
+      "Help me adapt my training around an upcoming trip."
+    ],
+    "brandColor": "#23436C",
+    "composerIcon": "./assets/icon.png",
+    "logo": "./assets/icon.png"
+  }
+}

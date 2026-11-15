@@ -1,0 +1,235 @@
+{
+  "_comment": "Shared contract for the block-of-weeks rule (docs/plans/progressive-plans/spec.md): test/program.test.ts and ProgramWeeksTests.swift both run every case.",
+  "schedule": {
+    "week": {
+      "mon": "kb_a",
+      "tue": "intervals",
+      "wed": null,
+      "thu": "tempo",
+      "fri": "kb_b",
+      "sat": null,
+      "sun": "easy_run"
+    },
+    "extras": {
+      "wed": [
+        "stretch"
+      ]
+    }
+  },
+  "programs": {
+    "block": {
+      "id": "block",
+      "name": "Marathon build",
+      "start": "2026-11-09",
+      "repeat": false,
+      "weeks": [
+        {
+          "label": "Base",
+          "week": {
+            "mon": "kb_a",
+            "tue": "intervals",
+            "wed": null,
+            "thu": "tempo",
+            "fri": "kb_b",
+            "sat": null,
+            "sun": "long_8"
+          }
+        },
+        {
+          "label": "Build",
+          "week": {
+            "mon": "kb_a",
+            "tue": "intervals",
+            "wed": null,
+            "thu": "tempo",
+            "fri": "kb_b",
+            "sat": null,
+            "sun": "long_10"
+          },
+          "extras": {
+            "mon": [
+              "stretch"
+            ]
+          }
+        },
+        {
+          "label": "Easy week",
+          "week": {
+            "mon": "kb_a",
+            "tue": null,
+            "wed": null,
+            "thu": "tempo",
+            "fri": "kb_b",
+            "sat": null,
+            "sun": "long_6"
+          }
+        }
+      ]
+    },
+    "cycle": {
+      "id": "cycle",
+      "start": "2026-11-09",
+      "repeat": true,
+      "weeks": [
+        {
+          "label": "A",
+          "week": {
+            "mon": "kb_a",
+            "tue": null,
+            "wed": null,
+            "thu": null,
+            "fri": null,
+            "sat": null,
+            "sun": null
+          }
+        },
+        {
+          "label": "B",
+          "week": {
+            "mon": "kb_b",
+            "tue": null,
+            "wed": null,
+            "thu": null,
+            "fri": null,
+            "sat": null,
+            "sun": null
+          }
+        }
+      ]
+    }
+  },
+  "cases": [
+    {
+      "name": "no block uses the repeating week",
+      "program": null,
+      "date": "2026-11-15",
+      "expected_week": null,
+      "expected_workout": "easy_run",
+      "expected_extras": []
+    },
+    {
+      "name": "before the start uses the repeating week",
+      "program": "block",
+      "date": "2026-11-08",
+      "expected_week": null,
+      "expected_workout": "easy_run",
+      "expected_extras": []
+    },
+    {
+      "name": "first day of week 1",
+      "program": "block",
+      "date": "2026-11-09",
+      "expected_week": 0,
+      "expected_workout": "kb_a",
+      "expected_extras": []
+    },
+    {
+      "name": "last day of week 1",
+      "program": "block",
+      "date": "2026-11-15",
+      "expected_week": 0,
+      "expected_workout": "long_8",
+      "expected_extras": []
+    },
+    {
+      "name": "first day of week 2",
+      "program": "block",
+      "date": "2026-11-16",
+      "expected_week": 1,
+      "expected_workout": "kb_a",
+      "expected_extras": [
+        "stretch"
+      ]
+    },
+    {
+      "name": "week 2 sunday",
+      "program": "block",
+      "date": "2026-11-22",
+      "expected_week": 1,
+      "expected_workout": "long_10",
+      "expected_extras": []
+    },
+    {
+      "name": "week 3 drops tuesday",
+      "program": "block",
+      "date": "2026-11-24",
+      "expected_week": 2,
+      "expected_workout": null,
+      "expected_extras": []
+    },
+    {
+      "name": "week 3 wednesday has no extras",
+      "program": "block",
+      "date": "2026-11-25",
+      "expected_week": 2,
+      "expected_workout": null,
+      "expected_extras": []
+    },
+    {
+      "name": "after a one-off block the repeating week returns",
+      "program": "block",
+      "date": "2026-11-30",
+      "expected_week": null,
+      "expected_workout": "kb_a",
+      "expected_extras": []
+    },
+    {
+      "name": "after the block the routine extras return",
+      "program": "block",
+      "date": "2026-12-02",
+      "expected_week": null,
+      "expected_workout": null,
+      "expected_extras": [
+        "stretch"
+      ]
+    },
+    {
+      "name": "cycle week A",
+      "program": "cycle",
+      "date": "2026-11-09",
+      "expected_week": 0,
+      "expected_workout": "kb_a",
+      "expected_extras": []
+    },
+    {
+      "name": "cycle week B",
+      "program": "cycle",
+      "date": "2026-11-16",
+      "expected_week": 1,
+      "expected_workout": "kb_b",
+      "expected_extras": []
+    },
+    {
+      "name": "cycle starts over",
+      "program": "cycle",
+      "date": "2026-11-23",
+      "expected_week": 0,
+      "expected_workout": "kb_a",
+      "expected_extras": []
+    },
+    {
+      "name": "cycle far ahead across a year",
+      "program": "cycle",
+      "date": "2027-11-08",
+      "expected_week": 0,
+      "expected_workout": "kb_a",
+      "expected_extras": []
+    },
+    {
+      "name": "cycle across a leap day",
+      "program": "cycle",
+      "date": "2028-03-06",
+      "expected_week": 1,
+      "expected_workout": "kb_b",
+      "expected_extras": []
+    },
+    {
+      "name": "cycle rest day within a week",
+      "program": "cycle",
+      "date": "2026-11-18",
+      "expected_week": 1,
+      "expected_workout": null,
+      "expected_extras": []
+    }
+  ]
+}

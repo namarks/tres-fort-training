@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>CFBundleURLName</key>
+            <string>com.nmarkspdx.tresfort.setup</string>
+            <key>CFBundleURLSchemes</key>
+            <array><string>tresfort</string></array>
+        </dict>
+    </array>
+    <key>NSCameraUsageDescription</key>
+    <string>$(CAMERA_USAGE_DESCRIPTION)</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Connect your iPhone and iPad Station, and an invited partner's iPhone, to share workout targets, weights, and progress.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_tresfort-stn._tcp</string>
+        <string>_tresfort-stn._udp</string>
+    </array>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Record optional workout feedback for an editable transcript. Audio is discarded.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Transcribe workout feedback on this device. Only text you save is shared with your coach.</string>
+  <key>CFBundleIdentifier</key>
+  <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+  <key>CFBundleExecutable</key>
+  <string>$(EXECUTABLE_NAME)</string>
+  <key>CFBundleName</key>
+  <string>$(PRODUCT_NAME)</string>
+  <key>CFBundlePackageType</key>
+  <string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>LSRequiresIPhoneOS</key>
+  <true/>
+  <key>CFBundleDisplayName</key>
+  <string>Très Fort</string>
+  <key>CFBundleShortVersionString</key>
+  <string>$(MARKETING_VERSION)</string>
+  <key>CFBundleVersion</key>
+  <string>$(CURRENT_PROJECT_VERSION)</string>
+  <key>NSSupportsLiveActivities</key>
+  <true/>
+  <!-- HealthKit purpose strings. App Store upload validation (409) requires
+       BOTH strings once the HealthKit entitlement is present. The Update
+       string comes from the build: the beta's run recorder saves runs to
+       Health, while the App Store build only reads and keeps its read-only
+       wording. The Share string IS shown in the read-permission sheet. -->
+  <key>NSHealthShareUsageDescription</key>
+  <string>Très Fort reads workouts, heart rate, distance, and calories for coaching, and run routes for their maps. You can also allow weight access to view your weight trend privately on this device.</string>
+  <key>NSHealthUpdateUsageDescription</key>
+  <string>$(HEALTH_UPDATE_USAGE_DESCRIPTION)</string>
+  <!-- Run recorder (docs/plans/run-recorder). The App Store build removes
+       these keys after processing this file until the recorder ships there. -->
+  <key>NSLocationWhenInUseUsageDescription</key>
+  <string>Très Fort records your route while you run, including with the screen locked, to map it and upload it to intervals.icu.</string>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>Très Fort connects to your Bluetooth heart rate monitor to record your heart rate while you run.</string>
+  <key>NSMotionUsageDescription</key>
+  <string>Très Fort reads your iPhone’s barometer while you run to measure how much you climbed.</string>
+  <key>UIBackgroundModes</key>
+  <array>
+    <string>location</string>
+    <string>audio</string>
+    <string>bluetooth-central</string>
+  </array>
+  <key>ITSAppUsesNonExemptEncryption</key>
+  <false/>
+  <key>UIAppFonts</key>
+  <array>
+    <string>BebasNeue-Regular.ttf</string>
+    <string>JetBrainsMono-Regular.ttf</string>
+    <string>JetBrainsMono-Medium.ttf</string>
+    <string>JetBrainsMono-Bold.ttf</string>
+  </array>
+  <key>UILaunchScreen</key>
+  <dict/>
+  <key>UISupportedInterfaceOrientations</key>
+  <array>
+    <string>UIInterfaceOrientationPortrait</string>
+  </array>
+  <key>UISupportedInterfaceOrientations~ipad</key>
+  <array>
+    <string>UIInterfaceOrientationPortrait</string>
+    <string>UIInterfaceOrientationPortraitUpsideDown</string>
+    <string>UIInterfaceOrientationLandscapeLeft</string>
+    <string>UIInterfaceOrientationLandscapeRight</string>
+  </array>
+  <key>UIApplicationSceneManifest</key>
+  <dict>
+    <key>UIApplicationSupportsMultipleScenes</key>
+    <false/>
+  </dict>
+</dict>
+</plist>

@@ -1,0 +1,7923 @@
+import Combine
+import SwiftUI
+
+private struct SessionWriteConflictPayload: Decodable {
+    let error: String
+    let current_session: SessionRow
+}
+
+/// Exact workout identity visible when a terminal UI action is rendered or a
+/// destructive confirmation opens. The token prevents a queued SwiftUI Task
+/// from retargeting itself to a replacement session attempt before it runs.
+struct WorkoutTerminalActionTarget: Equatable {
+    var slot: Int = 0
+    let featureSessionEpoch: UInt64
+    let date: String
+    let sessionID: String?
+    let sessionAttempt: Int?
+    let nilBoundRunnerCheckpoint: WorkoutRunnerCheckpoint?
+    let restartDiscardedAttempt: Int?
+}
+
+@MainActor
+final class SyncModel: ObservableObject {
+    @Published private(set) var summaryRevision: UInt64 = 0
+    @Published private(set) var summaryErrors: [String: String] = [:]
+    @Published private var completionSummaries: [String: WorkoutSummary] = [:]
+    private var completionSummaryRevisions: [String: UInt64] = [:]
+    @Published private(set) var recentPlanHistory: PlanHistoryResponse?
+    @Published private(set) var planChangesError: String?
+    @Published private var planDismissalRevision = 0
+    private var planHistoryRequest = UUID()
+    @Published var plan: PlanTree?
+    @Published var sets: [SetLog] = [] { didSet { invalidateHistory() } }
+    @Published var sessions: [SessionRow] = [] { didSet { invalidateHistory() } }
+    /// Read-only ride overlay (intervals.icu etc). Already filtered to
+    /// non-deleted events — the rest of the app never sees tombstones.
+    @Published var rides: [ExternalEvent] = []
+    /// Read-only COMPLETED endurance activities (intervals.icu actuals),
+    /// shown as "workouts completed". Already filtered to non-deleted.
+    @Published var activities: [ExternalActivity] = []
+    /// User-authored manual activities (Pilates / walk / "lift elsewhere"
+    /// …) logged from the app or MCP. Personal log — surfaces on the
+    /// calendar regardless of group membership. Already filtered to
+    /// non-deleted at the cache boundary.
+    @Published var manualActivities: [ActivityRow] = []
+    @Published var catalog: [ExerciseCatalog] = [] { didSet { invalidateHistory() } }
+    @Published var todaySession: SessionRow?
+    @Published private(set) var isAddingWorkout = false
+    @Published private(set) var pendingAdditionalWorkout: AdditionalWorkoutRequest?
+    @Published var selectedDayID: String?
+    @Published var loadError: String?
+    @Published var isLoading = false
+    /// Only an accepted live state read can establish an empty account. An
+    /// absent plan in a cold model or cached snapshot is not creation authority.
+    @Published private(set) var hasVerifiedPlanState = false
+    var canCreateRoutine: Bool {
+        canInitiateBoundFeatureAction && plan == nil && hasVerifiedPlanState
+            && !isUsingCachedState && !isLoading && loadError == nil
+    }
+    var canChooseStarterWorkout: Bool {
+        canInitiateBoundFeatureAction && (plan?.workouts.isEmpty ?? true) && hasVerifiedPlanState
+            && !["planned", "in_progress"].contains(todaySessionStatus ?? "")
+            && !sessions.contains { $0.status == "in_progress" }
+            && !isUsingCachedState && !isLoading && loadError == nil
+    }
+    var canOfferWeekPlanning: Bool {
+        canInitiateBoundFeatureAction && hasVerifiedPlanState
+            && !sessions.contains { $0.status == "in_progress" }
+            && !isUsingCachedState && !isLoading && loadError == nil
+            && FirstRunSetup.needsWeekPlanning(plan: plan, sessions: sessions, today: todayString)
+    }
+    /// True after a target PATCH is acknowledged until a bound live-state
+    /// response reconciles the workout editor's cached prescription values.
+    @Published private(set) var workoutEditorRefreshNeeded = false
+    /// True while the visible plan/calendar came from the last successful
+    /// account-scoped snapshot rather than a live `/api/state` response.
+    @Published private(set) var isUsingCachedState = false
+    /// A persisted runner becomes actionable only after a live state pull
+    /// confirms that today's server session is still in progress.
+    @Published private(set) var resumableCheckpoint: WorkoutRunnerCheckpoint?
+    /// Durable set intents are separate from acknowledged `sets`. Publishing
+    /// the account queue makes relaunch state visible on Today even when the
+    /// workout runner is not mounted.
+    @Published private(set) var setCorrections: [PendingSetCorrection]
+    @Published private(set) var sendingCorrectionIDs: Set<String> = []
+    @Published private(set) var correctionRefreshNeeded = false
+    private var ownedCorrectionIDs: Set<String>
+    /// Most recent locally committed runner set; never inferred from the next slot.
+    @Published private(set) var lastRunnerSetID: String?
+    @Published private(set) var setOutbox: SetOutbox
+    /// Finish/discard intents share the same account boundary as set intents.
+    /// An acknowledged discard remains here as a local barrier until the user
+    /// explicitly starts that date again.
+    @Published private(set) var terminalOutbox: WorkoutTerminalOutbox
+    @Published private(set) var sendingSetIntentIDs: Set<String> = []
+    @Published private(set) var setSlotsInFlight: Set<String> = []
+    @Published private(set) var isTerminalMutationInFlight = false
+    @Published private(set) var isReopeningSkippedWorkout = false
+    @Published private(set) var isRoutineMutationInFlight = false
+    private var routineMutationWaiters: [CheckedContinuation<Void, Never>] = []
+
+    // Rest timer (local Live Activity arrives in milestone g).
+    private(set) var restControlID: String?
+    private var restSource: RunnerPrescription?
+    private(set) var timedControlID: String?
+    private var timedCountdown: TimedSetCountdown?
+    private var timedCueGeneration: Int?
+    private var pendingTimedCueGeneration: Int?
+    private let timedCuePlayer: @MainActor (TimedSetCountdown.Cue, Date) -> Bool
+    private let timedCueFinisher: @MainActor (Int, () -> Bool) async -> Bool
+    private let timedNotificationCanceller: @MainActor () -> Void
+    @Published var restEndDate: Date?
+    @Published var restExercise: String = ""
+    @Published var restTotal: Int = 0
+
+    // Guided workout runner.
+    @Published var partnerReserved = false
+    @Published private(set) var partnerContinuingAlone = false
+    @Published private(set) var partnerControl: PartnerRunnerControl?
+    var onPartnerSkip: (() -> Void)?
+    var isPartnerWorkout: Bool { !partnerContinuingAlone && (partnerReserved || partnerControl != nil || todaySession?.partner_workout_id != nil) }
+    @Published var running = false
+    @Published var finished = false
+    @Published private(set) var workoutFeedback: WorkoutFeedback?
+    @Published var exerciseIndex = 0
+    @Published var weight: Double = 0
+    @Published private(set) var runnerWeightSource: RunnerWeightSource = .entered
+    @Published var reps: Int = 0
+    @Published private var assessedRPE: Double?
+    private var assessedRPEContext: (slotID: String?, set: Int)?
+    /// Capture the set at assessment time. Remote logs and shared skips may
+    /// advance within this same exercise without reseeding the input controls.
+    var rpe: Double? {
+        get {
+            guard let context = assessedRPEContext, context.slotID == currentExercise?.id,
+                  context.set == currentPhysicalSetNumber else { return nil }
+            return assessedRPE
+        }
+        set {
+            assessedRPEContext = newValue == nil ? nil : (currentExercise?.id, currentPhysicalSetNumber)
+            assessedRPE = newValue
+        }
+    }
+    @Published var holdDurationSeconds: Int = 30
+    /// PLAN SLOT ids (template_exercise_id) the user explicitly skipped this
+    /// session. Keyed by slot, not exercise_id, to match the slot-keyed
+    /// completion path: the same movement in two slots skips independently
+    /// (#3). A skip is honored for the rest of the workout — the slot is NOT
+    /// requeued. In-memory + per-session: cleared on startWorkout; logging a
+    /// set for a skipped slot un-skips it (you came back and did it).
+    @Published var skipped: Set<String> = []
+
+    // Timers.
+    @Published var workoutStart: Date?      // whole-session stopwatch
+    var workoutElapsedSeconds: Int {
+        guard let workoutStart else { return 0 }
+        return max(0, Int(now().timeIntervalSince(workoutStart)))
+    }
+    @Published var timedActive = false      // a timed exercise is running
+    @Published var timedEndDate: Date?
+    @Published var timedStartDate: Date?    // wall-clock start of the hold
+
+    private let freestyleAPI: any FreestyleAPI
+    @Published private(set) var isStartingFreestyle = false
+    @Published private var freestyleExercises: [TemplateExercise] = []
+    @Published private var sessionAdjustments = RunnerSessionAdjustments()
+
+    private let setWriteAPI: any SetWriteAPI
+    private let completedFeedbackAPI: any CompletedWorkoutFeedbackAPI
+    private let terminalAPI: any WorkoutTerminalAPI
+    private let catalogAPI: any ExerciseCatalogAPI
+    private let sessionSwapAPI: any SessionExerciseSwapAPI
+    @Published private(set) var isSwappingExercise = false
+    private let planEditingAPI: any PlanEditingAPI
+    private let routineEditingAPI: any RoutineEditingAPI
+    private unowned let auth: AuthModel
+    private let accountID: String?
+    private let featureSessionEpoch: UInt64
+    private let defaults: LocalPersistence
+    private let uuidFactory: () -> UUID
+    private let now: () -> Date
+    private let runnerArtifactOwnerID = UUID()
+    private let restActivityUpdater: (Date, String) -> Void
+    private let restActivityEnder: () -> Void
+    private let restNotificationCanceller: @MainActor () -> Void
+    /// Identity of the exact rendered hold the user started. Automatic timer
+    /// completion is a new local write, so unlike settlement callbacks it may
+    /// not cross a feature-session epoch or follow selection to another slot.
+    private struct TimedSetAttempt: Equatable {
+        let featureSessionEpoch: UInt64
+        let slotID: String
+        let exerciseID: String
+        let setNumber: Int
+        let reservedSetIDs: Set<String>
+        let groupContext: RunnerGroupContext?
+        let holdSeconds: Int
+        let prescribedHoldSeconds: Int
+        let rpe: Double?
+        let weight: Double
+        let isWarmup: Bool
+        let startedAt: Date
+        let endDate: Date
+    }
+    private struct RunnerExecutionIdentity: Equatable {
+        let slotID: String
+        let exerciseID: String
+        let isWarmup: Bool
+        let isTimed: Bool
+        let isBodyweight: Bool
+    }
+    private struct RunnerGroupContext: Equatable {
+        let id: String
+        let memberIDs: [String]
+        let rounds: Int
+        let roundRest: Int?
+        let transitionRest: Int?
+    }
+    private var observedGroupProgress: [String: GroupRunnerProgress] = [:]
+    private var runnerFocus = RunnerFocusState()
+    private var deferredGroupRepair: RunnerGroupRepair?
+    private var timedSetAttempt: TimedSetAttempt?
+    private var timedSetCompletionTask: Task<Void, Never>?
+    private var persistedRunnerCheckpoint: WorkoutRunnerCheckpoint?
+    /// Restart authorization belongs to the mounted runner, not a generic
+    /// date-level create. It is persisted in the checkpoint until creation
+    /// binds the new session attempt.
+    private var runnerRestartDiscardedAttempt: Int?
+    /// Durable queues are shared for truthful presentation, but each model
+    /// sends only intents it loaded at construction or enqueued itself. An old
+    /// reauthentication model must not become a second sender for work created
+    /// by its replacement.
+    private var ownedSetIntentIDs: Set<String>
+    private var ownedTerminalIntentIDs: Set<String>
+    private var sendingTerminalIntentID: String?
+    private var isDrainingWorkoutWrites = false
+    private var workoutWriteDrainRequested = false
+    private var workoutWriteDrainWaiters: [CheckedContinuation<Void, Never>] = []
+    /// A server can recover while `NWPathMonitor` remains satisfied, so an
+    /// unsent idempotent write cannot rely only on launch/foreground/path
+    /// transitions. Production enables this short capped retry loop; tests opt
+    /// in explicitly so transient-failure fixtures remain deterministic.
+    private let automaticWorkoutWriteRetryEnabled: Bool
+    private let workoutWriteRetryDelaysNanoseconds: [UInt64]
+    private let workoutWriteRetrySleeper: (UInt64) async throws -> Void
+    private var workoutWriteRetryTask: Task<Void, Never>?
+    private var workoutWriteRetryAttempt = 0
+    /// Minimum delay requested by the transient response that stopped the
+    /// current drain (for example Retry-After on a 429/503).
+    private var workoutWriteRetryMinimumDelayNanoseconds: UInt64?
+    /// Absolute server-directed floor shared by automatic, lifecycle, network,
+    /// and manual triggers. A foreground transition must not turn Retry-After
+    /// into an immediate retry.
+    private var workoutWriteRetryNotBefore: Date?
+    /// A malformed or hostile header must not overflow nanosecond conversion or
+    /// suspend an offline-first workout queue indefinitely. The Worker uses a
+    /// five-second floor; one day still accommodates legitimate rate limiting.
+    private static let maximumRetryAfterSeconds: TimeInterval = 24 * 60 * 60
+    /// State refresh belongs to the account-scoped model, not to the
+    /// SwiftUI task that happened to request it. Pull-to-refresh may cancel
+    /// its view task as the scroll hierarchy changes; keeping one unstructured
+    /// model-owned task lets that already-started validation finish, and
+    /// coalesces only equivalent state requests. A mutation or bearer
+    /// change waits for an older task and then owns one trailing fresh pull.
+    private struct StateLoadKey: Equatable {
+        let bearer: String
+        let freshnessGeneration: UInt64
+        let featureSessionEpoch: UInt64
+    }
+    private var stateLoadTask: Task<Void, Never>?
+    private var stateLoadTaskID: UUID?
+    private var stateLoadKey: StateLoadKey?
+    private var stateFreshnessGeneration: UInt64 = 0
+    private var activityPersistenceCancellable: AnyCancellable?
+    private var authBoundaryObserverID: UUID?
+    /// Loading presentation is tracked separately from state freshness:
+    /// account-scoped snapshot tickets own freshness, while an outbox
+    /// reconciliation can supersede a load without owning its spinner.
+    private var loadGeneration = 0
+    private var statePlanVersion = 0
+    private var stateServerTime = 0
+    private var stateManualActivityCursorCapable = false
+    private var stateExternalSyncCursorsVersion: Int?
+
+    init(
+        auth: AuthModel,
+        setWriteAPI: any SetWriteAPI = APIClient(),
+        freestyleAPI: any FreestyleAPI = APIClient(),
+        terminalAPI: any WorkoutTerminalAPI = APIClient(),
+        completedFeedbackAPI: any CompletedWorkoutFeedbackAPI = APIClient(),
+        catalogAPI: any ExerciseCatalogAPI = APIClient(),
+        sessionSwapAPI: any SessionExerciseSwapAPI = APIClient(),
+        planEditingAPI: any PlanEditingAPI = APIClient(),
+        routineEditingAPI: any RoutineEditingAPI = APIClient(),
+        defaults: LocalPersistence = .standard,
+        uuidFactory: @escaping () -> UUID = UUID.init,
+        now: @escaping () -> Date = Date.init,
+        automaticWorkoutWriteRetryEnabled: Bool = false,
+        workoutWriteRetryDelaysNanoseconds: [UInt64] = [
+            2_000_000_000,
+            5_000_000_000,
+            15_000_000_000,
+            30_000_000_000,
+            60_000_000_000,
+        ],
+        workoutWriteRetrySleeper: @escaping (UInt64) async throws -> Void = {
+            try await Task.sleep(nanoseconds: $0)
+        },
+        restActivityUpdater: @escaping (Date, String) -> Void = {
+            endDate, upNext in
+            RestLiveActivity.update(endDate: endDate, upNext: upNext)
+        },
+        restActivityEnder: @escaping () -> Void = {
+            RestLiveActivity.endNow()
+        },
+        timedCuePlayer: @escaping @MainActor (TimedSetCountdown.Cue, Date) -> Bool = { cue, deadline in
+            RestCue.playTimedCue(cue, deadline: deadline)
+        },
+        timedCueFinisher: @escaping @MainActor (Int, () -> Bool) async -> Bool = { generation, canFinish in
+            await RestCue.finishTimedCueAfterResume(generation: generation, when: canFinish)
+        },
+        timedNotificationCanceller: @escaping @MainActor () -> Void = {
+            RestCue.cancelTimedNotification()
+        },
+        restNotificationCanceller: @escaping @MainActor () -> Void = {
+            RestCue.cancelNotification()
+        }
+    ) {
+        self.auth = auth
+        self.timedCuePlayer = timedCuePlayer
+        self.timedCueFinisher = timedCueFinisher
+        self.timedNotificationCanceller = timedNotificationCanceller
+        self.accountID = auth.userID
+        self.partnerContinuingAlone = auth.userID.flatMap { PartnerCheckpointStore.load($0, defaults: defaults) }?.phase == .leaving
+        self.partnerReserved = auth.userID.flatMap { PartnerCheckpointStore.load($0, defaults: defaults) }
+            .map { $0.phase != .leaving } ?? false
+        self.featureSessionEpoch = auth.featureSessionEpoch
+        self.freestyleAPI = freestyleAPI
+        self.setWriteAPI = setWriteAPI
+        self.terminalAPI = terminalAPI
+        self.completedFeedbackAPI = completedFeedbackAPI
+        self.catalogAPI = catalogAPI
+        self.sessionSwapAPI = sessionSwapAPI
+        self.planEditingAPI = planEditingAPI
+        self.routineEditingAPI = routineEditingAPI
+        self.defaults = defaults
+        self.pendingAdditionalWorkout = AdditionalWorkoutRequestStore.load(userID: auth.userID, defaults: defaults)
+        self.uuidFactory = uuidFactory
+        self.now = now
+        self.automaticWorkoutWriteRetryEnabled =
+            automaticWorkoutWriteRetryEnabled
+        self.workoutWriteRetryDelaysNanoseconds =
+            workoutWriteRetryDelaysNanoseconds
+        self.workoutWriteRetrySleeper = workoutWriteRetrySleeper
+        self.restActivityUpdater = restActivityUpdater
+        self.restActivityEnder = restActivityEnder
+        self.restNotificationCanceller = restNotificationCanceller
+        let persistedCheckpoint = WorkoutRunnerCheckpointStore.load(
+            userID: auth.userID, defaults: defaults)
+        self.persistedRunnerCheckpoint = persistedCheckpoint
+        self.freestyleExercises = persistedCheckpoint?.freestyleExercises ?? []
+        self.sessionAdjustments = persistedCheckpoint?.sessionAdjustments ?? RunnerSessionAdjustments()
+        self.workoutFeedback = persistedCheckpoint?.feedback
+        self.runnerFocus = persistedCheckpoint?.focus ?? RunnerFocusState()
+        self.deferredGroupRepair = persistedCheckpoint?.deferredGroupRepair
+        self.runnerRestartDiscardedAttempt =
+            persistedCheckpoint?.restartDiscardedAttempt
+        var persistedSets = SetOutboxStore.load(
+            userID: auth.userID, defaults: defaults)
+        let persistedTerminals = WorkoutTerminalOutboxStore.load(
+            userID: auth.userID, defaults: defaults)
+        // A durable discard is the semantic commit point. If the process died
+        // after saving it but before pruning the older set queue, discard still
+        // wins on the next construction before any network recovery begins.
+        for intent in persistedTerminals.intents where intent.action == .discard {
+            persistedSets.remove(date: intent.date, slot: intent.sessionSlot ?? 0)
+        }
+        for intent in persistedTerminals.intents where intent.action == .discard {
+            SetCorrectionOutboxStore.remove(date: intent.date, slot: intent.sessionSlot ?? 0, userID: auth.userID, defaults: defaults)
+        }
+        let corrections = SetCorrectionOutboxStore.load(userID: auth.userID, defaults: defaults)
+        self.setCorrections = corrections
+        self.ownedCorrectionIDs = Set(corrections.map(\.id))
+        self.setOutbox = persistedSets
+        self.terminalOutbox = persistedTerminals
+        self.ownedSetIntentIDs = Set(persistedSets.pending.map(\.id))
+        self.ownedTerminalIntentIDs = Set(
+            persistedTerminals.intents.map(\.id))
+        if !persistedSets.isEmpty || !persistedTerminals.intents.isEmpty || !corrections.isEmpty {
+            self.workoutWriteRetryNotBefore =
+                WorkoutWriteRetryDeadlineStore.load(
+                    userID: auth.userID, defaults: defaults)
+        } else if let userID = auth.userID {
+            WorkoutWriteRetryDeadlineStore.clear(
+                userID: userID, defaults: defaults)
+        }
+        for intent in persistedTerminals.intents where intent.action == .discard {
+            SetOutboxStore.remove(
+                date: intent.date, slot: intent.sessionSlot ?? 0,
+                userID: auth.userID, defaults: defaults)
+        }
+        // A relaunch of the same account resumes its persisted cursors. Moving
+        // between accounts keeps each cache isolated but deliberately clears
+        // the destination cursor so its first authenticated pull is complete.
+        if StateSyncAccountStore.activate(
+            userID: auth.userID, defaults: defaults)
+        {
+            _ = StateSnapshotStore.requireFullReload(
+                userID: auth.userID, defaults: defaults)
+        }
+        self.catalog = ExerciseCatalogSnapshotStore.load(
+            userID: auth.userID, defaults: defaults) ?? []
+        // A certified saved plan can support offline work. Loading it never
+        // acknowledges outboxes; every eventual write retains its exact attempt.
+        if let cached = StateSnapshotStore.load(
+            userID: auth.userID, defaults: defaults)
+        {
+            replaceState(with: cached.state, isLiveResponse: false)
+            isUsingCachedState = true
+            validatePersistedRunnerCheckpoint()
+        }
+        activityPersistenceCancellable = auth.$activityPersistenceGeneration
+            .dropFirst()
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    await self?.loadAfterMutation()
+                }
+            }
+        authBoundaryObserverID = auth.observeFeatureSessionBoundary {
+            [weak self] in
+            guard let self else { return false }
+            self.prepareForFeatureSessionBoundary()
+            return true
+        }
+    }
+
+    /// Bind every request to the account that created this model. An old
+    /// MainTab task may finish after AuthModel switches users; it must never
+    /// continue using the replacement account's bearer.
+    var exerciseDemoJWT: String? { currentJWT }
+
+    /// The account and bearer for reading this account's recorded run routes.
+    var activityRouteAccess: ActivityRouteAccess? {
+        guard let accountID, let jwt = currentJWT else { return nil }
+        return ActivityRouteAccess(accountID: accountID, jwt: jwt)
+    }
+
+    /// Deletes a run recorded in the app with every copy the app made: the
+    /// run and its route here, its intervals.icu upload and the Apple Health
+    /// workout the recorder saved (docs/plans/run-recorder P5(d)).
+    func deleteRecordedRun(recordingID: String) async -> RecordedRunDeleteOutcome {
+        guard canInitiateBoundFeatureAction, let jwt = currentJWT else {
+            return .failed("Sign in again, then try deleting the run.")
+        }
+        let api = APIClient()
+        var unauthorized = false
+        let outcome = await RecordedRunDeletion.delete(
+            recordingID: recordingID, health: .live,
+            server: { id, healthWorkoutIDs in
+                do {
+                    return try await api.deleteRecordedRun(
+                        recordingID: id, healthWorkoutIDs: healthWorkoutIDs, jwt: jwt)
+                } catch {
+                    if (error as? APIError)?.httpStatus == 401 { unauthorized = true }
+                    throw error
+                }
+            })
+        if unauthorized, isCurrentBearer(jwt) { auth.requireReauthentication() }
+        if case .deleted = outcome {
+            ActivityRouteStore.shared.forget(recordingID: recordingID)
+            if canInitiateBoundFeatureAction { await loadAfterMutation() }
+        }
+        return outcome
+    }
+
+    /// Sends a "Report a problem" draft (docs/DIAGNOSTICS.md) with this
+    /// account's bearer. Nil when sent, else a message for the member. The
+    /// draft's id makes a retry the same report.
+    func sendProblemReport(_ draft: ProblemReportDraft,
+                           context: ProblemReportContext? = nil) async -> String? {
+        let context = context ?? .current
+        guard canInitiateBoundFeatureAction, let jwt = currentJWT else {
+            return "Sign in again, then send your report."
+        }
+        do {
+            _ = try await APIClient().sendProblemReport(draft, context: context, jwt: jwt)
+            return nil
+        } catch {
+            if (error as? APIError)?.httpStatus == 401, isCurrentBearer(jwt) { auth.requireReauthentication() }
+            return ProblemReportOutcome.message(for: error)
+        }
+    }
+
+    /// Rates how hard a workout was, 1 to 10, or clears the rating with nil
+    /// (docs/plans/sport-activities P2), then pulls the rescored workout.
+    /// Nil when saved, else a message for the member.
+    func rateActivityEffort(activityID: String, effort: Int?) async -> String? {
+        guard canInitiateBoundFeatureAction, let jwt = currentJWT else {
+            return "Sign in again, then rate it."
+        }
+        do {
+            _ = try await APIClient().rateActivityEffort(activityID: activityID, effort: effort, jwt: jwt)
+        } catch {
+            if (error as? APIError)?.httpStatus == 401, isCurrentBearer(jwt) { auth.requireReauthentication() }
+            return "Couldn't save your rating. Check your connection and try again."
+        }
+        if canInitiateBoundFeatureAction { await loadAfterMutation() }
+        return nil
+    }
+
+    private var currentJWT: String? {
+        guard let accountID, auth.userID == accountID else { return nil }
+        return auth.featureJWT
+    }
+
+    /// Exact bearer identity is only relevant to a 401: an old request must
+    /// never invalidate a newer bearer installed by same-account renewal.
+    private func isCurrentBearer(_ jwt: String) -> Bool {
+        guard let accountID, auth.userID == accountID else { return false }
+        return auth.featureJWT == jwt
+    }
+
+    /// Successful reads remain valid across a bearer renewal for the same
+    /// account. A different account, absent feature session, or deletion
+    /// invalidates the response.
+    private var isCurrentAccount: Bool {
+        guard let accountID, auth.userID == accountID else { return false }
+        return auth.featureJWT != nil && !auth.accountDeletionPending
+    }
+
+    /// Set callbacks may complete after same-account bearer renewal or
+    /// recoverable reauthentication, so bearer and feature-session identity are
+    /// intentionally not part of this check. Owned-intent and granular-store
+    /// guards let the old callback settle its write without touching work
+    /// created by the replacement model. Account switch and deletion remain
+    /// invalidating boundaries.
+    private var canMutateBoundSetAccount: Bool {
+        guard let accountID, auth.userID == accountID else { return false }
+        return !auth.accountDeletionPending && !defaults.hasFailure(userID: accountID)
+    }
+
+    /// New user choices belong to the feature session that rendered them.
+    /// Already-durable writes intentionally settle through the broader
+    /// account guard above after same-account reauthentication.
+    private var canInitiateBoundFeatureAction: Bool {
+        canMutateBoundSetAccount
+            && auth.featureSessionEpoch == featureSessionEpoch
+    }
+
+    /// Draft creation callbacks belong to this model's original account and
+    /// feature session. Expose only whether it remains live, never its bearer
+    /// or authority to mutate a replacement session.
+    var canContinueWorkoutCreation: Bool { canInitiateBoundFeatureAction && isCurrentAccount }
+
+    /// Cached records stay readable through storage failures, but never across
+    /// the account or feature session that mounted this model.
+    var canReviewWorkoutRecords: Bool { isCurrentAccount && auth.featureSessionEpoch == featureSessionEpoch }
+
+    private var canControlSharedRestArtifacts: Bool {
+        canInitiateBoundFeatureAction
+            && RunnerArtifactOwnership.isOwned(
+                by: runnerArtifactOwnerID,
+                featureSessionEpoch: featureSessionEpoch,
+                userID: accountID,
+                defaults: defaults)
+    }
+
+    private var runnerArtifactsOwnedByOther: Bool {
+        RunnerArtifactOwnership.isOwnedByOther(
+            than: runnerArtifactOwnerID,
+            featureSessionEpoch: featureSessionEpoch,
+            userID: accountID,
+            defaults: defaults)
+    }
+
+    var todayString: String {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = .current
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: now())
+    }
+
+    var selectedDay: Workout? {
+        if isFreestyle { return freestyleDay }
+        guard let plan else { return nil }
+        guard let day = plan.availableWorkouts.first(where: { $0.id == selectedDayID }) ?? plan.libraryWorkouts.first else { return nil }
+        return runnerDay(id: day.id)
+    }
+
+    var terminalActionTarget: WorkoutTerminalActionTarget? {
+        guard canInitiateBoundFeatureAction else { return nil }
+        let date = todaySession?.date ?? todayString
+        return WorkoutTerminalActionTarget(
+            slot: currentWorkoutScope.slot, featureSessionEpoch: featureSessionEpoch,
+            date: date,
+            sessionID: todaySession?.id,
+            sessionAttempt: todaySession?.attempt,
+            nilBoundRunnerCheckpoint:
+                todaySession == nil ? persistedRunnerCheckpoint : nil,
+            restartDiscardedAttempt: runnerRestartDiscardedAttempt)
+    }
+
+    private func matchesTerminalActionTarget(
+        _ target: WorkoutTerminalActionTarget
+    ) -> Bool {
+        guard canInitiateBoundFeatureAction,
+              target.featureSessionEpoch == featureSessionEpoch,
+              target.date == (todaySession?.date ?? todayString),
+              target.slot == currentWorkoutScope.slot,
+              target.sessionID == todaySession?.id,
+              target.sessionAttempt == todaySession?.attempt,
+              target.restartDiscardedAttempt == runnerRestartDiscardedAttempt
+        else { return false }
+        if target.sessionID == nil {
+            return target.nilBoundRunnerCheckpoint == persistedRunnerCheckpoint
+        }
+        return true
+    }
+
+    func load() async {
+        await load(requiringFreshness: stateFreshnessGeneration)
+    }
+
+    /// A successful server mutation needs a state request that starts after the
+    /// mutation. It may wait behind an older pull, but it must never merely join
+    /// that pull and mistake pre-mutation state for reconciliation.
+    func loadAfterMutation() async {
+        stateFreshnessGeneration &+= 1
+        await load(requiringFreshness: stateFreshnessGeneration)
+    }
+
+    private func load(requiringFreshness requiredFreshness: UInt64) async {
+        while let activeTask = stateLoadTask {
+            let canJoin = stateLoadKey.map {
+                $0.bearer == currentJWT
+                    && $0.freshnessGeneration >= requiredFreshness
+                    && $0.featureSessionEpoch == auth.featureSessionEpoch
+            } ?? false
+            await activeTask.value
+            if canJoin { return }
+        }
+        guard auth.featureSessionEpoch == featureSessionEpoch,
+              let jwt = currentJWT else { return }
+        let taskID = UUID()
+        let key = StateLoadKey(
+            bearer: jwt,
+            freshnessGeneration: stateFreshnessGeneration,
+            featureSessionEpoch: featureSessionEpoch)
+        stateLoadTaskID = taskID
+        stateLoadKey = key
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performLoad(key: key)
+            self.finishStateLoad(taskID: taskID)
+        }
+        stateLoadTask = task
+        await task.value
+    }
+
+    private func finishStateLoad(taskID: UUID) {
+        if stateLoadTaskID == taskID {
+            stateLoadTask = nil
+            stateLoadTaskID = nil
+            stateLoadKey = nil
+        }
+    }
+
+    private func performLoad(key: StateLoadKey) async {
+        let jwt = key.bearer
+        loadGeneration += 1
+        let thisLoadGeneration = loadGeneration
+        isLoading = true
+        defer {
+            if thisLoadGeneration == loadGeneration { isLoading = false }
+        }
+        while true {
+            guard isCurrentAccount, canMutateBoundSetAccount,
+                  key.featureSessionEpoch == featureSessionEpoch,
+                  key.featureSessionEpoch == auth.featureSessionEpoch,
+                  key.freshnessGeneration == stateFreshnessGeneration
+            else { return }
+            guard let snapshotTicket = StateSnapshotStore.reserveStateRequest(
+                userID: accountID, defaults: defaults)
+            else {
+                loadError = "Couldn't reserve local sync state."
+                return
+            }
+            do {
+                let state = try await setWriteAPI.getState(
+                    jwt: jwt,
+                    watermarks: snapshotTicket.watermarks)
+                guard isCurrentAccount, canMutateBoundSetAccount,
+                      key.featureSessionEpoch == featureSessionEpoch,
+                      key.featureSessionEpoch == auth.featureSessionEpoch,
+                      key.freshnessGeneration == stateFreshnessGeneration
+                else { return }
+                if !StateSnapshotStore.isCurrent(
+                    snapshotTicket, defaults: defaults)
+                {
+                    // Retry only when an accepted mutation advanced this exact
+                    // latest request. Another state reservation owns a
+                    // newer request and must keep newest-request-wins ordering.
+                    if StateSnapshotStore.wasSupersededByMutation(
+                        snapshotTicket, defaults: defaults)
+                    {
+                        continue
+                    }
+                    return
+                }
+                guard applyLiveStateResponse(
+                    state,
+                    ticket: snapshotTicket
+                ) else {
+                    loadError = "Couldn't save the latest sync state."
+                    return
+                }
+                // A cached catalog is presentation-only too: always attempt a live
+                // replacement after state succeeds so renamed exercises and changed
+                // load semantics do not freeze forever. A catalog failure retains
+                // the last successful rows, matching the pre-cache best-effort load.
+                if let catalogJWT = currentJWT,
+                   let rows = try? await catalogAPI.getExercises(jwt: catalogJWT) {
+                    guard isCurrentAccount, canMutateBoundSetAccount,
+                          key.featureSessionEpoch == featureSessionEpoch,
+                          key.featureSessionEpoch == auth.featureSessionEpoch,
+                          key.freshnessGeneration == stateFreshnessGeneration,
+                          StateSnapshotStore.isCurrent(
+                              snapshotTicket, defaults: defaults)
+                    else { return }
+                    catalog = rows
+                    ExerciseCatalogSnapshotStore.save(
+                        rows, userID: accountID, defaults: defaults)
+                }
+                loadError = nil
+                return
+            } catch {
+                guard StateSnapshotStore.isCurrent(
+                          snapshotTicket, defaults: defaults),
+                      isCurrentAccount, canMutateBoundSetAccount,
+                      key.featureSessionEpoch == featureSessionEpoch,
+                      key.featureSessionEpoch == auth.featureSessionEpoch,
+                      key.freshnessGeneration == stateFreshnessGeneration
+                else { return }
+                let isUnauthorized =
+                    (error as? APIError)?.httpStatus == 401
+                if isCurrentAccount, plan != nil,
+                   !(error is CancellationError),
+                   !isUnauthorized
+                {
+                    isUsingCachedState = true
+                    if !running { validatePersistedRunnerCheckpoint() }
+                }
+                handle(error, jwt: jwt)
+                return
+            }
+        }
+    }
+
+    /// Apply a complete `/api/state` response atomically at the cache boundary.
+    /// Direct applications are fixtures or mutation compatibility paths and
+    /// therefore intentionally reserve explicit zero watermarks.
+    func replaceState(
+        with state: StateResponse,
+        preferredTodaySessionID: String? = nil,
+        isLiveResponse: Bool = true
+    ) {
+        // Direct live applications are used by deterministic model tests. They
+        // reserve the same account-scoped ticket as a network pull so they also
+        // invalidate older responses from another SyncModel instance.
+        if isLiveResponse {
+            guard let ticket = StateSnapshotStore.reserveFullStateRequest(
+                userID: accountID, defaults: defaults)
+            else { return }
+            _ = applyLiveStateResponse(
+                state,
+                ticket: ticket,
+                preferredTodaySessionID: preferredTodaySessionID)
+        } else {
+            applyState(
+                state,
+                preferredTodaySessionID: preferredTodaySessionID,
+                isLiveResponse: false)
+        }
+    }
+
+    /// Single freshness gate for every fetched state response. Keeping the
+    /// check immediately beside the shared apply/persist boundary prevents a
+    /// future caller from updating presentation but forgetting the snapshot (or
+    /// vice versa).
+    @discardableResult
+    private func applyLiveStateResponse(
+        _ state: StateResponse,
+        ticket: StateSnapshotTicket,
+        preferredTodaySessionID: String? = nil
+    ) -> Bool {
+        guard canInitiateBoundFeatureAction,
+              StateSnapshotStore.isCurrent(ticket, defaults: defaults) else { return false }
+        retainGroupDeletionObservations()
+        guard let committed = StateSnapshotStore.commitStateResponse(
+                  state, ticket: ticket, defaults: defaults)
+        else { return false }
+        var provenDeletedSetIDs = Set(state.sets.filter { $0.deleted_at != nil }.map(\.id))
+        if ticket.watermarks.setsSince == 0 {
+            // Only a full set collection can prove absence. A changed
+            // execution class is not evidence of an acknowledged deletion.
+            let returnedIDs = Set(state.sets.map(\.id))
+            provenDeletedSetIDs.formUnion(setCorrections.filter {
+                $0.isDelete && !returnedIDs.contains($0.setID)
+            }.map(\.setID))
+        }
+        applyState(
+            committed.state,
+            preferredTodaySessionID: preferredTodaySessionID,
+            isLiveResponse: true,
+            provenDeletedSetIDs: provenDeletedSetIDs)
+        workoutEditorRefreshNeeded = false
+        hasVerifiedPlanState = true
+        return true
+    }
+
+    private func applyState(
+        _ state: StateResponse,
+        preferredTodaySessionID: String?,
+        isLiveResponse: Bool,
+        provenDeletedSetIDs: Set<String> = []
+    ) {
+        let previousScope = currentWorkoutScope
+        let previousSelectedDayID = selectedDayID
+        let runnerWasActive = running
+        let activeSlotID = activeRunnerSlotID()
+        let previousExecutionIdentity = activeRunnerExecutionIdentity()
+        let previousPrescription = currentExercise.map(RunnerPrescription.init)
+        let previousGroupProgress = observedGroupProgress
+        let previousGroupID = currentExercise?.group_id
+        let previousDeletionGroups: [String: String] = Dictionary(uniqueKeysWithValues: setCorrections.compactMap { intent in
+            groupDeletionObservation(intent).map { (intent.id, $0) }
+        })
+        let runnerCheckpointBeforeState = persistedRunnerCheckpoint
+        let previousSkippedExecutionState =
+            skippedExecutionStateForCurrentPlan()
+        statePlanVersion = state.plan_version
+        stateServerTime = state.server_time
+        stateManualActivityCursorCapable =
+            state.manualActivityCursorCapable
+        stateExternalSyncCursorsVersion =
+            state.externalSyncCursorsVersion
+        plan = state.plan
+        if isLiveResponse {
+            summaryRevision &+= 1
+            // A replacement model may have cleared or superseded this
+            // instance's in-memory writes. Adopt the account store before a
+            // live response is allowed to acknowledge or requeue anything.
+            adoptDurableWorkoutWriteOutboxes()
+            reconcileTerminalOutbox(with: state.sessions)
+        }
+        let maskedDates = discardBarrierScopes
+        let maskedSessionIDs = Set(state.sessions.lazy.filter {
+            maskedDates.contains($0.workoutScope)
+        }.map(\.id))
+        sessions = state.sessions.filter { !maskedDates.contains($0.workoutScope) }
+        sets = state.sets.filter { !maskedSessionIDs.contains($0.session_id) }
+        if isLiveResponse { reconcileSetOutboxWithServerSets() }
+        // Raw tombstones must reach reconciliation so a deleted UUID retires a
+        // doomed idempotent retry. They are never published as live workout
+        // data after that ordering boundary.
+        sets.removeAll { $0.deleted_at != nil }
+        // The snapshot store has already applied any delta tombstones. Keep the
+        // presentation boundary defensive for legacy/full payloads too.
+        rides = state.external_events.filter { !$0.isDeleted }
+        activities = state.external_activities.filter { !$0.isDeleted }
+        manualActivities = state.activities.filter { $0.deleted_at == nil }
+        // Alias recovery knows the canonical session id from the logged set.
+        // Prefer it over date-ordering so runner progress immediately keys on
+        // the same session as the returned set.
+        // Keep discarded history in `sessions` so calendar projection can
+        // apply its existing vanish rule, but never reuse that terminal row as
+        // the runner's live write target. This matters immediately after an
+        // explicit restart clears the acknowledged local discard barrier: a
+        // foreground refresh can still observe the server's discarded row
+        // until the first new write calls the date-level create endpoint and
+        // revives it. Binding that stale id here would skip createSession and
+        // make the backend correctly reject the new attempt.
+        let today = todayString
+        let carriesRunner = runnerWasActive || runnerCheckpointBeforeState?.date == today
+        // An idle selection expires at the civil-date boundary. A mounted
+        // runner keeps its original date/slot so crossing midnight cannot
+        // redirect its queued sets or terminal action into today's workout.
+        let selectionScope = previousScope.date == today || carriesRunner
+            ? previousScope : WorkoutSessionScope(date: today, slot: 0)
+        todaySession = sessions.first { $0.workoutScope == selectionScope && $0.status != "discarded" } ?? preferredTodaySessionID.flatMap { preferredID in
+            sessions.first { $0.id == preferredID && $0.date == today && $0.status != "discarded" }
+        } ?? sessions.first {
+            $0.date == today && ($0.slot ?? 0) == 0 && $0.status != "discarded"
+        }
+        if carriesRunner {
+            todaySession = sessions.first { $0.workoutScope == previousScope && $0.status != "discarded" }
+        }
+        if isLiveResponse {
+            preflightMountedRunnerOwnership(
+                checkpointBeforeState: runnerCheckpointBeforeState)
+        }
+        reconcileSelection(
+            previousSelectedDayID: previousSelectedDayID,
+            activeSlotID: activeSlotID,
+            runnerWasActive: runnerWasActive && running)
+        if isLiveResponse {
+            reconcileInheritedSkips(
+                previousExecutionIdentities:
+                    previousSkippedExecutionState.identities,
+                unverifiedSlotIDs: previousSkippedExecutionState.unverified)
+            let executionIdentityChanged = runnerWasActive
+                && running
+                && previousExecutionIdentity != activeRunnerExecutionIdentity()
+            if executionIdentityChanged {
+                clearTimedSet()
+            }
+            if runnerWasActive && (executionIdentityChanged || previousGroupID != currentExercise?.group_id) {
+                runnerFocus.isExplicit = false
+            }
+            if let repair = deferredGroupRepair,
+               runnerDay(id: repair.dayID)
+                .flatMap({ RunnerGroupRepair(groupID: repair.groupID, day: $0) }) != repair {
+                deferredGroupRepair = nil
+            }
+            let preservedFocusGroups = Set(setCorrections.compactMap { intent -> String? in
+                guard provenDeletedSetIDs.contains(intent.setID),
+                      !state.sets.contains(where: { $0.id == intent.setID && $0.deleted_at == nil }) else { return nil }
+                return supersededDeletionGroupID(intent)
+            })
+            normalizeMountedRunnerProgress(
+                for: todaySession?.date ?? todayString,
+                reseedCurrent: executionIdentityChanged
+                    || (runnerWasActive && previousPrescription != currentExercise.map(RunnerPrescription.init)),
+                preservingFocusIn: preservedFocusGroups)
+            // A live read can prove a queued deletion before its HTTP ACK.
+            // Use the progress observed before this read, so normalization
+            // cannot erase eligibility. The later ACK then sees no new change.
+            for intent in setCorrections where intent.isDelete
+                && provenDeletedSetIDs.contains(intent.setID)
+                && !state.sets.contains(where: { $0.id == intent.setID && $0.deleted_at == nil }) {
+                let observedID = previousDeletionGroups[intent.id] ?? previousGroupProgress.values.first(where: {
+                    $0.members.contains { $0.completedIDs.contains(intent.setID) }
+                })?.id ?? groupDeletionObservation(intent)
+                if let observedID { repairGroupAfterDeletedSet(intent, observedGroupID: observedID) }
+            }
+            isUsingCachedState = false
+            correctionRefreshNeeded = false
+            validatePersistedRunnerCheckpoint(preservingFocusIn: preservedFocusGroups)
+        }
+    }
+
+    /// Reject a mounted checkpoint against the response's attempt/status
+    /// before any progress normalization can persist it with newer server
+    /// identity. The complete validator still runs afterward for inactive
+    /// resume eligibility and normalized checkpoint shape.
+    private func preflightMountedRunnerOwnership(
+        checkpointBeforeState checkpoint: WorkoutRunnerCheckpoint?
+    ) {
+        guard running, let checkpoint else { return }
+        let serverSession = checkpoint.sessionID.flatMap { boundSessionID in
+            sessions.first { $0.id == boundSessionID }
+        } ?? sessions.first { $0.workoutScope == checkpoint.workoutScope }
+        guard let serverSession else { return }
+        if !RunnerRecovery.attemptMatches(checkpoint, serverSession: serverSession) {
+            stopRunnerForStateChange()
+            return
+        }
+        if checkpoint.sessionID == nil,
+           serverSession.status == "discarded",
+           checkpoint.restartDiscardedAttempt == serverSession.attempt
+        {
+            return
+        }
+        guard serverSession.status == "planned"
+                || serverSession.status == "in_progress"
+        else {
+            stopRunnerForStateChange()
+            return
+        }
+    }
+
+    /// Fallback only for the first accepted mutation before this install has a
+    /// snapshot. ACK persistence always transforms the newest account snapshot,
+    /// never blindly overwrites it with this model's projection.
+    private func currentStateResponse() -> StateResponse {
+        StateResponse(
+            plan: plan,
+            plan_version: max(statePlanVersion, plan?.version ?? 0),
+            sessions: sessions,
+            sets: sets,
+            external_events: rides,
+            external_activities: activities,
+            activities: manualActivities,
+            // Mutation responses carry no replacement state watermark.
+            server_time: stateServerTime,
+            manualActivityCursorCapable:
+                stateManualActivityCursorCapable,
+            externalSyncCursorsVersion:
+                stateExternalSyncCursorsVersion)
+    }
+
+    /// Another same-account model removes an intent only after merging its ACK
+    /// into the shared snapshot. When this model discovers that removal, adopt
+    /// that snapshot immediately so the retained UI cannot offer a duplicate
+    /// set or keep a runner mounted against a terminal session.
+    @discardableResult
+    private func adoptLatestAcknowledgedSnapshot(for scope: WorkoutSessionScope) -> Bool {
+        guard let snapshot = StateSnapshotStore.load(
+            userID: accountID, defaults: defaults)
+        else { return false }
+        let terminalStatuses = Set(["completed", "skipped", "discarded"])
+        let terminal = snapshot.state.sessions.first {
+            $0.workoutScope == scope && terminalStatuses.contains($0.status)
+        }
+        applyState(
+            snapshot.state,
+            preferredTodaySessionID: nil,
+            isLiveResponse: false)
+        if terminal != nil,
+           persistedRunnerCheckpoint?.workoutScope == scope || (running && currentWorkoutScope == scope)
+        {
+            stopRunnerForStateChange()
+        } else if currentWorkoutScope == scope {
+            normalizeMountedRunnerProgress(for: scope.date)
+        }
+        return true
+    }
+
+    private func persistSetAcknowledgement(
+        _ result: APIClient.SetLogResult,
+        submittedSession: SessionRow
+    ) -> StateSnapshotValue? {
+        guard canMutateBoundSetAccount else { return nil }
+        let acknowledgedSession = Self.sessionAcknowledgedBySet(
+            result, submittedSession: submittedSession)
+        let snapshot = StateSnapshotStore.load(
+            userID: accountID, defaults: defaults)
+        let decision = Self.setAcknowledgementMergeDecision(
+            acceptedSet: result.set,
+            snapshot: snapshot)
+        if decision.requiresFullReload {
+            guard StateSnapshotStore.requireFullReload(
+                userID: accountID, defaults: defaults)
+            else { return nil }
+        }
+        return StateSnapshotStore.mergeAcknowledgement(
+            userID: accountID,
+            fallback: currentStateResponse(),
+            defaults: defaults
+        ) { newest in
+            Self.mergingSetAcknowledgement(
+                into: newest,
+                acceptedSet: result.set,
+                acknowledgedSession: acknowledgedSession,
+                includeAcceptedSet: decision.includeAcceptedSet)
+        }
+    }
+
+    private func persistTerminalAcknowledgement(
+        _ response: SessionRow,
+        action: WorkoutTerminalAction
+    ) -> StateSnapshotValue? {
+        guard canMutateBoundSetAccount else { return nil }
+        return StateSnapshotStore.mergeAcknowledgement(
+            userID: accountID,
+            fallback: currentStateResponse(),
+            defaults: defaults
+        ) { newest in
+            Self.mergingTerminalAcknowledgement(
+                into: newest, response: response, action: action)
+        }
+    }
+
+    /// Session creation/revival is itself an attempt mutation. Merge it into
+    /// the shared snapshot before any later await or durable intent binding so
+    /// a state request that started before the create cannot overwrite the
+    /// new generation. Returns the newest same-attempt session from that merge.
+    private func acceptSessionResolution(_ response: SessionRow, reconcileDiscardBarrier: Bool = false) -> SessionRow? {
+        guard canMutateBoundSetAccount,
+              let merged = StateSnapshotStore.mergeAcknowledgement(
+                userID: accountID,
+                fallback: currentStateResponse(),
+                defaults: defaults,
+                transform: { newest in
+                    Self.mergingSessionResolution(
+                        into: newest, response: response)
+                })
+        else { return nil }
+        guard let authoritative = Self.newestSession(
+            in: merged.state.sessions.filter { $0.workoutScope == response.workoutScope }),
+              authoritative.id == response.id,
+              response.attempt == nil
+                || authoritative.attempt == nil
+                || authoritative.attempt == response.attempt
+        else { return nil }
+        if reconcileDiscardBarrier {
+            adoptDurableWorkoutWriteOutboxes()
+            reconcileTerminalOutbox(with: [authoritative])
+        }
+        applyState(
+            merged.state,
+            preferredTodaySessionID: authoritative.id,
+            isLiveResponse: false)
+        return authoritative
+    }
+
+    /// Merge only the facts proved by a set response into the newest account
+    /// snapshot. Every unrelated plan/session/activity remains from that newest
+    /// baseline, which may belong to a replacement SyncModel instance.
+    private enum SessionResponseKind {
+        case set
+        case finish
+        case discard
+        case resolution
+    }
+
+    private static func responseCanReplaceSession(
+        _ current: SessionRow,
+        with response: SessionRow,
+        kind: SessionResponseKind
+    ) -> Bool {
+        // Migration 0032 assigns every legacy row generation zero. Normalize
+        // a rolling-old-Worker nil the same way before status precedence: an
+        // explicit attempt 0 is not evidence that a same-generation terminal
+        // observation may be demoted to planned.
+        let currentAttempt = current.attempt ?? 0
+        let responseAttempt = response.attempt ?? 0
+        if currentAttempt != responseAttempt {
+            return responseAttempt > currentAttempt
+        }
+
+        switch kind {
+        case .set:
+            if ["completed", "skipped", "discarded"].contains(current.status),
+               current.status != response.status
+            {
+                return false
+            }
+        case .finish:
+            if current.status == "discarded",
+               response.status != "discarded"
+            {
+                return false
+            }
+        case .discard:
+            // Within one attempt, discard is the sanctioned transition that
+            // overrides every other status. A later restart has a greater
+            // attempt and was handled above. Once both observations are already
+            // discarded, normal timestamp/tie rules protect later plan remaps.
+            if current.status != "discarded" {
+                return response.status == "discarded"
+            }
+        case .resolution:
+            // Date resolution and 409 current_session observations can be
+            // captured before a later set/terminal acknowledgement reaches
+            // the shared snapshot. Within one attempt they may advance state,
+            // but never demote it merely because equal-millisecond timestamps
+            // make the stale observation look tied.
+            if ["completed", "skipped", "discarded"].contains(current.status),
+               current.status != response.status
+            {
+                return false
+            }
+            if current.status == "in_progress", response.status == "planned" {
+                return false
+            }
+        }
+
+        switch (current.updated_at, response.updated_at) {
+        case let (currentTS?, responseTS?):
+            if responseTS != currentTS { return responseTS > currentTS }
+            return sessionStatusAdvances(
+                from: current.status, to: response.status)
+        case (nil, _?):
+            return true
+        case (_?, nil):
+            return false
+        case (nil, nil):
+            // Incomparable rolling-old responses may advance an explicit state
+            // machine transition, but never rewrite equal semantic state (and
+            // with it a newer plan-remapped workout_id).
+            return sessionStatusAdvances(
+                from: current.status, to: response.status)
+        }
+    }
+
+    private static func sessionStatusAdvances(
+        from current: String,
+        to response: String
+    ) -> Bool {
+        if current == "planned", response == "in_progress" { return true }
+        if ["planned", "in_progress"].contains(current),
+           ["completed", "skipped", "discarded"].contains(response)
+        {
+            return true
+        }
+        return response == "discarded" && current != "discarded"
+    }
+
+    private static func sessionAcknowledgedBySet(
+        _ result: APIClient.SetLogResult,
+        submittedSession: SessionRow
+    ) -> SessionRow {
+        if let session = result.session { return session }
+        // Rolling old Workers did not echo the session, but a successful set
+        // ACK has always atomically promoted planned -> in_progress. Infer only
+        // that one transition; merge precedence still protects any terminal
+        // session already observed in the newest snapshot.
+        guard submittedSession.status == "planned" else {
+            return submittedSession
+        }
+        return SessionRow(
+            slot: submittedSession.slot, partner_workout_id: submittedSession.partner_workout_id, kind: submittedSession.kind, exercise_swaps: submittedSession.exercise_swaps,
+            notes: submittedSession.notes, perceived_fatigue: submittedSession.perceived_fatigue,
+            started_at: submittedSession.started_at, completed_at: submittedSession.completed_at,
+            id: result.set.session_id,
+            date: submittedSession.date,
+            status: "in_progress",
+            workout_id: submittedSession.workout_id,
+            updated_at: submittedSession.updated_at,
+            attempt: submittedSession.attempt)
+    }
+
+    private static func newestSession(
+        in rows: [SessionRow]
+    ) -> SessionRow? {
+        let terminalStatuses = Set(["completed", "skipped", "discarded"])
+        return rows.max { lhs, rhs in
+            let lhsTS = lhs.updated_at ?? Int.min
+            let rhsTS = rhs.updated_at ?? Int.min
+            if lhsTS != rhsTS { return lhsTS < rhsTS }
+            return !terminalStatuses.contains(lhs.status)
+                && terminalStatuses.contains(rhs.status)
+        }
+    }
+
+    private static func mergingSetAcknowledgement(
+        into state: StateResponse,
+        acceptedSet: SetLog,
+        acknowledgedSession: SessionRow,
+        includeAcceptedSet: Bool = true
+    ) -> StateResponse {
+        var sessions = state.sessions
+        var sets = state.sets
+        let sameScopeSessions = sessions.filter {
+            $0.workoutScope == acknowledgedSession.workoutScope
+        }
+        let current = newestSession(in: sameScopeSessions)
+        let responseWins = current == nil
+            || responseCanReplaceSession(
+                current!, with: acknowledgedSession, kind: .set)
+        let source = responseWins
+            ? acknowledgedSession
+            : current ?? acknowledgedSession
+        var aliasIDs = Set(sameScopeSessions.map(\.id))
+        aliasIDs.insert(acknowledgedSession.id)
+        aliasIDs.insert(acceptedSet.session_id)
+        let canonical = SessionRow(
+            slot: source.slot, partner_workout_id: source.partner_workout_id, kind: source.kind, exercise_swaps: source.exercise_swaps,
+            notes: source.notes, perceived_fatigue: source.perceived_fatigue,
+            started_at: source.started_at, completed_at: source.completed_at,
+            id: acceptedSet.session_id,
+            date: acknowledgedSession.date,
+            status: source.status,
+            workout_id: source.workout_id,
+            updated_at: source.updated_at,
+            attempt: source.attempt)
+        sessions.removeAll { $0.workoutScope == acknowledgedSession.workoutScope }
+        sessions.append(canonical)
+        sets = sets.map { row in
+            aliasIDs.contains(row.session_id)
+                ? row.replacingSessionID(with: acceptedSet.session_id)
+                : row
+        }
+        let effectiveDiscard = source.status == "discarded"
+        if effectiveDiscard {
+            // A newer/canonical discarded session proves the backend
+            // tombstoned the whole workout, not only this exact retry.
+            sets.removeAll { $0.session_id == acceptedSet.session_id }
+        }
+
+        if effectiveDiscard {
+            // The session outcome owns visibility. A rolling/inconsistent live
+            // set row must never resurrect work beneath a discarded session.
+        } else if acceptedSet.deleted_at != nil {
+            // Retain the newest raw tombstone in the snapshot. `applyState`
+            // exposes it to outbox reconciliation, then removes it before
+            // publishing live workout data.
+            if includeAcceptedSet,
+               let index = sets.firstIndex(where: { $0.id == acceptedSet.id })
+            {
+                if setResponseCanReplace(sets[index], with: acceptedSet) {
+                    sets[index] = acceptedSet
+                }
+            } else if includeAcceptedSet {
+                sets.append(acceptedSet)
+            }
+        } else if let index = sets.firstIndex(where: { $0.id == acceptedSet.id }) {
+            if includeAcceptedSet,
+               sets[index].deleted_at == nil,
+               setResponseCanReplace(sets[index], with: acceptedSet)
+            {
+                sets[index] = acceptedSet
+            }
+        } else if includeAcceptedSet {
+            sets.append(acceptedSet)
+        }
+        return StateResponse(
+            plan: state.plan,
+            plan_version: state.plan_version,
+            sessions: sessions,
+            sets: sets,
+            external_events: state.external_events,
+            external_activities: state.external_activities,
+            activities: state.activities,
+            server_time: state.server_time,
+            manualActivityCursorCapable:
+                state.manualActivityCursorCapable,
+            externalSyncCursorsVersion:
+                state.externalSyncCursorsVersion)
+    }
+
+    private struct SetAcknowledgementMergeDecision {
+        let includeAcceptedSet: Bool
+        let requiresFullReload: Bool
+    }
+
+    /// Decide whether a mutation response may add a row that the latest state
+    /// snapshot did not contain. `updated_at` and the request-start horizon are
+    /// server-owned; client `logged_at` never participates in causality.
+    private static func setAcknowledgementMergeDecision(
+        acceptedSet: SetLog,
+        snapshot: StateSnapshotValue?
+    ) -> SetAcknowledgementMergeDecision {
+        guard let snapshot else {
+            return SetAcknowledgementMergeDecision(
+                includeAcceptedSet: false,
+                requiresFullReload: true)
+        }
+        if let current = snapshot.state.sets.first(where: {
+            $0.id == acceptedSet.id
+        }) {
+            guard current.updated_at != nil, acceptedSet.updated_at != nil else {
+                return SetAcknowledgementMergeDecision(
+                    includeAcceptedSet: false, requiresFullReload: true)
+            }
+            // Idempotent UUIDs never resurrect. A newer live correction or
+            // template detach likewise outranks an older delayed POST body.
+            return SetAcknowledgementMergeDecision(
+                includeAcceptedSet: setResponseCanReplace(
+                    current, with: acceptedSet)
+                    && (current.deleted_at == nil
+                        || acceptedSet.deleted_at != nil),
+                requiresFullReload: false)
+        }
+        guard let responseVersion = acceptedSet.updated_at,
+              let committedThrough = snapshot.setsCommittedThrough
+        else {
+            return SetAcknowledgementMergeDecision(
+                includeAcceptedSet: false,
+                requiresFullReload: true)
+        }
+        return SetAcknowledgementMergeDecision(
+            includeAcceptedSet: acceptedSet.deleted_at != nil
+                || responseVersion > committedThrough,
+            requiresFullReload: false)
+    }
+
+    private static func setResponseCanReplace(
+        _ current: SetLog,
+        with response: SetLog
+    ) -> Bool {
+        guard let currentVersion = current.updated_at,
+              let responseVersion = response.updated_at
+        else { return false }
+        // Equality is not causality: two server mutations may share one
+        // millisecond, and the committed snapshot wins any such tie.
+        return responseVersion > currentVersion
+    }
+
+    private static func mergingTerminalAcknowledgement(
+        into state: StateResponse,
+        response: SessionRow,
+        action: WorkoutTerminalAction
+    ) -> StateResponse {
+        var sessions = state.sessions
+        var sets = state.sets
+        let sameScopeSessions = sessions.filter { $0.workoutScope == response.workoutScope }
+        if let current = newestSession(in: sameScopeSessions),
+           !responseCanReplaceSession(
+               current,
+               with: response,
+               kind: action == .discard ? .discard : .finish)
+        {
+            return state
+        }
+        let sameScopeSessionIDs = Set(
+            sameScopeSessions.map(\.id))
+            .union([response.id])
+        sessions.removeAll { $0.workoutScope == response.workoutScope }
+        sessions.append(response)
+        if action == .discard {
+            sets.removeAll { sameScopeSessionIDs.contains($0.session_id) }
+        } else {
+            sets = sets.map { row in
+                sameScopeSessionIDs.contains(row.session_id)
+                    ? row.replacingSessionID(with: response.id)
+                    : row
+            }
+        }
+        return StateResponse(
+            plan: state.plan,
+            plan_version: state.plan_version,
+            sessions: sessions,
+            sets: sets,
+            external_events: state.external_events,
+            external_activities: state.external_activities,
+            activities: state.activities,
+            server_time: state.server_time,
+            manualActivityCursorCapable:
+                state.manualActivityCursorCapable,
+            externalSyncCursorsVersion:
+                state.externalSyncCursorsVersion)
+    }
+
+    /// Merge a date-level create/revive response without allowing its
+    /// necessarily pre-write `planned` view to regress a same-attempt set or
+    /// terminal acknowledgement. A greater attempt starts a clean generation;
+    /// a lower attempt is stale; the same attempt preserves the newest status.
+    private static func mergingSessionResolution(
+        into state: StateResponse,
+        response: SessionRow
+    ) -> StateResponse {
+        var sessions = state.sessions
+        var sets = state.sets
+        let sameScope = sessions.filter { $0.workoutScope == response.workoutScope }
+        let current = newestSession(in: sameScope)
+        if let currentAttempt = current?.attempt,
+           let responseAttempt = response.attempt,
+           responseAttempt < currentAttempt
+        {
+            return state
+        }
+        let advancesAttempt: Bool
+        if let currentAttempt = current?.attempt,
+           let responseAttempt = response.attempt
+        {
+            advancesAttempt = responseAttempt > currentAttempt
+        } else {
+            // Migration 0032 assigns every pre-attempt row generation zero.
+            // A cached rolling-old-Worker row therefore means attempt 0, not
+            // "unknown generation": an ordinary new-Worker create response at
+            // attempt 0 must retain its already-acknowledged sets. Only a
+            // positive response attempt proves an actual restart advance.
+            advancesAttempt = current != nil && (response.attempt ?? 0) > 0
+        }
+        let responseWins = current == nil
+            || responseCanReplaceSession(
+                current!, with: response, kind: .resolution)
+        let source = advancesAttempt || responseWins ? response : current!
+        let canonical = SessionRow(
+            slot: source.slot, partner_workout_id: source.partner_workout_id, kind: source.kind, exercise_swaps: source.exercise_swaps,
+            notes: source.notes, perceived_fatigue: source.perceived_fatigue,
+            started_at: source.started_at, completed_at: source.completed_at,
+            id: response.id,
+            date: response.date,
+            status: source.status,
+            workout_id: source.workout_id ?? response.workout_id,
+            updated_at: source.updated_at,
+            attempt: source.attempt ?? response.attempt)
+        let aliases = Set(sameScope.map(\.id)).union([response.id])
+        sessions.removeAll { $0.workoutScope == response.workoutScope }
+        sessions.append(canonical)
+        if advancesAttempt {
+            sets.removeAll { aliases.contains($0.session_id) }
+        } else {
+            sets = sets.map { row in
+                aliases.contains(row.session_id)
+                    ? row.replacingSessionID(with: response.id)
+                    : row
+            }
+            if canonical.status == "discarded" {
+                sets.removeAll { $0.session_id == response.id }
+            }
+        }
+        return StateResponse(
+            plan: state.plan,
+            plan_version: state.plan_version,
+            sessions: sessions,
+            sets: sets,
+            external_events: state.external_events,
+            external_activities: state.external_activities,
+            activities: state.activities,
+            server_time: state.server_time,
+            manualActivityCursorCapable:
+                state.manualActivityCursorCapable,
+            externalSyncCursorsVersion:
+                state.externalSyncCursorsVersion)
+    }
+
+    /// Apply a terminal response to the mounted model using the same alias and
+    /// date-scoped rules as snapshot persistence. This keeps the immediate
+    /// completion recap correct even when a stale migration id resolves to the
+    /// canonical session and no follow-up state pull succeeds.
+    @discardableResult
+    private func applyTerminalAcknowledgementLocally(
+        _ response: SessionRow,
+        action: WorkoutTerminalAction
+    ) -> Bool {
+        if let current = Self.newestSession(
+            in: sessions.filter { $0.workoutScope == response.workoutScope }),
+           !Self.responseCanReplaceSession(
+               current,
+               with: response,
+               kind: action == .discard ? .discard : .finish)
+        {
+            return false
+        }
+        let sameScopeSessionIDs = Set(
+            sessions.lazy.filter { $0.workoutScope == response.workoutScope }.map(\.id))
+            .union([response.id])
+        sessions.removeAll { $0.workoutScope == response.workoutScope }
+        sessions.append(response)
+        if action == .discard {
+            sets.removeAll { sameScopeSessionIDs.contains($0.session_id) }
+        } else {
+            sets = sets.map { row in
+                sameScopeSessionIDs.contains(row.session_id)
+                    ? row.replacingSessionID(with: response.id)
+                    : row
+            }
+        }
+        if response.workoutScope == currentWorkoutScope { todaySession = response }
+        return true
+    }
+
+    /// Full state is an independent acknowledgement path for commit-then-
+    /// timeout. It also detects the only operation that can intentionally
+    /// revive a discarded date (a later explicit restart); until the local
+    /// user clears the acknowledged barrier, an unexpected revival requeues
+    /// discard and stays masked.
+    private func reconcileTerminalOutbox(with serverSessions: [SessionRow]) {
+        guard canMutateBoundSetAccount else { return }
+        for var intent in terminalOutbox.intents
+        where ownedTerminalIntentIDs.contains(intent.id) {
+            let row = intent.resolvedSessionID.flatMap { id in
+                serverSessions.first { $0.id == id }
+            } ?? serverSessions.first { $0.workoutScope == intent.workoutScope }
+            switch intent.action {
+            case .finish:
+                guard let row, row.status == "completed",
+                      intent.feedback?.matches(row) != false else { continue }
+                terminalOutbox.remove(id: intent.id)
+                persistRemovedTerminalIntent(id: intent.id)
+                if intent.workoutScope == currentWorkoutScope { stopRunnerAfterTerminalAck() }
+            case .discard:
+                if let row, row.status == "discarded" {
+                    // The server outcome is authoritative even when another
+                    // device discarded a later generation before this queued
+                    // intent sent. Rebind the barrier to that exact attempt so
+                    // the next explicit restart can advance it once.
+                    terminalOutbox.acknowledgeDiscard(
+                        id: intent.id,
+                        resolvedSessionID: row.id,
+                        expectedAttempt: row.attempt)
+                    WorkoutTerminalOutboxStore.acknowledgeDiscard(
+                        id: intent.id,
+                        resolvedSessionID: row.id,
+                        expectedAttempt: row.attempt,
+                        userID: accountID,
+                        defaults: defaults)
+                } else if intent.deliveryState == .acknowledged, row != nil {
+                    guard let revivedSession = row else { continue }
+                    // A greater attempt is an explicit restart boundary. The
+                    // old device's acknowledged barrier must not mask or
+                    // discard a new workout created on another device.
+                    if let revivedAttempt = revivedSession.attempt {
+                        // Every pre-0032 barrier necessarily belongs to the
+                        // migration-default attempt 0. A greater live attempt
+                        // is therefore definitive restart evidence even when
+                        // the decoded legacy intent has no stored token.
+                        let barrierAttempt = intent.expectedAttempt ?? 0
+                        if revivedAttempt > barrierAttempt {
+                            terminalOutbox.clearAcknowledgedDiscard(
+                                date: intent.date, slot: intent.sessionSlot ?? 0)
+                            WorkoutTerminalOutboxStore.clearAcknowledgedDiscard(
+                                date: intent.date, slot: intent.sessionSlot ?? 0,
+                                userID: accountID,
+                                defaults: defaults)
+                            ownedTerminalIntentIDs.remove(intent.id)
+                            continue
+                        }
+                        // A lower generation is stale evidence; retain the
+                        // mask but do not send a mutation that will conflict.
+                        if revivedAttempt < barrierAttempt { continue }
+                    }
+                    // Same-attempt (or rolling-version unknown) revival can
+                    // only be a late pre-discard mutation. Reassert discard.
+                    let revivedSessionID = revivedSession.id
+                    terminalOutbox.requeueAcknowledgedDiscard(
+                        date: intent.date, slot: intent.sessionSlot ?? 0,
+                        resolvedSessionID: revivedSessionID,
+                        expectedAttempt: revivedSession.attempt)
+                    WorkoutTerminalOutboxStore.requeueAcknowledgedDiscard(
+                        date: intent.date, slot: intent.sessionSlot ?? 0,
+                        resolvedSessionID: revivedSessionID,
+                        expectedAttempt: revivedSession.attempt,
+                        userID: accountID,
+                        defaults: defaults)
+                }
+            }
+        }
+        applyLocalDiscardMask()
+    }
+
+    private func applyLocalDiscardMask() {
+        let dates = discardBarrierScopes
+        guard !dates.isEmpty else { return }
+        let affectsMountedWorkout = dates.contains(currentWorkoutScope)
+        let sessionIDs = Set(sessions.lazy.filter {
+            dates.contains($0.workoutScope)
+        }.map(\.id))
+        sessions.removeAll { dates.contains($0.workoutScope) }
+        sets.removeAll { sessionIDs.contains($0.session_id) }
+        if let todaySession, dates.contains(todaySession.workoutScope) {
+            self.todaySession = nil
+        }
+        if affectsMountedWorkout {
+            stopRunnerAfterTerminalAck()
+        }
+    }
+
+    private func stopRunnerAfterTerminalAck() {
+        observedGroupProgress = [:]
+        runnerFocus = RunnerFocusState()
+        deferredGroupRepair = nil
+        running = false
+        finished = false
+        workoutFeedback = nil
+        workoutStart = nil
+        clearTimedSet()
+        skipped = []
+        _ = clearRunnerCheckpointAndSharedRest()
+    }
+
+    private func validatePersistedRunnerCheckpoint(preservingFocusIn groups: Set<String> = []) {
+        guard let checkpoint = persistedRunnerCheckpoint,
+              !isUsingCachedState || canUseOfflineWorkoutState else {
+            resumableCheckpoint = nil
+            return
+        }
+        // A pre-first-set runner has no in-progress server row to fence a
+        // remote archive. Retain history, but never resume its saved inputs
+        // against selectedDay's next-active-workout fallback.
+        if plan?.workouts.first(where: { $0.id == checkpoint.selectedDayID })?.isArchived == true {
+            stopRunnerForStateChange()
+            return
+        }
+        if let base = baseRunnerDay(id: checkpoint.selectedDayID) {
+            sessionAdjustments = (checkpoint.sessionAdjustments ?? RunnerSessionAdjustments()).normalized(for: base)
+        }
+        let checkpointSession = checkpoint.sessionID.flatMap { sessionID in
+            sessions.first { $0.id == sessionID }
+        } ?? sessions.first { $0.workoutScope == checkpoint.workoutScope }
+        let decision = RunnerRecovery.decision(checkpoint, session: checkpointSession,
+            today: todayString, mounted: running,
+            hasTerminalIntent: terminalOutbox.intent(for: checkpoint.date, slot: checkpoint.sessionSlot ?? 0) != nil,
+            hasPendingFirstSet: setOutbox.pending.contains { $0.workoutScope == checkpoint.workoutScope },
+            offline: isUsingCachedState)
+        let serverSession: SessionRow?
+        switch decision {
+        case .mounted(let session):
+            resumableCheckpoint = nil
+            if let session { bindRunnerCheckpoint(to: session) }
+            if running { persistRunnerCheckpoint() }
+            return
+        case .waitingForFirstSet(let session):
+            if let session { bindRunnerCheckpoint(to: session) }
+            resumableCheckpoint = nil
+            return
+        case .waitingForValidation:
+            resumableCheckpoint = nil
+            return
+        case .discard:
+            if running { stopRunnerForStateChange() }
+            else { _ = clearRunnerCheckpointAndSharedRest() }
+            return
+        case .resume(let session):
+            serverSession = session
+        }
+        guard let day = runnerDay(id: checkpoint.selectedDayID) else {
+            if !isUsingCachedState { _ = clearRunnerCheckpointAndSharedRest() }
+            return
+        }
+        var setIDs: [String: Set<String>] = [:]
+        for slot in day.exercises {
+            var ids = serverSession.map {
+                Set(slotSets(slot, sessionID: $0.id, dayExercises: day.exercises).map(\.id))
+            } ?? []
+            if isUsingCachedState || slot.group_id != nil {
+                ids.formUnion(setOutbox.pending.filter {
+                    $0.deliveryState == .queued && setIntent($0, matches: slot, on: checkpoint.date)
+                }.map(\.id))
+            }
+            setIDs[slot.id] = ids
+        }
+        guard let normalized = RunnerRecovery.normalized(checkpoint,
+            day: day, serverSession: serverSession, setIDs: setIDs, preservingFocusIn: groups,
+            sessionAdjustments: sessionAdjustments)
+        else {
+            if !isUsingCachedState { _ = clearRunnerCheckpointAndSharedRest() }
+            return
+        }
+        if normalized != checkpoint {
+            guard replaceRunnerCheckpoint(
+                normalized, ifCurrent: checkpoint)
+            else {
+                relinquishStaleRunnerCheckpoint()
+                return
+            }
+        }
+        persistedRunnerCheckpoint = normalized
+        deferredGroupRepair = nil
+        runnerFocus = normalized.focus ?? RunnerFocusState()
+        runnerRestartDiscardedAttempt = normalized.restartDiscardedAttempt
+        // A recovered explicit override can legitimately differ from the
+        // server session's immutable day pin. Align Today and its Resume CTA to
+        // the validated checkpoint before mounting the runner.
+        selectedDayID = normalized.selectedDayID
+        resumableCheckpoint = normalized
+    }
+
+    /// Inputs and approved feedback are durable before the first set creates
+    /// a session. A live read must still prove the original attempt is safe.
+    @discardableResult
+    private func persistRunnerCheckpoint() -> Bool {
+        guard !defaults.hasFailure(userID: accountID) else {
+            restoreRunnerAfterSaveFailure()
+            return false
+        }
+        guard canInitiateBoundFeatureAction,
+              !runnerArtifactsOwnedByOther,
+              running,
+              let selectedDayID,
+              let workoutStart,
+              let currentSlotID = activeRunnerSlotID()
+        else { return false }
+        if let base = baseRunnerDay(id: selectedDayID) {
+            sessionAdjustments = sessionAdjustments.normalized(for: base)
+        }
+        let checkpoint = WorkoutRunnerCheckpoint(
+            date: todaySession?.date ?? todayString, sessionSlot: currentWorkoutScope.slot,
+            sessionID: todaySession?.id,
+            selectedDayID: selectedDayID,
+            currentSlotID: currentSlotID,
+            skippedSlotIDs: skipped.sorted(),
+            workoutStartedAtMS: Int(
+                (workoutStart.timeIntervalSince1970 * 1_000).rounded(.down)),
+            finished: finished,
+            sessionAttempt: todaySession?.attempt,
+            restartDiscardedAttempt: runnerRestartDiscardedAttempt,
+            input: currentInputState, inputsBySlot: runnerInputsForCheckpoint(), groupProgress: currentExercise.flatMap { groupProgress(for: $0) }, focus: runnerFocus, deferredGroupRepair: deferredGroupRepair, feedback: workoutFeedback, freestyleExercises: isFreestyle ? exercises : nil,
+            sessionAdjustments: sessionAdjustments.isEmpty ? nil : sessionAdjustments)
+        let expected = persistedRunnerCheckpoint
+        guard replaceRunnerCheckpoint(checkpoint, ifCurrent: expected) else {
+            relinquishStaleRunnerCheckpoint()
+            return false
+        }
+        persistedRunnerCheckpoint = checkpoint
+        resumableCheckpoint = nil
+        RunnerArtifactOwnership.claim(
+            runnerArtifactOwnerID,
+            featureSessionEpoch: featureSessionEpoch,
+            userID: accountID,
+            defaults: defaults)
+        return true
+    }
+
+    /// Session creation and the first set write are separate requests. Bind the
+    /// durable runner checkpoint as soon as creation succeeds so a transient
+    /// first-set failure cannot strand a nil-session checkpoint on relaunch.
+    private func bindRunnerCheckpoint(to session: SessionRow) {
+        guard canInitiateBoundFeatureAction,
+              !runnerArtifactsOwnedByOther,
+              let checkpoint = persistedRunnerCheckpoint,
+              checkpoint.workoutScope == session.workoutScope,
+              checkpoint.sessionID != session.id
+                || (checkpoint.sessionAttempt == nil && session.attempt != nil),
+              RunnerRecovery.attemptMatches(
+                  checkpoint, serverSession: session)
+        else { return }
+        let bound = WorkoutRunnerCheckpoint(
+            date: checkpoint.date, sessionSlot: checkpoint.sessionSlot,
+            sessionID: session.id,
+            selectedDayID: checkpoint.selectedDayID,
+            currentSlotID: checkpoint.currentSlotID,
+            skippedSlotIDs: checkpoint.skippedSlotIDs,
+            workoutStartedAtMS: checkpoint.workoutStartedAtMS,
+            finished: checkpoint.finished,
+            sessionAttempt: session.attempt ?? checkpoint.sessionAttempt,
+            restartDiscardedAttempt: nil,
+            input: checkpoint.input, inputsBySlot: checkpoint.inputsBySlot, groupProgress: checkpoint.groupProgress, focus: checkpoint.focus, deferredGroupRepair: checkpoint.deferredGroupRepair, feedback: checkpoint.feedback, freestyleExercises: checkpoint.freestyleExercises, sessionAdjustments: checkpoint.sessionAdjustments)
+        guard replaceRunnerCheckpoint(bound, ifCurrent: checkpoint) else {
+            relinquishStaleRunnerCheckpoint()
+            return
+        }
+        persistedRunnerCheckpoint = bound
+        if running {
+            RunnerArtifactOwnership.claim(
+                runnerArtifactOwnerID,
+                featureSessionEpoch: featureSessionEpoch,
+                userID: accountID,
+                defaults: defaults)
+        }
+        runnerRestartDiscardedAttempt = nil
+        resumableCheckpoint = nil
+    }
+
+    @discardableResult
+    private func clearRunnerCheckpoint() -> Bool {
+        let expected = persistedRunnerCheckpoint
+        persistedRunnerCheckpoint = nil
+        runnerRestartDiscardedAttempt = nil
+        resumableCheckpoint = nil
+        guard canInitiateBoundFeatureAction,
+              !RunnerArtifactOwnership.isOwnedByOther(
+            than: runnerArtifactOwnerID,
+            featureSessionEpoch: featureSessionEpoch,
+            userID: accountID,
+            defaults: defaults)
+        else { return false }
+        let cleared = WorkoutRunnerCheckpointStore.clear(
+            ifCurrent: expected,
+            userID: accountID,
+            defaults: defaults)
+        if cleared {
+            sessionAdjustments = RunnerSessionAdjustments()
+            // A newer feature epoch may clear an inherited checkpoint owned by
+            // the retired epoch. Claim the shared artifacts long enough for
+            // the caller's terminal teardown (or the next explicit start).
+            RunnerArtifactOwnership.claim(
+                runnerArtifactOwnerID,
+                featureSessionEpoch: featureSessionEpoch,
+                userID: accountID,
+                defaults: defaults)
+        }
+        return cleared
+    }
+
+    /// Retire a checkpoint from the current auth epoch together with the
+    /// process-shared rest artifacts it owns. A stale model can clear only its
+    /// local task; the replacement owner keeps its Live Activity and cue.
+    @discardableResult
+    private func clearRunnerCheckpointAndSharedRest() -> Bool {
+        let shouldTearDownSharedRest =
+            persistedRunnerCheckpoint != nil || canControlSharedRestArtifacts
+        guard clearRunnerCheckpoint() else {
+            relinquishLocalRest()
+            return false
+        }
+        if shouldTearDownSharedRest {
+            skipRest()
+        } else {
+            relinquishLocalRest()
+        }
+        releaseRunnerArtifactOwnership()
+        return true
+    }
+
+    /// End account-visible rest UI before AuthModel invalidates this feature
+    /// epoch. The durable runner checkpoint remains available for a safe,
+    /// live-validated resume after reauthentication; only its current exact
+    /// owner may touch the process-shared ActivityKit/notification pair.
+    private func prepareForFeatureSessionBoundary() {
+        planHistoryRequest = UUID()
+        recentPlanHistory = nil
+        planChangesError = nil
+        workoutWriteDrainRequested = false
+        // Stop this model's task, but preserve the account-scoped server floor
+        // for the replacement model that inherits the durable outbox.
+        cancelWorkoutWriteRetry(
+            resetAttempt: true, clearServerDeadline: false)
+        // Clear both an active hold and a completion awaiting OS delivery
+        // before this account's feature epoch is revoked. A retired model
+        // must leave the replacement owner's process-shared alert alone.
+        // An unresumed model after process restart may clean orphaned alerts.
+        // A running, retired model must not take that path just because the
+        // current owner's boundary callback ran first and released ownership.
+        let canCleanOrphanedTimedAlerts = !running && canInitiateBoundFeatureAction
+            && !runnerArtifactsOwnedByOther
+        if canControlSharedRestArtifacts || canCleanOrphanedTimedAlerts {
+            timedNotificationCanceller()
+        }
+        pendingTimedCueGeneration = nil
+        clearTimedSet(cancelCue: false)
+        guard canControlSharedRestArtifacts else {
+            relinquishLocalRest()
+            return
+        }
+        skipRest()
+        releaseRunnerArtifactOwnership()
+    }
+
+    private func releaseRunnerArtifactOwnership() {
+        RunnerArtifactOwnership.release(
+            runnerArtifactOwnerID,
+            featureSessionEpoch: featureSessionEpoch,
+            userID: accountID,
+            defaults: defaults)
+    }
+
+    private func replaceRunnerCheckpoint(
+        _ checkpoint: WorkoutRunnerCheckpoint,
+        ifCurrent expected: WorkoutRunnerCheckpoint?
+    ) -> Bool {
+        guard !runnerArtifactsOwnedByOther else { return false }
+        if WorkoutRunnerCheckpointStore.replace(
+            checkpoint,
+            ifCurrent: expected,
+            userID: accountID,
+            defaults: defaults)
+        {
+            return true
+        }
+        guard !defaults.hasFailure(userID: accountID) else { return false }
+        // Two models can independently normalize to an identical checkpoint;
+        // accepting that exact stored value is equivalent to a successful CAS.
+        return WorkoutRunnerCheckpointStore.load(
+            userID: accountID, defaults: defaults) == checkpoint
+    }
+
+    /// Stop only this stale model. Cancel its in-process rest task, but do not
+    /// clear the durable checkpoint or shared rest artifacts: a newer
+    /// same-account model owns them now.
+    private func relinquishStaleRunnerCheckpoint() {
+        if defaults.hasFailure(userID: accountID) {
+            restoreRunnerAfterSaveFailure()
+            return
+        }
+        observedGroupProgress = [:]
+        runnerFocus = RunnerFocusState()
+        deferredGroupRepair = nil
+        persistedRunnerCheckpoint = nil
+        resumableCheckpoint = nil
+        running = false
+        finished = false
+        workoutStart = nil
+        clearTimedSet()
+        skipped = []
+        relinquishLocalRest()
+        loadError = "This workout continued in another app view. Refresh to continue."
+    }
+
+    /// Failed checkpoint changes are rejected immediately. Storage retry only
+    /// proves the files can be read/written; it must not appear to undo an
+    /// accepted skip, selection or input when RootView remounts the models.
+    /// Keep the durable checkpoint and server/outbox state untouched.
+    private func restoreRunnerAfterSaveFailure() {
+        clearTimedSet()
+        observedGroupProgress = [:]
+        sessionAdjustments = persistedRunnerCheckpoint?.sessionAdjustments ?? RunnerSessionAdjustments()
+        guard let checkpoint = persistedRunnerCheckpoint,
+              let day = runnerDay(id: checkpoint.selectedDayID),
+              let index = day.exercises.firstIndex(where: { $0.id == checkpoint.currentSlotID })
+        else {
+            // A first checkpoint could not be saved, or the live plan no
+            // longer contains it. Do not present unsaved runner progress.
+            running = false
+            finished = false
+            workoutStart = nil
+            skipped = []
+            workoutFeedback = nil
+            runnerFocus = RunnerFocusState()
+            deferredGroupRepair = nil
+            loadError = "Couldn't save this workout on your iPhone. Retry saved data to continue."
+            return
+        }
+        selectedDayID = day.id
+        exerciseIndex = index
+        skipped = Set(checkpoint.skippedSlotIDs)
+        workoutStart = Date(timeIntervalSince1970: TimeInterval(checkpoint.workoutStartedAtMS) / 1_000)
+        finished = checkpoint.finished
+        workoutFeedback = checkpoint.feedback
+        runnerFocus = checkpoint.focus ?? RunnerFocusState()
+        deferredGroupRepair = checkpoint.deferredGroupRepair
+        runnerRestartDiscardedAttempt = checkpoint.restartDiscardedAttempt
+        seedInputs()
+        rememberGroupProgress()
+        loadError = "Couldn't save this change. Your last saved workout is restored. Retry saved data, then try again."
+    }
+
+    /// The runner's current physical slot without `selectedDay`'s first-day
+    /// fallback. A missing day or out-of-range index is invalid runner state.
+    private func activeRunnerSlotID() -> String? {
+        guard running,
+              let selectedDayID,
+              let day = runnerDay(id: selectedDayID),
+              day.exercises.indices.contains(exerciseIndex)
+        else { return nil }
+        return day.exercises[exerciseIndex].id
+    }
+
+    private func executionIdentity(
+        for ex: TemplateExercise
+    ) -> RunnerExecutionIdentity {
+        RunnerExecutionIdentity(
+            slotID: ex.id,
+            exerciseID: ex.exercise_id,
+            isWarmup: ex.isWarmup,
+            isTimed: ex.isTimed,
+            isBodyweight: ex.isBodyweight)
+    }
+
+    /// Capture the executable identity behind every durable/in-memory skip
+    /// before a live plan replacement. Slot UUID alone is insufficient: an
+    /// editor can replace the movement in place, and the new work must not
+    /// inherit the old movement's user choice.
+    private var skipReconciliationExercises: [TemplateExercise] {
+        (plan?.workouts.flatMap(\.exercises) ?? [])
+            + (freestyleDay?.exercises ?? persistedRunnerCheckpoint?.freestyleExercises ?? [])
+            + sessionAdjustments.addedExercises
+    }
+
+    private func skippedExecutionStateForCurrentPlan()
+        -> (
+            identities: [String: RunnerExecutionIdentity],
+            unverified: Set<String>
+        )
+    {
+        var skippedSlotIDs = skipped
+        if let checkpoint = persistedRunnerCheckpoint {
+            skippedSlotIDs.formUnion(checkpoint.skippedSlotIDs)
+        }
+        var identities: [String: RunnerExecutionIdentity] = [:]
+        for ex in skipReconciliationExercises
+        where skippedSlotIDs.contains(ex.id) {
+            identities[ex.id] = executionIdentity(for: ex)
+        }
+        return (identities, skippedSlotIDs.subtracting(identities.keys))
+    }
+
+    /// Drop skips whose stable slot now describes different executable work,
+    /// and update the durable checkpoint before resume validation. This covers
+    /// both mounted non-active slots and cold-launch checkpoints restored from
+    /// an older cached plan.
+    private func reconcileInheritedSkips(
+        previousExecutionIdentities: [String: RunnerExecutionIdentity],
+        unverifiedSlotIDs: Set<String>
+    ) {
+        var currentIdentities: [String: RunnerExecutionIdentity] = [:]
+        for ex in skipReconciliationExercises {
+            currentIdentities[ex.id] = executionIdentity(for: ex)
+        }
+        let changedSlotIDs = unverifiedSlotIDs.union(
+            previousExecutionIdentities.compactMap {
+            slotID, identity in
+            currentIdentities[slotID] == identity ? nil : slotID
+            })
+        guard !changedSlotIDs.isEmpty else { return }
+        skipped.subtract(changedSlotIDs)
+
+        guard let checkpoint = persistedRunnerCheckpoint else { return }
+        let retainedSkipped = checkpoint.skippedSlotIDs.filter {
+            !changedSlotIDs.contains($0)
+        }
+        guard retainedSkipped != checkpoint.skippedSlotIDs else { return }
+        let normalized = WorkoutRunnerCheckpoint(
+            date: checkpoint.date, sessionSlot: checkpoint.sessionSlot,
+            sessionID: checkpoint.sessionID,
+            selectedDayID: checkpoint.selectedDayID,
+            currentSlotID: checkpoint.currentSlotID,
+            skippedSlotIDs: retainedSkipped,
+            workoutStartedAtMS: checkpoint.workoutStartedAtMS,
+            finished: checkpoint.finished,
+            sessionAttempt: checkpoint.sessionAttempt,
+            restartDiscardedAttempt: checkpoint.restartDiscardedAttempt,
+            input: checkpoint.input, inputsBySlot: checkpoint.inputsBySlot, groupProgress: checkpoint.groupProgress, focus: checkpoint.focus, deferredGroupRepair: checkpoint.deferredGroupRepair, feedback: checkpoint.feedback, freestyleExercises: checkpoint.freestyleExercises, sessionAdjustments: checkpoint.sessionAdjustments)
+        guard replaceRunnerCheckpoint(normalized, ifCurrent: checkpoint) else {
+            relinquishStaleRunnerCheckpoint()
+            return
+        }
+        persistedRunnerCheckpoint = normalized
+        if running {
+            RunnerArtifactOwnership.claim(
+                runnerArtifactOwnerID,
+                featureSessionEpoch: featureSessionEpoch,
+                userID: accountID,
+                defaults: defaults)
+        }
+        if resumableCheckpoint == checkpoint { resumableCheckpoint = normalized }
+    }
+
+    private func activeRunnerExecutionIdentity() -> RunnerExecutionIdentity? {
+        guard activeRunnerSlotID() != nil, let ex = currentExercise else {
+            return nil
+        }
+        return executionIdentity(for: ex)
+    }
+
+    /// Inactive state prefers the real session's remapped day. An active
+    /// explicit override retains its valid day; otherwise it falls back to the
+    /// remapped session day. The runner continues only when its physical slot
+    /// still exists on the resolved day.
+    private func reconcileSelection(previousSelectedDayID: String?, activeSlotID: String?,
+                                    runnerWasActive: Bool) {
+        let days = isFreestyle ? [freestyleDay].compactMap { $0 } : plan?.availableWorkouts ?? []
+        let sessionDayID = todaySession?.workout_id
+        let resolvedSessionDayID = sessionDayID.flatMap { id in
+            days.contains(where: { $0.id == id }) ? id : nil
+        }
+        let retainedDayID = previousSelectedDayID.flatMap { id in
+            days.contains(where: { $0.id == id }) ? id : nil
+        }
+        // A running explicit "train a different day" override owns its still-
+        // valid selection. The session day is the recovery target only when
+        // that prior day disappeared (for example, update_plan rebuilt ids).
+        selectedDayID = runnerWasActive
+            ? retainedDayID ?? resolvedSessionDayID ?? days.first?.id
+            : resolvedSessionDayID ?? retainedDayID ?? days.first?.id
+
+        guard runnerWasActive else { return }
+        guard sessionDayID == nil || resolvedSessionDayID != nil,
+              let activeSlotID,
+              let selectedDayID,
+              let day = runnerDay(id: selectedDayID)
+        else {
+            stopRunnerForStateChange()
+            return
+        }
+        if let newIndex = day.exercises.firstIndex(where: { $0.id == activeSlotID }) {
+            exerciseIndex = newIndex
+        } else if previousSelectedDayID == selectedDayID, !day.exercises.isEmpty {
+            // Same valid day, active slot removed by an in-app edit: retain
+            // the existing documented behavior and clamp to the next slot.
+            exerciseIndex = min(exerciseIndex, day.exercises.count - 1)
+        } else {
+            stopRunnerForStateChange()
+        }
+        // A live plan/set refresh may retain the runner while changing the
+        // slot or displayed set that an active hold was bound to. Fail closed
+        // immediately instead of letting the old deadline write its successor.
+        if timedActive { _ = validatedTimedSetAttempt() }
+    }
+
+    /// Stop only local execution state; the already-logged server data stays.
+    private func stopRunnerForStateChange() {
+        observedGroupProgress = [:]
+        runnerFocus = RunnerFocusState()
+        deferredGroupRepair = nil
+        exerciseIndex = 0
+        running = false
+        finished = false
+        workoutStart = nil
+        clearTimedSet()
+        skipped = []
+        _ = clearRunnerCheckpointAndSharedRest()
+    }
+
+    /// Adopt a successful aliased write when the follow-up sync pull is
+    /// unavailable. All cached same-date session/set aliases collapse onto the
+    /// canonical id returned by the POST, so the committed set remains visible
+    /// and a retry cannot create a second physical set.
+    private func adoptSessionAliasLocally(
+        staleSession: SessionRow,
+        committedSet: SetLog,
+        submittedSlotID: String?
+    ) {
+        let previousSelectedDayID = selectedDayID
+        let runnerWasActive = running
+        let activeSlotID = activeRunnerSlotID()
+        var aliasedSessionIDs = Set(
+            sessions.filter { $0.workoutScope == staleSession.workoutScope }.map(\.id))
+        aliasedSessionIDs.insert(staleSession.id)
+        let canonicalSession = SessionRow(
+            slot: staleSession.slot, partner_workout_id: staleSession.partner_workout_id, kind: staleSession.kind, exercise_swaps: staleSession.exercise_swaps,
+            notes: staleSession.notes, perceived_fatigue: staleSession.perceived_fatigue,
+            started_at: staleSession.started_at, completed_at: staleSession.completed_at,
+            id: committedSet.session_id,
+            date: staleSession.date,
+            status: staleSession.status,
+            workout_id: staleSession.workout_id,
+            updated_at: staleSession.updated_at,
+            attempt: staleSession.attempt)
+
+        sessions.removeAll { $0.workoutScope == staleSession.workoutScope }
+        sessions.append(canonicalSession)
+        sets = sets.map { row in
+            aliasedSessionIDs.contains(row.session_id)
+                ? row.replacingSessionID(with: committedSet.session_id)
+                : row
+        }
+        if committedSet.deleted_at != nil {
+            sets.removeAll { $0.id == committedSet.id }
+        } else if let i = sets.firstIndex(where: { $0.id == committedSet.id }) {
+            sets[i] = committedSet
+        } else {
+            sets.append(committedSet)
+        }
+        if staleSession.workoutScope == currentWorkoutScope {
+            todaySession = canonicalSession
+            reconcileSelection(
+                previousSelectedDayID: previousSelectedDayID,
+                activeSlotID: activeSlotID,
+                runnerWasActive: runnerWasActive)
+            // A changed echoed link means update_plan rebuilt or removed a
+            // submitted template slot. Intentional slot-less session work
+            // keeps its nil link through alias healing too. A past-date
+            // outbox drain must not disturb the currently running workout.
+            if committedSet.template_exercise_id != submittedSlotID {
+                stopRunnerForStateChange()
+            }
+        }
+    }
+
+    /// Live (non-deleted) working sets for an exercise.
+    private func live(_ exerciseID: String) -> [SetLog] {
+        historyIndex.workingSetsByExercise[exerciseID] ?? []
+    }
+
+    func todaySets(_ exerciseID: String) -> [SetLog] {
+        guard let sid = todaySession?.id else { return [] }
+        return live(exerciseID)
+            .filter { $0.session_id == sid }
+            .sorted { $0.set_index < $1.set_index }
+    }
+
+    /// Live sets logged for a specific PLAN SLOT in today's session — the
+    /// completion unit for the runner. Keys on template_exercise_id (the slot),
+    /// exercise_id (the movement), AND is_warmup (the slot's class) so the SAME
+    /// movement in two slots, sets logged out of order, a stale link to a
+    /// since-swapped slot, or a warm-up set mis-pointed at a working slot of the
+    /// same movement never cross-attribute completion (#3). A warm-up slot's
+    /// sets ARE is_warmup (the backend inherits the flag from the slot), so the
+    /// parity check still lets a warm-up slot complete from its own sets — it
+    /// only excludes a set whose class disagrees with the slot's. Sets with no
+    /// slot link (Claude/MCP, or pre-this-build) fall back to matching
+    /// exercise_id + warm-up parity so they still count toward the right slot.
+    func todaySlotSets(_ ex: TemplateExercise) -> [SetLog] {
+        guard let sid = todaySession?.id else { return [] }
+        return slotSets(ex, sessionID: sid, dayExercises: exercises)
+    }
+
+    /// Slot attribution with explicit session/day inputs. Recovery uses the
+    /// checkpoint's override day before `selectedDayID` is realigned, while the
+    /// mounted runner delegates through `todaySlotSets` above.
+    private func slotSets(
+        _ ex: TemplateExercise,
+        sessionID: String,
+        dayExercises: [TemplateExercise]
+    ) -> [SetLog] {
+        let warm = ex.isWarmup ? 1 : 0
+        // Sets carrying a template_exercise_id attribute to that slot exactly.
+        // The exercise_id + warm-up *fallback* (for slot-less sets — MCP-,
+        // pre-this-build-, or detached-by-delete-logged) only fires when this
+        // is the sole slot for that movement+warm-up today; with duplicates a
+        // slot-less set is ambiguous, so an explicit slot id is required.
+        //
+        // KNOWN LIMITATION: deleting an already-logged slot detaches its sets
+        // (deleteTemplateExercise nulls template_exercise_id); if the same
+        // movement is then re-added as the only such slot in the same session,
+        // those detached sets attribute to the fresh slot. Telling a detached
+        // set apart from a legitimate slot-less MCP/legacy log needs a backend
+        // discriminator we've deliberately not added — gating on source='ios'
+        // instead wrongly dropped legacy iOS sets that never had a slot id. The
+        // iOS logger always sends a slot id now, so this only affects that
+        // specific delete-then-re-add edit path.
+        let matchingSlots = dayExercises.filter {
+            $0.exercise_id == ex.exercise_id
+                && ($0.isWarmup ? 1 : 0) == warm
+                && $0.isTimed == ex.isTimed
+        }
+        // An added movement's warm-up is a reviewed log class, not another
+        // runner slot. Its slot-less ACK remains attributable to that unique
+        // session movement without counting toward the working target.
+        let unique = matchingSlots.count == 1 || (matchingSlots.isEmpty && ex.isWarmup
+            && isSessionAddedExercise(ex)
+            && dayExercises.filter { $0.exercise_id == ex.exercise_id }.count == 1)
+        let approved = approvedExerciseIDs(for: ex, sessionID: sessionID)
+        return sets.filter { s in
+            guard s.session_id == sessionID, s.deleted_at == nil else { return false }
+            // The per-set flag is authoritative after migration 0024. Legacy
+            // rows intentionally fall back to catalog modality: duration is
+            // not reliable because older rep sets can carry incidental timing.
+            // Never infer from today's slot, which would let a later mode edit
+            // inherit completion across rep/timed work.
+            let setIsTimed = isTimedSet(s)
+            guard setIsTimed == ex.isTimed else { return false }
+            // Slot-linked set: attribute to this slot ONLY when the movement AND
+            // the warm-up/timed classes also match. The slot id alone is not
+            // trusted — a stale link after a swap or mode flip must never count
+            // toward, or complete, the replacement slot.
+            if let teid = s.template_exercise_id {
+                return teid == ex.id && approved.contains(s.exercise_id) && s.is_warmup == warm
+            }
+            return unique && s.exercise_id == ex.exercise_id && s.is_warmup == warm
+        }
+        .sorted { $0.set_index < $1.set_index }
+    }
+
+    func exerciseName(_ id: String) -> String {
+        catalogRow(id)?.name ?? id
+    }
+
+    /// Catalog row for an exercise id, or nil if unknown. Used by the demo
+    /// sheet to render the primary muscle/load-mode badges without a second
+    /// lookup table.
+    func catalogRow(_ id: String) -> ExerciseCatalog? {
+        historyIndex.catalogByID[id]
+    }
+
+    /// How many physical sides a logged set covers — 2 for unilateral
+    /// exercises (Bulgarian split squat, lunge, one-arm row; reps logged
+    /// per-side), 1 for everything else. Used by rollups to convert
+    /// logged-rep-count → physical-rep-count and tonnage → real tonnage.
+    /// Defaults to 1 when the catalog row is unknown.
+    func sides(for exerciseID: String) -> Int {
+        catalogRow(exerciseID)?.laterality == "unilateral" ? 2 : 1
+    }
+
+    /// How many separately loaded implements a logged weight represents — 2
+    /// for `per_hand` exercises, 1 otherwise. This is independent of
+    /// laterality: a unilateral, per-hand movement counts both dimensions.
+    /// Defaults to 1 when the catalog row is unknown.
+    func implements(for exerciseID: String) -> Int {
+        catalogRow(exerciseID)?.load_mode == "per_hand" ? 2 : 1
+    }
+
+    /// Physical reps represented by one logged set. Unilateral movements are
+    /// logged per side, so the rollup counts both sides.
+    func effectiveReps(for set: SetLog) -> Int {
+        set.reps * sides(for: set.exercise_id)
+    }
+
+    func totalReps(for sets: [SetLog]) -> Int {
+        sets.filter { !isTimedSet($0) }.reduce(0) {
+            $0 + effectiveReps(for: $1)
+        }
+    }
+
+    func metricCohorts(for sets: [SetLog]) -> [ExerciseMetricCohort] {
+        ExerciseMetrics.cohorts(sets, catalog: catalog)
+    }
+
+    func bestHoldSeconds(for sets: [SetLog]) -> Int? {
+        let holds = metricCohorts(for: sets).filter { $0.key.timed }
+        return holds.count == 1 ? holds[0].bestHoldSeconds : nil
+    }
+
+    /// Effective positive-load tonnage represented by one rep set, in the
+    /// set's own `weightUnit`. Strict bodyweight, assisted (negative-load),
+    /// and timed work have no tonnage; their progress is represented by reps
+    /// or hold duration instead.
+    func tonnage(for set: SetLog) -> Double? {
+        guard set.weight > 0, !isTimedSet(set) else { return nil }
+        return set.weight * Double(effectiveReps(for: set))
+            * Double(implements(for: set.exercise_id))
+    }
+
+    /// Tonnage totals per logged unit: lb and kg sets are never summed into
+    /// one number. Empty when no set has tonnage.
+    func tonnageByUnit(for sets: [SetLog]) -> [WeightUnit: Double] {
+        var totals: [WeightUnit: Double] = [:]
+        for set in sets {
+            if let value = tonnage(for: set) { totals[set.weightUnit, default: 0] += value }
+        }
+        return totals
+    }
+
+    /// True when the catalog row is a timed modality (planks/holds) — the only
+    /// sets whose logged value is seconds, not reps. Logged sets carry no
+    /// modality, so resolve it from the catalog. Defaults to false (rep set)
+    /// when the catalog row is unknown. #30
+    func isTimedExercise(_ exerciseID: String) -> Bool {
+        catalogRow(exerciseID)?.modality == "timed"
+    }
+
+    /// Whether a LOGGED set is a timed hold. Prefers the set's own
+    /// authoritative is_timed flag (backend migration 0024) so a
+    /// duration-pinned hold on a non-timed exercise still renders as "Ns";
+    /// falls back to catalog modality for sets from a pre-0024 server (nil).
+    func isTimedSet(_ s: SetLog) -> Bool {
+        if let t = s.is_timed { return t == 1 }
+        return isTimedExercise(s.exercise_id)
+    }
+
+    /// True when the catalog row is a bodyweight modality — these render
+    /// "BW × reps". Keyed off modality (not weight == 0) so a weighted lift
+    /// logged at 0 load isn't mislabeled as bodyweight. Defaults to false
+    /// when the catalog row is unknown. #30
+    func isBodyweightExercise(_ exerciseID: String) -> Bool {
+        catalogRow(exerciseID)?.modality == "bw"
+    }
+
+    // MARK: history read model
+
+    typealias SessionStat = TrainingHistoryIndex.SessionStat
+    private var cachedHistoryIndex: TrainingHistoryIndex?
+    private var cachedHistory: [String: [SessionStat]] = [:]
+    private var cachedLatestHistory: [String: [SessionStat]] = [:]
+
+    private func invalidateHistory() {
+        cachedHistoryIndex = nil
+        cachedHistory.removeAll(keepingCapacity: true)
+        cachedLatestHistory.removeAll(keepingCapacity: true)
+    }
+
+    private var historyIndex: TrainingHistoryIndex {
+        if let cachedHistoryIndex { return cachedHistoryIndex }
+        let index = TrainingHistoryIndex(sessions: sessions, sets: sets, catalog: catalog)
+        cachedHistoryIndex = index
+        return index
+    }
+
+    var loggedExerciseIDs: [String] { historyIndex.loggedExerciseIDs }
+
+    func history(for exerciseID: String) -> [SessionStat] {
+        if let cached = cachedHistory[exerciseID] { return cached }
+        let stats = historyIndex.history(for: exerciseID)
+        cachedHistory[exerciseID] = stats
+        return stats
+    }
+
+    /// List rows need one session summary, not every historical cohort/chart.
+    func latestHistory(for exerciseID: String) -> SessionStat? {
+        if let cached = cachedLatestHistory[exerciseID] { return cached.first }
+        let stats = historyIndex.history(for: exerciseID, latestOnly: true)
+        cachedLatestHistory[exerciseID] = stats
+        return stats.first
+    }
+
+    /// Only sessions with a timed hold duration (including the legacy reps
+    /// fallback) belong on this trend. Mixed rep/hold histories must not
+    /// synthesize 0-second points for rep-only sessions.
+    func durationHistory(for exerciseID: String) -> [SessionStat] {
+        history(for: exerciseID).filter {
+            $0.hasTimedSets && $0.avgDuration > 0
+        }
+    }
+
+    var pendingSetIntentCount: Int { setOutbox.count }
+    var failedSetIntentCount: Int {
+        setOutbox.pending.filter { $0.deliveryState == .failed }.count
+    }
+    var queuedSetIntentCount: Int {
+        setOutbox.pending.filter {
+            $0.deliveryState == .queued && !sendingSetIntentIDs.contains($0.id)
+        }.count
+    }
+    var sendingSetIntentCount: Int { sendingSetIntentIDs.count }
+
+    var pendingTerminalIntentCount: Int {
+        terminalOutbox.intents.filter { $0.deliveryState != .acknowledged }.count
+    }
+    var sendingTerminalIntentCount: Int { sendingTerminalIntentID == nil ? 0 : 1 }
+
+    var currentWorkoutScope: WorkoutSessionScope {
+        todaySession?.workoutScope ?? persistedRunnerCheckpoint?.workoutScope
+            ?? WorkoutSessionScope(date: todayString, slot: 0)
+    }
+
+    var currentWorkoutPendingSets: [PendingSetIntent] {
+        let scope = currentWorkoutScope
+        return setOutbox.pending.filter { $0.workoutScope == scope }
+    }
+
+    var currentTerminalIntent: WorkoutTerminalIntent? {
+        terminalOutbox.intent(for: currentWorkoutScope.date, slot: currentWorkoutScope.slot)
+    }
+
+    var hasPendingTerminalIntentForCurrentWorkout: Bool {
+        guard let intent = currentTerminalIntent else { return false }
+        return intent.deliveryState != .acknowledged
+    }
+
+    var hasDiscardIntentForCurrentWorkout: Bool {
+        currentTerminalIntent?.action == .discard
+    }
+
+    var visibleTerminalIntent: WorkoutTerminalIntent? {
+        terminalOutbox.intents.first { $0.deliveryState != .acknowledged }
+    }
+
+    private var discardBarrierScopes: Set<WorkoutSessionScope> {
+        Set(terminalOutbox.intents.lazy.filter {
+            $0.action == .discard
+        }.map(\.workoutScope))
+    }
+
+    /// LocalPersistence is the same-account coordination boundary across multiple
+    /// SyncModel instances. In-memory queues are presentation mirrors only;
+    /// always adopt the granular durable stores before reconciliation or a
+    /// network write so an older model cannot replay work a newer model
+    /// cleared during discard/restart.
+    private func adoptDurableWorkoutWriteOutboxes() {
+        guard canMutateBoundSetAccount else { return }
+        terminalOutbox = WorkoutTerminalOutboxStore.load(
+            userID: accountID, defaults: defaults)
+        setOutbox = SetOutboxStore.load(
+            userID: accountID, defaults: defaults)
+        ownedTerminalIntentIDs.formIntersection(
+            terminalOutbox.intents.map(\.id))
+        ownedSetIntentIDs.formIntersection(setOutbox.pending.map(\.id))
+        setCorrections = SetCorrectionOutboxStore.load(userID: accountID, defaults: defaults)
+        ownedCorrectionIDs.formIntersection(setCorrections.map(\.id))
+    }
+
+    private func durableTerminalIntent(
+        matching expected: WorkoutTerminalIntent
+    ) -> WorkoutTerminalIntent? {
+        guard canMutateBoundSetAccount,
+              ownedTerminalIntentIDs.contains(expected.id)
+        else { return nil }
+        adoptDurableWorkoutWriteOutboxes()
+        guard let current = terminalOutbox.intent(for: expected.date, slot: expected.sessionSlot ?? 0),
+              current.id == expected.id
+        else { return nil }
+        return current
+    }
+
+    private func durableSetIntent(
+        matching expected: PendingSetIntent
+    ) -> PendingSetIntent? {
+        guard canMutateBoundSetAccount,
+              ownedSetIntentIDs.contains(expected.id)
+        else { return nil }
+        adoptDurableWorkoutWriteOutboxes()
+        guard terminalOutbox.intent(for: expected.date, slot: expected.sessionSlot ?? 0)?.action != .discard,
+              let current = setOutbox.pending.first(where: {
+                  $0.id == expected.id
+              })
+        else { return nil }
+        return current
+    }
+
+    private func setIntent(
+        _ intent: PendingSetIntent,
+        matches ex: TemplateExercise,
+        on date: String
+    ) -> Bool {
+        intent.date == date && intent.workoutScope == currentWorkoutScope
+            && intent.slotID == ex.id
+            && approvedExerciseIDs(for: ex, date: date).contains(intent.body.exercise_id)
+            && intent.body.is_warmup == ex.isWarmup
+            && intent.body.is_timed == ex.isTimed
+    }
+
+    func pendingSetIntents(for ex: TemplateExercise) -> [PendingSetIntent] {
+        let date = todaySession?.date ?? todayString
+        return setOutbox.pending.filter { setIntent($0, matches: ex, on: date) }
+    }
+
+    func isSetEntryBlocked(_ ex: TemplateExercise) -> Bool {
+        if isPartnerWorkout {
+            guard let control = partnerControl, control.slotID == ex.id, control.canLog,
+                  !partnerLoggedIndices(ex).contains(control.set) else { return true }
+        }
+        if hasPendingTerminalIntentForCurrentWorkout || isTerminalMutationInFlight || isSwappingExercise {
+            return true
+        }
+        if setSlotsInFlight.contains(ex.id) { return true }
+        let date = todaySession?.date ?? todayString
+        return setOutbox.pending.contains {
+            setIntent($0, matches: ex, on: date)
+                && $0.deliveryState == .failed
+        }
+    }
+
+    private func persistEnqueuedSetIntent(_ intent: PendingSetIntent) -> Bool {
+        guard canMutateBoundSetAccount,
+              SetOutboxStore.enqueue(intent, userID: accountID, defaults: defaults)
+        else { return false }
+        ownedSetIntentIDs.insert(intent.id)
+        return true
+    }
+
+    @discardableResult
+    private func persistReplacedSetIntent(_ intent: PendingSetIntent) -> Bool {
+        guard canMutateBoundSetAccount,
+              SetOutboxStore.replace(intent, userID: accountID, defaults: defaults)
+        else {
+            setOutbox = SetOutboxStore.load(userID: accountID, defaults: defaults)
+            loadError = "The set change could not be saved on this iPhone. Retry saved data before continuing."
+            return false
+        }
+        return true
+    }
+
+    private func persistRemovedSetIntentIDs(_ ids: Set<String>) {
+        guard canMutateBoundSetAccount else { return }
+        SetOutboxStore.remove(
+            ids: ids, userID: accountID, defaults: defaults)
+        ownedSetIntentIDs.subtract(ids)
+    }
+
+    private func persistEnqueuedTerminalIntent(_ intent: WorkoutTerminalIntent) -> Bool {
+        guard canMutateBoundSetAccount,
+              WorkoutTerminalOutboxStore.enqueue(intent, userID: accountID, defaults: defaults)
+        else { return false }
+        if WorkoutTerminalOutboxStore.load(
+            userID: accountID, defaults: defaults
+        ).intent(for: intent.date, slot: intent.sessionSlot ?? 0)?.id == intent.id {
+            ownedTerminalIntentIDs.insert(intent.id)
+            return true
+        }
+        return false
+    }
+
+    private func persistReplacedTerminalIntent(_ intent: WorkoutTerminalIntent) {
+        guard canMutateBoundSetAccount else { return }
+        WorkoutTerminalOutboxStore.replace(
+            intent, userID: accountID, defaults: defaults)
+    }
+
+    private func persistRemovedTerminalIntent(id: String) {
+        guard canMutateBoundSetAccount else { return }
+        WorkoutTerminalOutboxStore.remove(
+            id: id, userID: accountID, defaults: defaults)
+        ownedTerminalIntentIDs.remove(id)
+    }
+
+    /// A state pull is also authoritative acknowledgement of an exact
+    /// client UUID. This closes the commit-then-timeout window when an ordinary
+    /// refresh wins the race with the retry drain and prevents double-counting
+    /// one physical set as both completed and pending.
+    private func reconcileSetOutboxWithServerSets() {
+        guard canMutateBoundSetAccount else { return }
+        let serverIDs = Set(sets.map(\.id))
+        let acknowledgedPendingIDs = Set(
+            setOutbox.pending.lazy.map(\.id).filter(serverIDs.contains))
+        guard !acknowledgedPendingIDs.isEmpty else { return }
+        for id in acknowledgedPendingIDs { setOutbox.remove(id: id) }
+        persistRemovedSetIntentIDs(acknowledgedPendingIDs)
+        // applyState remaps the active stable slot after the plan assignment,
+        // then performs one authoritative runner normalization. Normalizing
+        // here would interpret the old numeric index against a newly reordered
+        // plan and could clear a valid timed attempt.
+    }
+
+    /// Explicitly re-arm one permanent 4xx failure. The request body remains
+    /// byte-for-byte equivalent under Codable and retains its original UUID.
+    func retrySetIntent(id: String) async {
+        guard canInitiateBoundFeatureAction,
+              var intent = setOutbox.pending.first(where: { $0.id == id }),
+              intent.deliveryState == .failed
+        else { return }
+        intent.deliveryState = .queued
+        intent.failedHTTPStatus = nil
+        guard persistReplacedSetIntent(intent) else { return }
+        setOutbox.replace(intent)
+        normalizeMountedRunnerProgress(for: intent.date)
+        await drainSetOutbox()
+    }
+
+    func retryFailedSetIntents() async {
+        guard canInitiateBoundFeatureAction else { return }
+        var changed = false
+        var rearmedDates: Set<String> = []
+        for var intent in setOutbox.pending where intent.deliveryState == .failed {
+            intent.deliveryState = .queued
+            intent.failedHTTPStatus = nil
+            guard persistReplacedSetIntent(intent) else { return }
+            setOutbox.replace(intent)
+            rearmedDates.insert(intent.date)
+            changed = true
+        }
+        guard changed else { return }
+        for date in rearmedDates {
+            normalizeMountedRunnerProgress(for: date)
+        }
+        await drainSetOutbox()
+    }
+
+    @discardableResult
+    func logSet(_ ex: TemplateExercise, weight: Double, reps: Int,
+                durationOverride: Int? = nil) async -> Bool {
+        guard let intent = enqueueSetIntent(
+            ex, weight: weight, reps: reps, durationOverride: durationOverride
+        ) else { return false }
+        defer { setSlotsInFlight.remove(ex.id) }
+
+        await drainSetOutbox()
+        guard canMutateBoundSetAccount else { return false }
+        let acknowledged = !setOutbox.pending.contains(where: { $0.id == intent.id })
+            && sets.contains(where: {
+                $0.id == intent.id && $0.deleted_at == nil
+            })
+        if acknowledged && running {
+            startWorkoutRest(seconds: runnerRestSeconds(for: ex), name: ex.exercise_name, source: ex)
+        }
+        return acknowledged
+    }
+
+    /// Persist one complete, idempotent intent without waiting for the network.
+    /// This is the offline-first commit boundary shared by the synchronous test
+    /// helper above and the runner's optimistic UI path below.
+    private func enqueueSetIntent(
+        _ ex: TemplateExercise,
+        weight: Double,
+        reps: Int,
+        durationOverride: Int?,
+        rpe: Double? = nil
+    ) -> PendingSetIntent? {
+        let workoutDate = todaySession?.date ?? todayString
+        guard canInitiateBoundFeatureAction,
+              currentJWT != nil, canMutateBoundSetAccount,
+              !isTerminalMutationInFlight,
+              (!isPartnerWorkout || !isSetEntryBlocked(ex)),
+              terminalOutbox.intent(for: workoutDate, slot: currentWorkoutScope.slot) == nil,
+              !setSlotsInFlight.contains(ex.id)
+        else { return nil }
+
+        // Publish the guard before returning to the view task, so two button
+        // Tasks created by a rapid double tap cannot both mint intents.
+        setSlotsInFlight.insert(ex.id)
+
+        // Index per SLOT. Pending (queued OR visibly failed) intents reserve
+        // their index so intentional offline sets remain distinct; completion
+        // still counts acknowledged `SetLog` rows only.
+        let nextIndex = nextReservedSetIndex(for: ex)
+        let body = SetRequestBody(
+            id: uuidFactory().uuidString,
+            exercise_id: ex.exercise_id,
+            template_exercise_id: isFreestyle || isSessionAddedExercise(ex) ? nil : ex.id,
+            set_index: nextIndex,
+            weight: weight,
+            reps: reps,
+            is_warmup: ex.isWarmup,
+            logged_at: Int((now().timeIntervalSince1970 * 1_000).rounded(.down)),
+            duration_s: durationOverride,
+            is_timed: ex.isTimed, rpe: rpe,
+            prescription: isFreestyle ? nil : selectedDayID.flatMap { dayID in
+                plan.map { SetPrescriptionContext(plan_id: $0.id, version: $0.version, day_id: dayID) }
+            },
+            // Runner loads are held in the slot's unit, so the set is logged
+            // in that unit as-is — never converted through exercise_unit.
+            weight_unit: ex.targetWeightUnit.rawValue)
+        let intent = PendingSetIntent(
+            body: body,
+            date: workoutDate, sessionSlot: currentWorkoutScope.slot,
+            workoutID: isFreestyle ? nil : selectedDay?.id,
+            resolvedSessionID: todaySession?.id,
+            deliveryState: .queued,
+            failedHTTPStatus: nil,
+            expectedAttempt: todaySession?.attempt,
+            restartDiscardedAttempt: runnerRestartDiscardedAttempt)
+
+        // No network await may occur above this save. A failed/lost session
+        // create therefore leaves the complete intent available on relaunch.
+        setOutbox.enqueue(intent)
+        guard persistEnqueuedSetIntent(intent) else {
+            setOutbox = SetOutboxStore.load(userID: accountID, defaults: defaults)
+            setSlotsInFlight.remove(ex.id)
+            loadError = "Couldn't save this set on your iPhone. Retry saved data before logging it again."
+            return nil
+        }
+        return intent
+    }
+
+    /// The workout runner commits locally and advances immediately. Delivery
+    /// is deliberately model-owned background work: a SwiftUI button task may
+    /// disappear as the runner advances, but the durable intent must continue
+    /// to send or remain visibly queued for a later retry.
+    private func queueRunnerSet(
+        _ ex: TemplateExercise,
+        weight: Double,
+        reps: Int,
+        durationOverride: Int? = nil,
+        rpe: Double? = nil
+    ) -> Bool {
+        let groupBeforeCommit = groupProgress(for: ex)
+        guard let intent = enqueueSetIntent(
+            ex, weight: weight, reps: reps, durationOverride: durationOverride, rpe: rpe
+        ) else { return false }
+        lastRunnerSetID = intent.id
+        runnerFocus.isExplicit = false
+        // Effort describes the set just committed, never the following set.
+        // Preserve it in the durable intent while retiring the input draft.
+        if currentExercise?.id == ex.id {
+            self.rpe = nil
+            persistRunnerCheckpoint()
+        }
+
+        if running {
+            if let group = groupBeforeCommit {
+                let completedRound = (groupProgress(for: ex)?.completedRounds ?? group.completedRounds) > group.completedRounds
+                normalizeMountedRunnerAfterLocalCommit(for: intent.date)
+                let seconds = completedRound
+                    ? ex.group_rest_seconds ?? ex.rest_seconds : ex.group_transition_seconds ?? 0
+                startWorkoutRest(seconds: seconds, name: ex.exercise_name)
+            } else {
+                startWorkoutRest(seconds: runnerRestSeconds(for: ex), name: ex.exercise_name, source: ex)
+            }
+        }
+        // The cursor can stay on the same member with uneven progress. Its
+        // new physical commit still durably ends explicit-focus protection.
+        persistRunnerCheckpoint()
+        let slotID = ex.id
+        Task { @MainActor [weak self] in
+            // Keep the same-turn double-tap guard through the immediate UI
+            // transition, but do not make the next real set wait on transport.
+            await Task.yield()
+            guard let self else { return }
+            self.setSlotsInFlight.remove(slotID)
+            await self.drainSetOutbox()
+        }
+        return true
+    }
+
+    private enum SetSendOutcome {
+        case acknowledged(
+            setID: String,
+            canonicalSessionID: String,
+            date: String,
+            baselineProvedAcknowledgement: Bool)
+        case permanentFailure
+        case transientFailure(attemptedJWT: String, wasUnauthorized: Bool)
+        /// Another same-account model removed or superseded this exact intent.
+        /// The current drain should adopt the durable queue and continue.
+        case superseded
+        case staleAccount
+    }
+
+    /// Backward-compatible entry point used by P0 tests and existing lifecycle
+    /// hooks. P1 routes both queues through one serialized owner.
+    func drainSetOutbox() async {
+        await drainWorkoutWriteOutboxes()
+    }
+
+    /// Lifecycle/network recovery brackets a fresh state pull with the same
+    /// serialized writer. The first pass delivers ordinary offline work; the
+    /// pull acknowledges commit-then-timeout results or detects a stale
+    /// post-discard revival; the second pass immediately settles anything the
+    /// reconciliation requeued.
+    func recoverWorkoutWrites() async {
+        await drainWorkoutWriteOutboxes()
+        guard currentJWT != nil, canInitiateBoundFeatureAction else { return }
+        await loadAfterMutation()
+        guard currentJWT != nil, canInitiateBoundFeatureAction else { return }
+        await drainWorkoutWriteOutboxes()
+    }
+
+    /// All launch/foreground/connectivity/tap triggers converge here. A second
+    /// caller waits for the active drain instead of starting a competing set or
+    /// terminal request. This is the ordering boundary that makes discard the
+    /// final client mutation even when it is requested during another await.
+    func drainWorkoutWriteOutboxes() async {
+        // Local backoff may be superseded by an explicit recovery signal, but a
+        // server Retry-After floor applies to every trigger. Keep the existing
+        // scheduled owner alive instead of turning foreground/manual recovery
+        // into an early resend.
+        adoptPersistedWorkoutWriteRetryDeadline()
+        if let notBefore = workoutWriteRetryNotBefore {
+            let remaining = notBefore.timeIntervalSince(now())
+            if remaining > 0 {
+                workoutWriteRetryMinimumDelayNanoseconds = max(
+                    workoutWriteRetryMinimumDelayNanoseconds ?? 0,
+                    retryDelayNanoseconds(seconds: remaining))
+                scheduleWorkoutWriteRetry()
+                return
+            }
+            WorkoutWriteRetryDeadlineStore.clear(
+                through: notBefore, userID: accountID, defaults: defaults)
+            workoutWriteRetryNotBefore = nil
+        }
+        cancelWorkoutWriteRetry(resetAttempt: false)
+        guard currentJWT != nil, canInitiateBoundFeatureAction,
+              !setOutbox.isEmpty || !terminalOutbox.intents.isEmpty || !setCorrections.isEmpty
+        else {
+            return
+        }
+        if isDrainingWorkoutWrites {
+            // Remember the trigger, not just its waiter. If the active request
+            // is about to report a transient failure, this may be the launch,
+            // foreground, or connectivity recovery signal that makes one more
+            // immediate pass worthwhile.
+            workoutWriteDrainRequested = true
+            await withCheckedContinuation { continuation in
+                workoutWriteDrainWaiters.append(continuation)
+            }
+            return
+        }
+
+        isDrainingWorkoutWrites = true
+        workoutWriteRetryMinimumDelayNanoseconds = nil
+        // An intent can be persisted while this owner is awaiting the final
+        // reconciliation pull. Re-check the queue before releasing waiters so
+        // that trigger coalesces into this same serialized drain instead of
+        // being stranded until some later lifecycle/network event.
+        var stoppedForRetryableFailure = false
+        while canInitiateBoundFeatureAction, currentJWT != nil {
+            workoutWriteDrainRequested = false
+            stoppedForRetryableFailure = await performWorkoutWriteDrain()
+            if stoppedForRetryableFailure,
+               workoutWriteRetryNotBefore != nil
+                    || !workoutWriteDrainRequested
+            {
+                break
+            }
+            guard hasImmediatelyDeliverableWorkoutWrite else { break }
+        }
+        isDrainingWorkoutWrites = false
+        let waiters = workoutWriteDrainWaiters
+        workoutWriteDrainWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        if stoppedForRetryableFailure && hasImmediatelyDeliverableWorkoutWrite {
+            scheduleWorkoutWriteRetry()
+        } else if !hasImmediatelyDeliverableWorkoutWrite {
+            let durableQueuesAreEmpty = SetOutboxStore.load(
+                userID: accountID, defaults: defaults).isEmpty
+                && WorkoutTerminalOutboxStore.load(
+                    userID: accountID, defaults: defaults).intents.isEmpty
+                && SetCorrectionOutboxStore.load(userID: accountID, defaults: defaults).isEmpty
+            cancelWorkoutWriteRetry(
+                resetAttempt: true,
+                clearServerDeadline: durableQueuesAreEmpty)
+        }
+    }
+
+    private func scheduleWorkoutWriteRetry() {
+        // Another same-account generation can finish an older in-flight 503
+        // while this model is handling a different transient result. Re-read
+        // the shared floor immediately before choosing any new send time.
+        adoptPersistedWorkoutWriteRetryDeadline()
+        if let notBefore = workoutWriteRetryNotBefore {
+            let remaining = notBefore.timeIntervalSince(now())
+            if remaining > 0 {
+                workoutWriteRetryMinimumDelayNanoseconds = max(
+                    workoutWriteRetryMinimumDelayNanoseconds ?? 0,
+                    retryDelayNanoseconds(seconds: remaining))
+            }
+        }
+        guard automaticWorkoutWriteRetryEnabled,
+              workoutWriteRetryTask == nil,
+              currentJWT != nil,
+              canInitiateBoundFeatureAction,
+              hasImmediatelyDeliverableWorkoutWrite,
+              !workoutWriteRetryDelaysNanoseconds.isEmpty
+        else { return }
+
+        let delayIndex = min(
+            workoutWriteRetryAttempt,
+            workoutWriteRetryDelaysNanoseconds.count - 1)
+        let delay = max(
+            workoutWriteRetryDelaysNanoseconds[delayIndex],
+            workoutWriteRetryMinimumDelayNanoseconds ?? 0)
+        let scheduledServerDeadline = workoutWriteRetryNotBefore
+        if workoutWriteRetryAttempt < workoutWriteRetryDelaysNanoseconds.count - 1 {
+            workoutWriteRetryAttempt += 1
+        }
+        workoutWriteRetryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await self.workoutWriteRetrySleeper(delay)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled,
+                  self.currentJWT != nil,
+                  self.canInitiateBoundFeatureAction
+            else {
+                self.workoutWriteRetryTask = nil
+                return
+            }
+            self.workoutWriteRetryTask = nil
+            // This task slept for the max of local backoff and Retry-After.
+            // Clearing the floor here lets its own drain proceed even when an
+            // injected test clock is fixed.
+            if let scheduledServerDeadline {
+                WorkoutWriteRetryDeadlineStore.clear(
+                    through: scheduledServerDeadline,
+                    userID: self.accountID,
+                    defaults: self.defaults)
+            }
+            self.workoutWriteRetryNotBefore = nil
+            self.workoutWriteRetryMinimumDelayNanoseconds = nil
+            await self.drainWorkoutWriteOutboxes()
+        }
+    }
+
+    private func cancelWorkoutWriteRetry(
+        resetAttempt: Bool,
+        clearServerDeadline: Bool = false
+    ) {
+        workoutWriteRetryTask?.cancel()
+        workoutWriteRetryTask = nil
+        if resetAttempt {
+            workoutWriteRetryAttempt = 0
+            workoutWriteRetryMinimumDelayNanoseconds = nil
+            workoutWriteRetryNotBefore = nil
+            if clearServerDeadline, let accountID {
+                WorkoutWriteRetryDeadlineStore.clear(
+                    userID: accountID, defaults: defaults)
+            }
+        }
+    }
+
+    private func adoptPersistedWorkoutWriteRetryDeadline() {
+        if let persisted = WorkoutWriteRetryDeadlineStore.load(
+            userID: accountID, defaults: defaults),
+           persisted > (workoutWriteRetryNotBefore ?? .distantPast)
+        {
+            workoutWriteRetryNotBefore = persisted
+        }
+    }
+
+    private var hasImmediatelyDeliverableWorkoutWrite: Bool {
+        if setOutbox.pending.contains(where: {
+            $0.deliveryState == .queued && ownedSetIntentIDs.contains($0.id)
+        }) {
+            return true
+        }
+        if setCorrections.contains(where: { correction in
+            correction.deliveryState == .queued && ownedCorrectionIDs.contains(correction.id)
+                && !setOutbox.pending.contains(where: { $0.id == correction.setID })
+        }) { return true }
+        return terminalOutbox.intents.contains { intent in
+            guard ownedTerminalIntentIDs.contains(intent.id),
+                  intent.deliveryState == .queued
+            else { return false }
+            if intent.action == .discard { return true }
+            return !setOutbox.pending.contains { $0.workoutScope == intent.workoutScope }
+                && !setCorrections.contains { $0.workoutScope == intent.workoutScope }
+        }
+    }
+
+    /// Persisted discard dominates both queued and visibly-failed sets. This
+    /// method is intentionally safe to repeat: it also closes the crash window
+    /// between saving the terminal barrier and pruning the older set key.
+    private func supersedeSetIntentsForDiscardBarriers() {
+        guard canMutateBoundSetAccount else { return }
+        // Never let a stale in-memory acknowledged discard erase sets from an
+        // explicit restart performed by a replacement model.
+        adoptDurableWorkoutWriteOutboxes()
+        for scope in discardBarrierScopes {
+            SetCorrectionOutboxStore.remove(date: scope.date, slot: scope.slot, userID: accountID, defaults: defaults)
+            setCorrections.removeAll { $0.workoutScope == scope }
+            setOutbox.remove(date: scope.date, slot: scope.slot)
+            SetOutboxStore.remove(date: scope.date, slot: scope.slot, userID: accountID, defaults: defaults)
+        }
+        setOutbox = SetOutboxStore.load(
+            userID: accountID, defaults: defaults)
+        applyLocalDiscardMask()
+    }
+
+    /// One serialized pass: discards first, then sets, then finishes whose
+    /// exact workout has no queued or failed set left. A finish therefore
+    /// cannot overtake its data, while discard never waits on data it erases.
+    private func performWorkoutWriteDrain() async -> Bool {
+        supersedeSetIntentsForDiscardBarriers()
+        if let discard = terminalOutbox.intents.first(where: {
+            ownedTerminalIntentIDs.contains($0.id)
+                && $0.action == .discard
+                && $0.deliveryState == .queued
+        }) {
+            return await sendPersistedTerminalIntent(discard)
+        }
+
+        let setStopped = await performSetOutboxDrain()
+        if setStopped { return true }
+        if await performSetCorrectionDrain() { return true }
+        supersedeSetIntentsForDiscardBarriers()
+
+        guard canInitiateBoundFeatureAction else { return true }
+
+        guard let terminal = terminalOutbox.intents.first(where: { intent in
+            guard ownedTerminalIntentIDs.contains(intent.id),
+                  intent.deliveryState == .queued
+            else { return false }
+            if intent.action == .discard { return true }
+            return !setOutbox.pending.contains { $0.workoutScope == intent.workoutScope }
+                && !setCorrections.contains { $0.workoutScope == intent.workoutScope }
+        }) else { return false }
+        return await sendPersistedTerminalIntent(terminal)
+    }
+
+    /// Returns true only when another immediate pass would repeat a transient
+    /// failure (or would cross an account boundary). A normal empty-queue exit
+    /// returns false so the owner can coalesce work that arrived during its
+    /// reconciliation await.
+    private func performSetOutboxDrain() async -> Bool {
+        var acknowledgements: [(
+            setID: String,
+            baselineProvedAcknowledgement: Bool
+        )] = []
+        var preferredSessionID: String?
+        var stoppedForRetryableFailure = false
+
+        while canInitiateBoundFeatureAction,
+              let intent = setOutbox.pending.first(where: {
+                  ownedSetIntentIDs.contains($0.id)
+                      && $0.deliveryState == .queued
+              }) {
+            supersedeSetIntentsForDiscardBarriers()
+            guard setOutbox.pending.contains(where: { $0.id == intent.id }) else {
+                continue
+            }
+            let outcome = await sendPersistedSetIntent(intent)
+            supersedeSetIntentsForDiscardBarriers()
+            switch outcome {
+            case let .acknowledged(
+                setID,
+                canonicalSessionID,
+                date,
+                baselineProvedAcknowledgement):
+                acknowledgements.append((
+                    setID: setID,
+                    baselineProvedAcknowledgement:
+                        baselineProvedAcknowledgement))
+                if date == todayString { preferredSessionID = canonicalSessionID }
+            case .permanentFailure:
+                // Keep the failed row visible and continue with later FIFO
+                // entries; retrying it later still reuses its exact body.
+                continue
+            case .superseded:
+                // `sendPersistedSetIntent` already adopted the replacement
+                // account queue. It may contain other immediately deliverable
+                // work, so continue rather than treating this as sign-out.
+                continue
+            case let .transientFailure(attemptedJWT, wasUnauthorized):
+                // A stale-token 401 can race same-account renewal. If renewal
+                // already installed a replacement token, retry immediately;
+                // otherwise stop and retain every queued intent.
+                if wasUnauthorized,
+                   let latestJWT = currentJWT,
+                   latestJWT != attemptedJWT,
+                   canMutateBoundSetAccount {
+                    continue
+                }
+                stoppedForRetryableFailure = true
+                break
+            case .staleAccount:
+                stoppedForRetryableFailure = true
+                break
+            }
+
+            if case .transientFailure = outcome { break }
+            if case .staleAccount = outcome { break }
+        }
+
+        guard !acknowledgements.isEmpty,
+              canMutateBoundSetAccount,
+              let jwt = currentJWT
+        else { return stoppedForRetryableFailure }
+        guard let snapshotTicket = StateSnapshotStore.reserveStateRequest(
+            userID: accountID, defaults: defaults)
+        else {
+            loadError = "Couldn't reserve local reconciliation state."
+            return true
+        }
+        do {
+            let state = try await setWriteAPI.getState(
+                jwt: jwt,
+                watermarks: snapshotTicket.watermarks)
+            guard canMutateBoundSetAccount else { return true }
+            guard StateSnapshotStore.isCurrent(
+                snapshotTicket, defaults: defaults)
+            else {
+                return stoppedForRetryableFailure
+            }
+            let returnedIDs = Set(state.sets.map(\.id))
+            let incrementalSetPull = snapshotTicket.watermarks.setsSince > 0
+            let missingAcknowledgedIDs = Set(
+                acknowledgements.compactMap { acknowledgement in
+                    let baselineAlreadyProvesSet = incrementalSetPull
+                        && acknowledgement.baselineProvedAcknowledgement
+                    return !baselineAlreadyProvesSet
+                            && !returnedIDs.contains(acknowledgement.setID)
+                        ? acknowledgement.setID
+                        : nil
+                })
+            guard missingAcknowledgedIDs.isEmpty else {
+                // The successful POST is the mutation boundary. An incomplete
+                // delta cannot revoke that acknowledged result or invite a
+                // duplicate retry; retain every ACK merge and clear only the
+                // cursors so the next pull is an explicit full reload.
+                _ = StateSnapshotStore.requireFullReload(
+                    userID: accountID, defaults: defaults)
+                loadError = acknowledgements.count == 1
+                    ? "Set was saved, but the latest sync response was incomplete. A full refresh will reconcile it."
+                    : "Sets were saved, but the latest sync response was incomplete. A full refresh will reconcile them."
+                return stoppedForRetryableFailure
+            }
+            guard applyLiveStateResponse(
+                state,
+                ticket: snapshotTicket,
+                preferredTodaySessionID: preferredSessionID
+            ) else { return stoppedForRetryableFailure }
+            loadError = nil
+        } catch {
+            guard canMutateBoundSetAccount else { return true }
+            guard StateSnapshotStore.isCurrent(
+                snapshotTicket, defaults: defaults)
+            else {
+                return stoppedForRetryableFailure
+            }
+            // The acknowledgement itself remains authoritative and is already
+            // reflected locally. A later delta (or safety full reload) will
+            // reconcile the cache.
+            handle(error, jwt: jwt)
+        }
+        return stoppedForRetryableFailure
+    }
+
+    /// Returns true only for a retryable/account-boundary stop. Permanent 4xx
+    /// failures remain visible but do not block recovery work for other dates.
+    private func sendPersistedTerminalIntent(
+        _ original: WorkoutTerminalIntent
+    ) async -> Bool {
+        guard canInitiateBoundFeatureAction, currentJWT != nil else { return true }
+        guard var intent = durableTerminalIntent(matching: original) else {
+            // The account remains valid, but a newer model owns (or cleared)
+            // this date. The durable adoption above is the authoritative local
+            // state; there is nothing for this stale sender to retry.
+            _ = adoptLatestAcknowledgedSnapshot(for: original.workoutScope)
+            return false
+        }
+
+        sendingTerminalIntentID = intent.id
+        isTerminalMutationInFlight = true
+        defer {
+            if sendingTerminalIntentID == intent.id {
+                sendingTerminalIntentID = nil
+            }
+            isTerminalMutationInFlight = sendingTerminalIntentID != nil
+        }
+
+        if intent.resolvedSessionID == nil {
+            guard let jwt = currentJWT else { return true }
+            let session: SessionRow
+            do {
+                session = try await setWriteAPI.createSession(
+                    date: intent.date, slot: intent.sessionSlot ?? 0,
+                    workoutID: intent.workoutID,
+                    expectedAttempt: intent.expectedAttempt ?? 0,
+                    restartDiscardedAttempt: intent.restartDiscardedAttempt,
+                    jwt: jwt)
+            } catch {
+                // Match set recovery: update_plan can invalidate the optional
+                // day UUID while this terminal choice is offline. Retry the
+                // existing date-level endpoint without that stale association.
+                guard intent.workoutID != nil,
+                      isPermanentSetClientError(error),
+                      canInitiateBoundFeatureAction,
+                      let fallbackJWT = currentJWT
+                else {
+                    return classifyTerminalIntentFailure(
+                        original, error: error, attemptedJWT: jwt)
+                }
+                do {
+                    session = try await setWriteAPI.createSession(
+                        date: intent.date, slot: intent.sessionSlot ?? 0,
+                        workoutID: nil,
+                        expectedAttempt: intent.expectedAttempt ?? 0,
+                        restartDiscardedAttempt: intent.restartDiscardedAttempt,
+                        jwt: fallbackJWT)
+                } catch {
+                    return classifyTerminalIntentFailure(
+                        original, error: error, attemptedJWT: fallbackJWT)
+                }
+            }
+
+            guard durableTerminalIntent(matching: intent) != nil else {
+                return false
+            }
+            guard session.workoutScope == intent.workoutScope else {
+                return classifyTerminalIntentFailure(
+                    intent,
+                    error: APIError.decoding(
+                        "Session resolution did not match the terminal date"),
+                    attemptedJWT: jwt)
+            }
+            let createdAttempt = intent.restartDiscardedAttempt.map { $0 + 1 }
+                ?? intent.expectedAttempt
+                ?? 0
+            guard session.attempt == nil || session.attempt == createdAttempt else {
+                return classifyTerminalIntentFailure(
+                    intent,
+                    error: APIError.decoding(
+                        "Session resolution crossed workout attempts"),
+                    attemptedJWT: jwt)
+            }
+            guard let resolvedSession = acceptSessionResolution(session) else {
+                return classifyTerminalIntentFailure(
+                    intent,
+                    error: APIError.decoding(
+                        "Session resolution was superseded locally"),
+                    attemptedJWT: jwt)
+            }
+            // Bind the runner before persisting the outbox resolution. A kill
+            // before this point leaves the intent safely unresolved and the
+            // create retry idempotent; after it, both durable records name the
+            // same generation.
+            bindRunnerCheckpoint(to: resolvedSession)
+            intent.resolvedSessionID = resolvedSession.id
+            intent.expectedAttempt = resolvedSession.attempt ?? createdAttempt
+            terminalOutbox.replace(intent)
+            persistReplacedTerminalIntent(intent)
+            guard let durable = durableTerminalIntent(matching: intent) else {
+                return false
+            }
+            intent = durable
+        }
+
+        // Session creation is an await too. Revalidate the exact account
+        // intent immediately before the destructive/completing request; a
+        // newer model may have discarded, restarted, or cleared it meanwhile.
+        guard canInitiateBoundFeatureAction,
+              let durable = durableTerminalIntent(matching: intent)
+        else {
+            return false
+        }
+        guard let sessionID = durable.resolvedSessionID,
+              let jwt = currentJWT
+        else { return true }
+        intent = durable
+        if intent.expectedAttempt == nil {
+            // Migration 0032 gives every preexisting session and durable
+            // intent generation zero. Never retarget a decoded legacy intent
+            // to the currently observed generation.
+            intent.expectedAttempt = 0
+            terminalOutbox.replace(intent)
+            persistReplacedTerminalIntent(intent)
+            guard let rebound = durableTerminalIntent(matching: intent) else {
+                return false
+            }
+            intent = rebound
+        }
+        do {
+            let response: SessionRow
+            switch intent.action {
+            case .finish:
+                // A failed set remains in the queue and is just as unsettled
+                // as a queued one; the caller excludes both before reaching us.
+                guard !setOutbox.pending.contains(where: {
+                    $0.workoutScope == intent.workoutScope
+                }), !setCorrections.contains(where: { $0.workoutScope == intent.workoutScope }) else { return false }
+                response = try await terminalAPI.completeSession(
+                    sessionId: sessionID,
+                    expectedAttempt: intent.expectedAttempt,
+                    feedback: intent.feedback,
+                    jwt: jwt)
+            case .discard:
+                response = try await terminalAPI.discardSession(
+                    sessionId: sessionID,
+                    expectedAttempt: intent.expectedAttempt,
+                    jwt: jwt)
+            }
+
+            guard canMutateBoundSetAccount else { return true }
+            // Another same-account model may have replaced this durable choice
+            // while the request was in flight (most importantly finish →
+            // discard). The account store, not this stale instance's in-memory
+            // copy, decides whether the callback is still current.
+            guard WorkoutTerminalOutboxStore.load(
+                    userID: accountID, defaults: defaults
+                  ).intent(for: intent.date, slot: intent.sessionSlot ?? 0)?.id == intent.id
+            else {
+                // This instance is no longer the owner. Drop only its stale
+                // in-memory copy; the granular durable store already contains
+                // either the replacement choice or no work at all. Adopting the
+                // replacement here would create a second sender.
+                terminalOutbox.remove(id: intent.id)
+                _ = adoptLatestAcknowledgedSnapshot(for: intent.workoutScope)
+                return false
+            }
+            // Discard may have replaced an in-flight finish. Its response is
+            // real server history, but the stale callback cannot touch the
+            // newer local intent; the coordinator will send discard next.
+            guard terminalOutbox.intent(for: intent.date, slot: intent.sessionSlot ?? 0)?.id == intent.id else {
+                return false
+            }
+            let expectedStatus = intent.action == .finish ? "completed" : "discarded"
+            guard response.workoutScope == intent.workoutScope,
+                  response.status == expectedStatus,
+                  intent.action != .finish || intent.feedback?.matches(response) != false,
+                  intent.expectedAttempt == nil
+                    || response.attempt == nil
+                    || response.attempt == intent.expectedAttempt
+            else {
+                throw APIError.decoding(
+                    "Terminal acknowledgement did not match the persisted intent")
+            }
+
+            switch intent.action {
+            case .finish:
+                let applied = applyTerminalAcknowledgementLocally(
+                    response, action: .finish)
+                guard let persisted = persistTerminalAcknowledgement(
+                    response, action: .finish)
+                else {
+                    loadError = "Workout finished on the server, but its local recovery snapshot couldn't be saved. It will retry safely."
+                    return true
+                }
+                applyState(
+                    persisted.state,
+                    preferredTodaySessionID: persisted.state.sessions.first {
+                        $0.workoutScope == response.workoutScope
+                    }?.id,
+                    isLiveResponse: false)
+                terminalOutbox.remove(id: intent.id)
+                persistRemovedTerminalIntent(id: intent.id)
+                summaryRevision &+= 1
+                if let summary = response.summary, summary.version == 1, summary.final,
+                   summary.session_id == response.id, summary.attempt == (response.attempt ?? 0) {
+                    completionSummaries[response.id] = summary
+                    completionSummaryRevisions[response.id] = summaryRevision
+                }
+                if applied, intent.workoutScope == currentWorkoutScope {
+                    stopRunnerAfterTerminalAck()
+                }
+            case .discard:
+                summaryRevision &+= 1
+                applyTerminalAcknowledgementLocally(response, action: .discard)
+                applyLocalDiscardMask()
+                guard let persisted = persistTerminalAcknowledgement(
+                    response, action: .discard)
+                else {
+                    loadError = "Workout was discarded on the server, but its local recovery snapshot couldn't be saved. It will retry safely."
+                    return true
+                }
+                applyState(
+                    persisted.state,
+                    preferredTodaySessionID: nil,
+                    isLiveResponse: false)
+                applyLocalDiscardMask()
+                intent.resolvedSessionID = response.id
+                intent.expectedAttempt = response.attempt
+                intent.deliveryState = .acknowledged
+                intent.failedHTTPStatus = nil
+                terminalOutbox.replace(intent)
+                persistReplacedTerminalIntent(intent)
+            }
+            loadError = nil
+            return false
+        } catch {
+            return classifyTerminalIntentFailure(
+                intent, error: error, attemptedJWT: jwt)
+        }
+    }
+
+    private func classifyTerminalIntentFailure(
+        _ attempted: WorkoutTerminalIntent,
+        error: Error,
+        attemptedJWT: String
+    ) -> Bool {
+        guard canMutateBoundSetAccount else { return true }
+        // A newer discard superseded this callback while its request was in
+        // flight. Never recreate or overwrite that newer durable choice.
+        guard var current = terminalOutbox.intent(for: attempted.date, slot: attempted.sessionSlot ?? 0),
+              current.id == attempted.id
+        else { return false }
+        if let apiError = error as? APIError, apiError.httpStatus == 409,
+           let data = apiError.httpBody?.data(using: .utf8),
+           let conflict = try? JSONDecoder().decode(SessionWriteConflictPayload.self, from: data),
+           conflict.error == "session_feedback_conflict", current.action == .finish,
+           conflict.current_session.workoutScope == current.workoutScope,
+           conflict.current_session.attempt == current.expectedAttempt {
+            // The authenticated Worker can resolve the submitted alias to
+            // its canonical session. Date and attempt bind the same workout.
+            current.resolvedSessionID = conflict.current_session.id
+            current.deliveryState = .failed
+            current.failedHTTPStatus = 409
+            current.feedbackConflict = WorkoutFeedbackBaseline(notes: conflict.current_session.notes,
+                perceivedFatigue: conflict.current_session.perceived_fatigue)
+            terminalOutbox.replace(current)
+            persistReplacedTerminalIntent(current)
+            adoptSessionWriteConflict(conflict.current_session)
+            loadError = "Feedback changed elsewhere. Review both versions before finishing."
+            return false
+        }
+        if let conflict = sessionWriteConflict(from: error),
+           conflict.current_session.workoutScope == attempted.workoutScope
+        {
+            switch current.action {
+            case .finish:
+                terminalOutbox.remove(id: current.id)
+                persistRemovedTerminalIntent(id: current.id)
+            case .discard:
+                terminalOutbox.retireSupersededDiscard(id: current.id)
+                WorkoutTerminalOutboxStore.retireSupersededDiscard(
+                    id: current.id,
+                    userID: accountID,
+                    defaults: defaults)
+                ownedTerminalIntentIDs.remove(current.id)
+            }
+            adoptSessionWriteConflict(conflict.current_session)
+            loadError = nil
+            return false
+        }
+        if isPermanentSetClientError(error),
+           let code = (error as? APIError)?.httpStatus {
+            current.deliveryState = .failed
+            current.failedHTTPStatus = code
+            terminalOutbox.replace(current)
+            persistReplacedTerminalIntent(current)
+            loadError = "Workout \(current.action == .finish ? "finish" : "discard") wasn't saved because the server rejected it (HTTP \(code))."
+            return false
+        }
+        recordRetryAfter(from: error)
+        handle(error, jwt: attemptedJWT)
+        if (error as? APIError)?.httpStatus == 401,
+           let latestJWT = currentJWT,
+           latestJWT != attemptedJWT {
+            return false
+        }
+        return true
+    }
+
+    private func sendPersistedSetIntent(_ original: PendingSetIntent) async -> SetSendOutcome {
+        guard canInitiateBoundFeatureAction, currentJWT != nil else {
+            return .staleAccount
+        }
+        guard var intent = durableSetIntent(matching: original) else {
+            _ = adoptLatestAcknowledgedSnapshot(for: original.workoutScope)
+            return .superseded
+        }
+        sendingSetIntentIDs.insert(intent.id)
+        defer { sendingSetIntentIDs.remove(intent.id) }
+
+        let session: SessionRow
+        if let sessionID = intent.resolvedSessionID {
+            session = sessions.first(where: { $0.id == sessionID })
+                ?? SessionRow(
+                    slot: intent.sessionSlot, id: sessionID,
+                    date: intent.date,
+                    status: "in_progress",
+                    workout_id: intent.workoutID)
+        } else {
+            guard let jwt = currentJWT else { return .staleAccount }
+            let createdSession: SessionRow
+            do {
+                createdSession = try await setWriteAPI.createSession(
+                    date: intent.date, slot: intent.sessionSlot ?? 0,
+                    workoutID: intent.workoutID,
+                    expectedAttempt: intent.expectedAttempt ?? 0,
+                    restartDiscardedAttempt: intent.restartDiscardedAttempt,
+                    jwt: jwt)
+            } catch {
+                // update_plan may rebuild every day UUID while this offline
+                // intent is unresolved. A rejected persisted association must
+                // not poison the FIFO forever: clear only that stale optional
+                // FK, persist before the fallback await, and let the date's
+                // canonical session preserve the set itself.
+                guard intent.workoutID != nil,
+                      isPermanentSetClientError(error),
+                      canInitiateBoundFeatureAction,
+                      currentJWT != nil,
+                      durableSetIntent(matching: intent) != nil
+                else {
+                    return classifySetIntentFailure(
+                        intentID: intent.id,
+                        error: error,
+                        attemptedJWT: jwt)
+                }
+                intent.workoutID = nil
+                guard persistReplacedSetIntent(intent),
+                      canInitiateBoundFeatureAction,
+                      let fallbackJWT = currentJWT else { return .staleAccount }
+                setOutbox.replace(intent)
+                do {
+                    createdSession = try await setWriteAPI.createSession(
+                        date: intent.date, slot: intent.sessionSlot ?? 0,
+                        workoutID: nil,
+                        expectedAttempt: intent.expectedAttempt ?? 0,
+                        restartDiscardedAttempt: intent.restartDiscardedAttempt,
+                        jwt: fallbackJWT)
+                } catch {
+                    return classifySetIntentFailure(
+                        intentID: intent.id,
+                        error: error,
+                        attemptedJWT: fallbackJWT)
+                }
+            }
+            guard canInitiateBoundFeatureAction else { return .staleAccount }
+            guard let durable = durableSetIntent(matching: intent) else {
+                return .superseded
+            }
+            intent = durable
+            let createdAttempt = intent.restartDiscardedAttempt.map { $0 + 1 }
+                ?? intent.expectedAttempt
+                ?? 0
+            guard createdSession.attempt == nil
+                    || createdSession.attempt == createdAttempt
+            else {
+                return classifySetIntentFailure(
+                    intentID: intent.id,
+                    error: APIError.decoding(
+                        "Session resolution crossed workout attempts"),
+                    attemptedJWT: jwt)
+            }
+            guard let resolvedSession = acceptSessionResolution(createdSession) else {
+                return classifySetIntentFailure(
+                    intentID: intent.id,
+                    error: APIError.decoding(
+                        "Session resolution was superseded locally"),
+                    attemptedJWT: jwt)
+            }
+            bindRunnerCheckpoint(to: resolvedSession)
+            session = resolvedSession
+            intent.resolvedSessionID = resolvedSession.id
+            intent.expectedAttempt = resolvedSession.attempt ?? createdAttempt
+            guard persistReplacedSetIntent(intent) else { return .staleAccount }
+            setOutbox.replace(intent)
+            guard let durable = durableSetIntent(matching: intent) else {
+                return .superseded
+            }
+            intent = durable
+        }
+
+        // Creation and fallback creation are awaits. Confirm that the exact
+        // durable set still exists and no discard barrier has superseded it
+        // immediately before logging. If another model already resolved the
+        // session, adopt that canonical id as well.
+        guard canInitiateBoundFeatureAction,
+              let durable = durableSetIntent(matching: intent)
+        else {
+            return .superseded
+        }
+        intent = durable
+        let writeSession: SessionRow
+        if durable.resolvedSessionID == session.id {
+            writeSession = session
+        } else if let resolvedSessionID = durable.resolvedSessionID {
+            writeSession = sessions.first(where: { $0.id == resolvedSessionID })
+                ?? SessionRow(
+                    id: resolvedSessionID,
+                    date: intent.date,
+                    status: "in_progress",
+                    workout_id: intent.workoutID)
+        } else {
+            return .superseded
+        }
+
+        // Queues written by an older app build may already have a resolved
+        // session id but no generation. Migration 0032 assigns them attempt
+        // zero; binding to a currently-observed later attempt would retarget
+        // stale work across another device's discard/restart.
+        if intent.expectedAttempt == nil {
+            intent.expectedAttempt = 0
+            guard persistReplacedSetIntent(intent) else { return .staleAccount }
+            setOutbox.replace(intent)
+            guard let rebound = durableSetIntent(matching: intent) else {
+                return .superseded
+            }
+            intent = rebound
+        }
+
+        bindRunnerCheckpoint(to: writeSession)
+
+        // The original body was persisted before session creation, and the
+        // resolved session id is persisted above before this POST await.
+        guard canInitiateBoundFeatureAction,
+              let jwt = currentJWT
+        else { return .staleAccount }
+        do {
+            let result = try await setWriteAPI.logSet(
+                sessionId: writeSession.id,
+                body: intent.body,
+                expectedAttempt: intent.expectedAttempt,
+                jwt: jwt)
+            guard canMutateBoundSetAccount else { return .staleAccount }
+            guard result.set.id == intent.id else {
+                throw APIError.decoding(
+                    "Set acknowledgement did not match the persisted intent")
+            }
+            if let acknowledgedSession = result.session {
+                let settlesSupersededAttempt = result.deduped
+                    && result.set.deleted_at != nil
+                    && intent.expectedAttempt != nil
+                    && acknowledgedSession.attempt != nil
+                    && acknowledgedSession.attempt! > intent.expectedAttempt!
+                guard acknowledgedSession.id == result.set.session_id,
+                      acknowledgedSession.workoutScope == intent.workoutScope,
+                      intent.expectedAttempt == nil
+                        || acknowledgedSession.attempt == nil
+                        || acknowledgedSession.attempt == intent.expectedAttempt
+                        || settlesSupersededAttempt
+                else {
+                    throw APIError.decoding(
+                        "Set acknowledgement returned a mismatched session")
+                }
+            }
+            let durableTerminal = WorkoutTerminalOutboxStore.load(
+                userID: accountID, defaults: defaults).intent(for: intent.date, slot: intent.sessionSlot ?? 0)
+            if durableTerminal?.action == .discard {
+                // A newer discard barrier superseded this older callback. It
+                // owns both cache visibility and eventual server ordering.
+                adoptDurableWorkoutWriteOutboxes()
+                return .superseded
+            }
+            let durableSets = SetOutboxStore.load(
+                userID: accountID, defaults: defaults)
+            guard durableSets.pending.contains(where: { $0.id == intent.id }) else {
+                // A replacement model already settled this exact idempotent
+                // write and persisted its ACK. Do not re-merge stale context.
+                setOutbox.remove(id: intent.id)
+                _ = adoptLatestAcknowledgedSnapshot(for: intent.workoutScope)
+                return .acknowledged(
+                    setID: result.set.id,
+                    canonicalSessionID: result.set.session_id,
+                    date: intent.date,
+                    baselineProvedAcknowledgement: true)
+            }
+            let baselineRow = StateSnapshotStore.load(
+                    userID: accountID,
+                    defaults: defaults
+                )?.state.sets.first { $0.id == result.set.id }
+            let baselineProvedAcknowledgement: Bool
+            if let baselineVersion = baselineRow?.updated_at,
+               let responseVersion = result.set.updated_at
+            {
+                // A baseline at least as new as the POST body already proves
+                // this UUID even when an incremental overlap legitimately
+                // omits it. A newer correction/delete must still appear.
+                baselineProvedAcknowledgement =
+                    baselineVersion >= responseVersion
+            } else {
+                baselineProvedAcknowledgement = false
+            }
+            summaryRevision &+= 1
+            applySetAcknowledgement(
+                result,
+                intent: intent,
+                submittedSession: writeSession)
+            guard let persisted = persistSetAcknowledgement(
+                result, submittedSession: writeSession)
+            else {
+                loadError = "Set was saved on the server, but its local recovery snapshot couldn't be saved. It will retry safely."
+                return .transientFailure(
+                    attemptedJWT: jwt, wasUnauthorized: false)
+            }
+            // The shared snapshot may contain a newer tombstone/correction than
+            // this delayed POST body. Re-adopt its ordered result before the
+            // durable intent is retired so stale live data is never published.
+            applyState(
+                persisted.state,
+                preferredTodaySessionID: result.set.session_id,
+                isLiveResponse: false)
+            setOutbox.remove(id: intent.id)
+            persistRemovedSetIntentIDs(Set([intent.id]))
+            normalizeMountedRunnerProgress(for: intent.date)
+            return .acknowledged(
+                setID: result.set.id,
+                canonicalSessionID: result.set.session_id,
+                date: intent.date,
+                baselineProvedAcknowledgement:
+                    baselineProvedAcknowledgement)
+        } catch {
+            return classifySetIntentFailure(
+                intentID: intent.id, error: error, attemptedJWT: jwt)
+        }
+    }
+
+    private func classifySetIntentFailure(
+        intentID: String,
+        error: Error,
+        attemptedJWT: String
+    ) -> SetSendOutcome {
+        guard canMutateBoundSetAccount else { return .staleAccount }
+        if let intent = setOutbox.pending.first(where: { $0.id == intentID }),
+           let conflict = sessionWriteConflict(from: error),
+           conflict.current_session.workoutScope == intent.workoutScope
+        {
+            setOutbox.remove(id: intent.id)
+            persistRemovedSetIntentIDs(Set([intent.id]))
+            adoptSessionWriteConflict(conflict.current_session)
+            loadError = nil
+            return .superseded
+        }
+        if isPermanentSetClientError(error),
+           let code = (error as? APIError)?.httpStatus {
+            if var intent = setOutbox.pending.first(where: { $0.id == intentID }) {
+                intent.deliveryState = .failed
+                intent.failedHTTPStatus = code
+                guard persistReplacedSetIntent(intent) else { return .staleAccount }
+                setOutbox.replace(intent)
+                reopenMountedRunner(for: intent)
+            }
+            loadError = "Set wasn't saved because the server rejected it (HTTP \(code))."
+            return .permanentFailure
+        }
+        recordRetryAfter(from: error)
+        handle(error, jwt: attemptedJWT)
+        let unauthorized = (error as? APIError)?.httpStatus == 401
+        return .transientFailure(
+            attemptedJWT: attemptedJWT,
+            wasUnauthorized: unauthorized)
+    }
+
+    private func isPermanentSetClientError(_ error: Error) -> Bool {
+        guard let code = (error as? APIError)?.httpStatus else { return false }
+        return (400..<500).contains(code) && ![401, 408, 429].contains(code)
+    }
+
+    private func retryDelayNanoseconds(seconds: TimeInterval) -> UInt64 {
+        let bounded = min(
+            max(seconds, 0), Self.maximumRetryAfterSeconds)
+        return UInt64((bounded * 1_000_000_000).rounded(.up))
+    }
+
+    private func retryAfterDelay(
+        from error: Error
+    ) -> (seconds: TimeInterval, nanoseconds: UInt64)? {
+        guard let seconds = (error as? APIError)?.retryAfter,
+              seconds.isFinite,
+              seconds >= 0
+        else { return nil }
+        let bounded = min(seconds, Self.maximumRetryAfterSeconds)
+        return (bounded, retryDelayNanoseconds(seconds: bounded))
+    }
+
+    private func recordRetryAfter(from error: Error) {
+        guard let retryAfter = retryAfterDelay(from: error) else {
+            workoutWriteRetryMinimumDelayNanoseconds = nil
+            workoutWriteRetryNotBefore = nil
+            return
+        }
+        workoutWriteRetryMinimumDelayNanoseconds = retryAfter.nanoseconds
+        let proposed = now().addingTimeInterval(retryAfter.seconds)
+        workoutWriteRetryNotBefore = WorkoutWriteRetryDeadlineStore.extend(
+            to: proposed, userID: accountID, defaults: defaults)
+    }
+
+    private func sessionWriteConflict(
+        from error: Error
+    ) -> SessionWriteConflictPayload? {
+        guard let apiError = error as? APIError,
+              apiError.httpStatus == 409,
+              let body = apiError.httpBody,
+              let data = body.data(using: .utf8),
+              let payload = try? JSONDecoder().decode(
+                  SessionWriteConflictPayload.self, from: data),
+              payload.error == "session_attempt_conflict"
+                || payload.error == "session_discarded"
+                || payload.error == "session_state_conflict"
+        else { return nil }
+        return payload
+    }
+
+    /// A 409 with `current_session` is authoritative proof that this durable
+    /// write belongs to an obsolete workout attempt. Advance the shared cache
+    /// before allowing another model/load to act, then mirror that state here.
+    private func adoptSessionWriteConflict(_ session: SessionRow) {
+        guard canMutateBoundSetAccount else { return }
+        let transform: (StateResponse) -> StateResponse = { newest in
+            if session.status == "discarded" {
+                return Self.mergingTerminalAcknowledgement(
+                    into: newest, response: session, action: .discard)
+            }
+            return Self.mergingSessionResolution(
+                into: newest, response: session)
+        }
+        let persisted = StateSnapshotStore.mergeAcknowledgement(
+            userID: accountID,
+            fallback: currentStateResponse(),
+            defaults: defaults,
+            transform: transform)
+        // Explicit cache invalidation deliberately makes the persistence
+        // merge return nil. The 409 current_session is still authoritative
+        // for this mounted model: apply it in memory and retire the obsolete
+        // runner without recreating the invalidated snapshot.
+        let resolvedState = persisted?.state
+            ?? transform(currentStateResponse())
+        applyState(
+            resolvedState,
+            preferredTodaySessionID: nil,
+            isLiveResponse: false)
+        if let checkpoint = persistedRunnerCheckpoint,
+           checkpoint.workoutScope == session.workoutScope
+        {
+            // The rejected durable write belonged to this runner's date. A
+            // nil attempt is legacy/unknown, not permission to join the newer
+            // workout, so retire the runner regardless of whether both tokens
+            // can be compared.
+            stopRunnerForStateChange()
+        } else if ["completed", "skipped", "discarded"].contains(session.status),
+                  session.workoutScope == currentWorkoutScope
+        {
+            stopRunnerForStateChange()
+        }
+    }
+
+    private func upsertSessionAfterCreate(_ session: SessionRow) {
+        guard canMutateBoundSetAccount else { return }
+        if let index = sessions.firstIndex(where: { $0.id == session.id }) {
+            sessions[index] = session
+        } else {
+            sessions.append(session)
+        }
+        if session.workoutScope == currentWorkoutScope { todaySession = session }
+    }
+
+    private func applySetAcknowledgement(
+        _ result: APIClient.SetLogResult,
+        intent: PendingSetIntent,
+        submittedSession: SessionRow
+    ) {
+        // New Workers echo the canonical session/status. Rolling old Workers
+        // still prove the narrow planned -> in_progress transition.
+        let acknowledgedSession = Self.sessionAcknowledgedBySet(
+            result, submittedSession: submittedSession)
+        let current = Self.newestSession(in: sessions.filter {
+            $0.workoutScope == acknowledgedSession.workoutScope
+        })
+        let responseWins = current == nil
+            || Self.responseCanReplaceSession(
+                current!, with: acknowledgedSession, kind: .set)
+        let effectiveSession = responseWins
+            ? acknowledgedSession
+            : current ?? acknowledgedSession
+        let effectiveDiscard = effectiveSession.status == "discarded"
+        if result.set.deleted_at != nil {
+            sets.removeAll { $0.id == result.set.id }
+        }
+        if effectiveDiscard {
+            let sameScopeSessionIDs = Set(
+                sessions.lazy.filter {
+                    $0.workoutScope == effectiveSession.workoutScope
+                }.map(\.id))
+                .union([
+                    submittedSession.id,
+                    acknowledgedSession.id,
+                    result.set.session_id,
+                ])
+            sessions.removeAll { $0.workoutScope == effectiveSession.workoutScope }
+            sessions.append(effectiveSession)
+            sets.removeAll { sameScopeSessionIDs.contains($0.session_id) }
+            if effectiveSession.workoutScope == currentWorkoutScope {
+                todaySession = effectiveSession
+            }
+        } else if result.set.deleted_at != nil {
+            if responseWins { upsertSessionAfterCreate(effectiveSession) }
+        } else if responseWins,
+                  result.set.session_id == submittedSession.id
+        {
+            upsertSessionAfterCreate(effectiveSession)
+            if let index = sets.firstIndex(where: { $0.id == result.set.id }) {
+                sets[index] = result.set
+            } else {
+                sets.append(result.set)
+            }
+        } else if responseWins {
+            // Preserve migration-0029 alias healing even when reconciliation
+            // later fails: collapse the stale local session immediately onto
+            // the canonical id echoed by the acknowledged set.
+            adoptSessionAliasLocally(
+                staleSession: effectiveSession,
+                committedSet: result.set,
+                submittedSlotID: intent.body.template_exercise_id)
+        } else {
+            // A later committed state owns the session fields. The set itself
+            // is still an accepted immutable fact unless that newer state is
+            // a discard, handled above.
+            if let index = sets.firstIndex(where: { $0.id == result.set.id }) {
+                if sets[index].deleted_at == nil { sets[index] = result.set }
+            } else {
+                sets.append(result.set)
+            }
+        }
+        if ["completed", "skipped", "discarded"].contains(
+               effectiveSession.status),
+           effectiveSession.workoutScope == currentWorkoutScope
+        {
+            // A deduped retry can reveal that another client already closed
+            // the workout. Enforce terminal precedence now; reconciliation is
+            // best effort and may fail while offline.
+            stopRunnerForStateChange()
+        }
+    }
+
+    /// A foreground recovery may settle a set after the original runner tap
+    /// already returned false on timeout. Advance the mounted runner from the
+    /// acknowledged set exactly as the original tap would have; the caller's
+    /// post-await check is idempotent because it sees the new current slot (or
+    /// the already-finished flag).
+    private func normalizeMountedRunnerProgress(
+        for date: String,
+        reseedCurrent: Bool = false,
+        forceGroupSelection: Bool = false,
+        preservingFocusIn groups: Set<String> = []
+    ) {
+        if assessedRPE != nil && rpe == nil { rpe = nil }
+        if running {
+            preflightMountedRunnerOwnership(
+                checkpointBeforeState: persistedRunnerCheckpoint)
+        }
+        guard !isPartnerWorkout, running, date == todayString, !exercises.isEmpty else { return }
+        defer { rememberGroupProgress() }
+        // An ACK may remove a previous set while another physical hold is in
+        // progress. Its selection repair waits for that hold's local commit.
+        if isFreestyle { return }
+        if timedActive && !reseedCurrent { return }
+        let group = currentExercise.flatMap { groupProgress(for: $0) }
+        let groupChanged = group.map { !groups.contains($0.id) && observedGroupProgress[$0.id] != $0 } ?? false
+        var groupSelectionChanged = false
+        if let group, forceGroupSelection || groupChanged,
+           let nextID = group.nextMemberID,
+           let next = exercises.firstIndex(where: { $0.id == nextID }), next != exerciseIndex {
+            exerciseIndex = next
+            groupSelectionChanged = true
+        }
+        let unresolved = exercises.indices.filter {
+            !isRunnerResolved(exercises[$0])
+        }
+        guard !unresolved.isEmpty else {
+            if !finished {
+                finished = true
+                runnerFocus.isExplicit = false
+                persistRunnerCheckpoint()
+            }
+            updateRestActivityAfterRunnerNormalization()
+            return
+        }
+
+        let wasFinished = finished
+        var selectionChanged = groupSelectionChanged
+        if !unresolved.contains(exerciseIndex), group == nil || groupChanged || forceGroupSelection {
+            let n = exercises.count
+            let next = (1...n)
+                .map { (exerciseIndex + $0) % n }
+                .first(where: unresolved.contains) ?? unresolved[0]
+            exerciseIndex = next
+            if let nextGroup = currentExercise.flatMap({ groupProgress(for: $0) }),
+               let memberID = nextGroup.nextMemberID,
+               let memberIndex = exercises.firstIndex(where: { $0.id == memberID }) {
+                exerciseIndex = memberIndex
+            }
+            selectionChanged = true
+        }
+        finished = false
+        // Reopening a finished workout is bookkeeping, not a new selection.
+        // This also covers a cold ACK absorbed before its next live read.
+        if selectionChanged { runnerFocus.isExplicit = false }
+        if reseedCurrent || selectionChanged || wasFinished {
+            seedInputs()
+        }
+        if reseedCurrent || selectionChanged || wasFinished {
+            persistRunnerCheckpoint()
+        }
+        updateRestActivityAfterRunnerNormalization()
+    }
+
+    private func currentExerciseMatchesRenderedAction(
+        _ expected: TemplateExercise,
+        current: TemplateExercise
+    ) -> Bool {
+        RunnerPrescription(expected) == RunnerPrescription(current)
+            && expected.group_id == current.group_id
+            && expected.group_rest_seconds == current.group_rest_seconds
+            && expected.group_transition_seconds == current.group_transition_seconds
+            && (expected.group_id == nil || expected.target_sets == current.target_sets)
+    }
+
+    // MARK: workouts on the same date
+
+    func sessions(on date: String) -> [SessionRow] {
+        CalendarProjection.visibleSessions(on: date, today: todayString, sessions: sessions, trips: plan?.trips ?? [])
+    }
+
+    var canSwitchWorkout: Bool {
+        canInitiateBoundFeatureAction && !isPartnerWorkout && !timedActive
+            && !isTerminalMutationInFlight && !isSwappingExercise && !isAddingWorkout
+            && !isReopeningSkippedWorkout && !runnerArtifactsOwnedByOther
+    }
+
+    var canAddAnotherWorkout: Bool {
+        canSwitchWorkout && hasVerifiedPlanState && !isUsingCachedState && !isLoading
+            && plan != nil && !isRoutineMutationInFlight && !todayProjection.suppressesScheduleAndEndurance
+    }
+
+    /// A switch retires shared timer UI, while retaining each workout's draft.
+    @discardableResult
+    func selectWorkout(_ session: SessionRow) -> Bool {
+        guard canSwitchWorkout, session.date == todayString,
+              let current = sessions.first(where: { $0.id == session.id }),
+              current.status != "discarded" else { return false }
+        return selectWorkoutScope(current.workoutScope, session: current)
+    }
+
+    @discardableResult
+    func selectPrimaryWorkout() -> Bool {
+        guard canSwitchWorkout else { return false }
+        let scope = WorkoutSessionScope(date: todayString, slot: 0)
+        return selectWorkoutScope(scope, session: sessions.first { $0.workoutScope == scope && $0.status != "discarded" })
+    }
+
+    private func selectWorkoutScope(_ scope: WorkoutSessionScope, session: SessionRow?) -> Bool {
+        if currentWorkoutScope == scope,
+           persistedRunnerCheckpoint == nil || persistedRunnerCheckpoint?.workoutScope == scope { return true }
+        if running && !persistRunnerCheckpoint() { return false }
+        guard WorkoutRunnerCheckpointStore.activate(scope,
+            ifCurrent: persistedRunnerCheckpoint, userID: accountID, defaults: defaults) else { return false }
+        skipRest()
+        clearTimedSet()
+        releaseRunnerArtifactOwnership()
+        running = false; finished = false; workoutStart = nil
+        lastRunnerSetID = nil
+        skipped = []; observedGroupProgress = [:]; deferredGroupRepair = nil
+        runnerFocus = RunnerFocusState(); workoutFeedback = nil
+        todaySession = session
+        persistedRunnerCheckpoint = WorkoutRunnerCheckpointStore.load(userID: accountID, defaults: defaults)
+        resumableCheckpoint = nil
+        runnerRestartDiscardedAttempt = persistedRunnerCheckpoint?.restartDiscardedAttempt
+        freestyleExercises = persistedRunnerCheckpoint?.freestyleExercises ?? []
+        sessionAdjustments = persistedRunnerCheckpoint?.sessionAdjustments ?? RunnerSessionAdjustments()
+        selectedDayID = session?.isFreestyle == true ? "freestyle:\(session!.id)"
+            : session?.workout_id ?? scheduledTemplate(forDateString: scope.date)?.id
+        validatePersistedRunnerCheckpoint()
+        return true
+    }
+
+    @discardableResult
+    func addAnotherWorkout(_ workoutID: String? = nil, firstExercise: ExerciseCatalog? = nil) async -> Bool {
+        guard canAddAnotherWorkout else { return false }
+        let saved = AdditionalWorkoutRequestStore.load(userID: accountID, defaults: defaults)
+        if let saved, saved.workoutID != workoutID || saved.firstExerciseID != firstExercise?.id {
+            pendingAdditionalWorkout = saved
+            loadError = "Retry adding the pending workout before adding a different one."
+            return false
+        }
+        let request = saved ?? AdditionalWorkoutRequest(id: uuidFactory().uuidString,
+            date: todayString, workoutID: workoutID, firstExerciseID: firstExercise?.id)
+        guard AdditionalWorkoutRequestStore.save(request, userID: accountID, defaults: defaults) else {
+            loadError = "Couldn't save this workout request on your iPhone. Retry saved data, then try again."
+            return false
+        }
+        pendingAdditionalWorkout = request
+        return await sendAdditionalWorkout(request)
+    }
+
+    @discardableResult
+    func retryAddingWorkout() async -> Bool {
+        guard canAddAnotherWorkout, let request = AdditionalWorkoutRequestStore.load(userID: accountID, defaults: defaults) else { return false }
+        return await sendAdditionalWorkout(request)
+    }
+
+    private func sendAdditionalWorkout(_ request: AdditionalWorkoutRequest) async -> Bool {
+        guard let jwt = currentJWT else { return false }
+        isAddingWorkout = true
+        defer { isAddingWorkout = false }
+        do {
+            let response = try await setWriteAPI.createAdditionalSession(id: request.id, date: request.date,
+                workoutID: request.workoutID, freestyle: request.isFreestyle, jwt: jwt)
+            guard canInitiateBoundFeatureAction, response.id == request.id, response.date == request.date,
+                  (response.slot ?? 0) > 0,
+                  let accepted = acceptSessionResolution(response) else { return false }
+            // The acknowledgement is now in the snapshot. Clearing a failed
+            // request never precedes that durable acknowledgement.
+            guard AdditionalWorkoutRequestStore.clear(request, userID: accountID, defaults: defaults) else {
+                pendingAdditionalWorkout = AdditionalWorkoutRequestStore.load(userID: accountID, defaults: defaults)
+                return true
+            }
+            pendingAdditionalWorkout = nil
+            isAddingWorkout = false
+            guard accepted.date == todayString, selectWorkout(accepted) else { return true }
+            if accepted.isFreestyle, let id = request.firstExerciseID, let exercise = catalogRow(id) {
+                freestyleExercises = freestyleDay?.exercises ?? []
+                if !freestyleExercises.contains(where: { $0.exercise_id == id }) {
+                    freestyleExercises.append(freestyleSlot(exercise, order: freestyleExercises.count))
+                }
+            }
+            // A retried receipt may refer to a workout changed elsewhere.
+            // Never let selectedDay's generic library fallback start a
+            // different workout under the acknowledged session identity.
+            let hasCurrentWorkout = accepted.isFreestyle
+                || plan?.availableWorkouts.contains(where: { $0.id == accepted.workout_id }) == true
+            // A receipt acknowledges creation even if another client has
+            // since ended or skipped it. Reopening requires an explicit action.
+            if !running && ["planned", "in_progress"].contains(accepted.status)
+                && hasCurrentWorkout && !(selectedDay?.exercises.isEmpty ?? true) {
+                if hasResumableWorkout { resumeWorkout() } else { startWorkout() }
+            }
+            return true
+        } catch {
+            guard canInitiateBoundFeatureAction else { return false }
+            if case let APIError.http(code, body) = error {
+                let rejection = body.data(using: .utf8).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["error"] as? String
+                if [400,404,422].contains(code) || (code == 409 && ["session_state_conflict", "session_id_conflict"].contains(rejection ?? "")) {
+                    if AdditionalWorkoutRequestStore.clear(request, userID: accountID, defaults: defaults) { pendingAdditionalWorkout = nil }
+                }
+            }
+            handle(error, jwt: jwt)
+            return false
+        }
+    }
+
+    // MARK: freestyle
+
+    var isFreestyle: Bool { todaySession?.isFreestyle == true && todaySession?.status != "discarded" }
+    var canStartFreestyle: Bool {
+        currentWorkoutScope.slot == 0 && canInitiateBoundFeatureAction && hasVerifiedPlanState
+            && !isUsingCachedState && !isLoading && !running && !todayIsCompleted
+            && !isStartingFreestyle && !hasResumableWorkout && !hasRunnerAwaitingSetRecovery
+            && !hasPendingTerminalIntentForCurrentWorkout
+            && (todaySession == nil || ["planned", "skipped", "discarded"].contains(todaySession?.status ?? "")
+                || todaySession?.isFreestyle == true)
+            && !todayProjection.suppressesScheduleAndEndurance
+    }
+
+    private var freestyleDay: Workout? {
+        guard let session = todaySession, session.isFreestyle, session.status != "discarded" else { return nil }
+        let checkpoint = persistedRunnerCheckpoint
+        let ownsCheckpoint = checkpoint?.sessionID == session.id && checkpoint?.sessionAttempt == session.attempt
+        var slots = ownsCheckpoint ? checkpoint?.freestyleExercises ?? [] : []
+        if selectedDayID == "freestyle:\(session.id)" && !freestyleExercises.isEmpty { slots = freestyleExercises }
+        let logged = setsForSession(session.id).sorted { $0.logged_at < $1.logged_at }
+        for set in logged where !slots.contains(where: { $0.exercise_id == set.exercise_id }) {
+            if let exercise = catalogRow(set.exercise_id) {
+                slots.append(FreestyleRunner.exercise(exercise, previous: set, order: slots.count))
+            }
+        }
+        return Workout(id: "freestyle:\(session.id)", name: "Freestyle", day_label: nil,
+                       order_index: 0, exercises: slots)
+    }
+
+    private func freestyleSlot(_ exercise: ExerciseCatalog, order: Int) -> TemplateExercise {
+        let completed = Set(sessions.filter { $0.status == "completed" && $0.id != todaySession?.id }.map(\.id))
+        let timed = exercise.modality == "timed" || exercise.modality == "cardio"
+        let previous = sets.filter { $0.exercise_id == exercise.id && $0.deleted_at == nil && $0.is_warmup == 0
+            && completed.contains($0.session_id) && isTimedSet($0) == timed }.max { $0.logged_at < $1.logged_at }
+        return FreestyleRunner.exercise(exercise, previous: previous, order: order)
+    }
+
+    func startFreestyleWorkout(with exercise: ExerciseCatalog) async -> Bool {
+        adoptDurableWorkoutWriteOutboxes()
+        guard canInitiateBoundFeatureAction, canStartFreestyle, let jwt = currentJWT else { return false }
+        isStartingFreestyle = true
+        defer { isStartingFreestyle = false }
+        let date = todayString
+        let attempt = sessions.first { $0.date == date && ($0.slot ?? 0) == currentWorkoutScope.slot }?.attempt
+            ?? terminalOutbox.intent(for: date, slot: currentWorkoutScope.slot)?.expectedAttempt ?? 0
+        if plan == nil {
+            guard await ensureRoutinePlan(name: "Workouts") != nil, canInitiateBoundFeatureAction else { return false }
+        }
+        do {
+            let session = try await freestyleAPI.startFreestyle(date: date, expectedAttempt: attempt, jwt: jwt)
+            guard canInitiateBoundFeatureAction, todayString == date else { return false }
+            guard let accepted = acceptSessionResolution(session, reconcileDiscardBarrier: true), accepted.isFreestyle,
+                  accepted.status == "in_progress" else { return false }
+            todaySession = accepted
+            // Starting from another device recovers its already logged exercises.
+            freestyleExercises = freestyleDay?.exercises ?? []
+            if !freestyleExercises.contains(where: { $0.exercise_id == exercise.id }) {
+                freestyleExercises.append(freestyleSlot(exercise, order: freestyleExercises.count))
+            }
+            selectedDayID = "freestyle:\(session.id)"
+            startWorkout()
+            if let index = exercises.firstIndex(where: { $0.exercise_id == exercise.id }) { jump(to: index) }
+            return running
+        } catch { handle(error, jwt: jwt); return false }
+    }
+
+    func addFreestyleExercise(_ exercise: ExerciseCatalog) -> Bool {
+        guard canInitiateBoundFeatureAction, running, isFreestyle, !timedActive,
+              !hasPendingTerminalIntentForCurrentWorkout else { return false }
+        freestyleExercises = exercises
+        if !freestyleExercises.contains(where: { $0.exercise_id == exercise.id }) {
+            guard freestyleExercises.count < 50 else { return false }
+            freestyleExercises.append(freestyleSlot(exercise, order: freestyleExercises.count))
+        }
+        if let index = freestyleExercises.firstIndex(where: { $0.exercise_id == exercise.id }) { jump(to: index) }
+        return persistRunnerCheckpoint()
+    }
+
+    // MARK: session-only work
+
+    private var canAdjustSessionWork: Bool {
+        canInitiateBoundFeatureAction && currentJWT != nil && running && !isFreestyle
+            && !isPartnerWorkout && !timedActive && !isSwappingExercise
+            && !isTerminalMutationInFlight && !hasPendingTerminalIntentForCurrentWorkout
+            && !runnerArtifactsOwnedByOther
+            && !currentWorkoutPendingSets.contains(where: { $0.deliveryState == .failed })
+    }
+
+    var canAddSessionExercise: Bool { canAdjustSessionWork && exercises.count < 50 }
+
+    func sessionNextSetNumber(for exercise: TemplateExercise) -> Int {
+        nextReservedSetIndex(for: exercise)
+    }
+
+    func isSessionAddedExercise(_ exercise: TemplateExercise) -> Bool {
+        sessionAdjustments.addedExercises.contains { $0.id == exercise.id && $0.exercise_id == exercise.exercise_id }
+    }
+
+    func sessionAddedSetCount(for exercise: TemplateExercise) -> Int {
+        guard let id = selectedDayID, let base = baseRunnerDay(id: id) else { return 0 }
+        return sessionAdjustments.normalized(for: base).extraSets[exercise.id]?.count ?? 0
+    }
+
+    func canAddSessionSet(for exercise: TemplateExercise) -> Bool {
+        canAdjustSessionWork && exercise.group_id == nil && exercise.exercise_id != RunPlan.exerciseID
+            && exercise.target_sets < 100 && sessionNextSetNumber(for: exercise) <= 100
+            && !isSetEntryBlocked(exercise)
+            && exercises.first(where: { $0.id == exercise.id }) == exercise
+    }
+
+    /// One more set of an ordinary exercise, with the member's original
+    /// target retained separately. Group round changes need their own action.
+    @discardableResult
+    func addSessionSet(expected exercise: TemplateExercise, expectedSetNumber: Int,
+                       expectedSession target: WorkoutTerminalActionTarget) -> Bool {
+        guard canAddSessionSet(for: exercise), matchesTerminalActionTarget(target),
+              sessionNextSetNumber(for: exercise) == expectedSetNumber,
+              let dayID = selectedDayID, let base = baseRunnerDay(id: dayID),
+              let original = (base.exercises + sessionAdjustments.addedExercises).first(where: { $0.id == exercise.id }),
+              let index = exercises.firstIndex(where: { $0.id == exercise.id }) else { return false }
+        sessionAdjustments = sessionAdjustments.normalized(for: base)
+        let existing = sessionAdjustments.extraSets[exercise.id]?.count ?? 0
+        sessionAdjustments.extraSets[exercise.id] = RunnerSessionAdjustments.ExtraSets(
+            prescription: RunnerPrescription(original), prescribedSets: original.target_sets,
+            count: max(existing + 1, expectedSetNumber - original.target_sets))
+        skipped.remove(exercise.id)
+        finished = false
+        deferredGroupRepair = nil
+        runnerFocus.revision &+= 1
+        runnerFocus.isExplicit = true
+        exerciseIndex = index
+        seedInputs()
+        rememberGroupProgress()
+        return persistRunnerCheckpoint()
+    }
+
+    /// Existing movements retain their exact saved slot; choosing one again
+    /// focuses it so Add set can extend it without ambiguous slot-less logs.
+    @discardableResult
+    func addSessionExercise(_ exercise: ExerciseCatalog, expected target: WorkoutTerminalActionTarget) -> Bool {
+        guard canAddSessionExercise, matchesTerminalActionTarget(target), exercise.id != RunPlan.exerciseID else { return false }
+        if let index = exercises.firstIndex(where: { $0.exercise_id == exercise.id }) {
+            finished = false
+            deferredGroupRepair = nil
+            runnerFocus.revision &+= 1
+            runnerFocus.isExplicit = true
+            exerciseIndex = index
+            seedInputs()
+            rememberGroupProgress()
+            return persistRunnerCheckpoint()
+        }
+        guard let dayID = selectedDayID, let base = baseRunnerDay(id: dayID) else { return false }
+        sessionAdjustments = sessionAdjustments.normalized(for: base)
+        sessionAdjustments.addedExercises.append(RunnerSessionAdjustments.addedExercise(exercise, order: exercises.count))
+        finished = false
+        deferredGroupRepair = nil
+        runnerFocus.revision &+= 1
+        runnerFocus.isExplicit = true
+        exerciseIndex = exercises.count - 1
+        seedInputs()
+        rememberGroupProgress()
+        return persistRunnerCheckpoint()
+    }
+
+    func canLogWarmup(for exercise: TemplateExercise) -> Bool {
+        canAdjustSessionWork && !exercise.isWarmup && !exercise.isTimed && exercise.group_id == nil
+            && exercise.exercise_modality != "cardio" && exercise.exercise_id != RunPlan.exerciseID
+            && !isSetEntryBlocked(exercise)
+            && exercises.first(where: { $0.id == exercise.id }) == exercise
+    }
+
+    /// Warm-ups are append-only logs against this slot with their own class.
+    /// Do not advance or reseed the working set, its effort draft or its rest.
+    @discardableResult
+    func logWarmup(expected exercise: TemplateExercise, expectedSession target: WorkoutTerminalActionTarget,
+                   values: SessionWarmupValues) -> Bool {
+        guard canLogWarmup(for: exercise), matchesTerminalActionTarget(target), values.isValid(for: exercise),
+              persistRunnerCheckpoint() else { return false }
+        let warmup = RunnerSessionAdjustments.warmup(exercise)
+        guard let intent = enqueueSetIntent(warmup, weight: values.weight, reps: values.reps,
+                                           durationOverride: nil, rpe: values.rpe) else { return false }
+        lastRunnerSetID = intent.id
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self else { return }
+            self.setSlotsInFlight.remove(exercise.id)
+            await self.drainSetOutbox()
+        }
+        return true
+    }
+
+    func loadFreestyleDraft(sessionID: String) async -> FreestyleWorkoutDraft? {
+        guard canInitiateBoundFeatureAction, let jwt = currentJWT else { return nil }
+        do {
+            let draft = try await freestyleAPI.freestyleDraft(sessionID: sessionID, jwt: jwt)
+            return canInitiateBoundFeatureAction ? draft : nil
+        } catch { handle(error, jwt: jwt); return nil }
+    }
+
+    @Published private(set) var freestyleSaveNeedsReview = false
+
+    func saveFreestyleWorkout(sessionID: String, request: SaveFreestyleRequest) async -> Bool {
+        freestyleSaveNeedsReview = false
+        let result: SaveFreestyleResult? = await performRoutineMutation { [freestyleAPI] _, jwt in
+            do {
+                return try await freestyleAPI.saveFreestyle(sessionID: sessionID, request: request, jwt: jwt)
+            } catch {
+                if case let APIError.http(code, _) = error, [400, 404, 409, 422].contains(code) {
+                    self.freestyleSaveNeedsReview = true
+                }
+                throw error
+            }
+        }
+        return result != nil
+    }
+
+    // MARK: runner
+
+    private func runnerDay(id: String) -> Workout? {
+        guard let day = baseRunnerDay(id: id) else { return nil }
+        guard (running && selectedDayID == id)
+                || (persistedRunnerCheckpoint?.selectedDayID == id
+                    && persistedRunnerCheckpoint?.workoutScope == currentWorkoutScope) else { return day }
+        return sessionAdjustments.applying(to: day)
+    }
+
+    private func baseRunnerDay(id: String) -> Workout? {
+        if let day = freestyleDay, day.id == id { return day }
+        guard let plan, let day = plan.availableWorkouts.first(where: { $0.id == id }) else { return nil }
+        let session = todaySession ?? sessions.first { $0.date == todayString && ($0.slot ?? 0) == currentWorkoutScope.slot }
+        // Swaps match the plan's own slots, so they apply first; then the
+        // week of a block that covers the workout's date sets its targets.
+        let swapped = session?.applyingExerciseSwaps(to: day) ?? day
+        return plan.workout(swapped, on: session?.date ?? todayString)
+    }
+
+    private func approvedExerciseIDs(for ex: TemplateExercise, sessionID: String? = nil,
+                                     date: String? = nil) -> Set<String> {
+        let session = sessionID.flatMap { id in sessions.first { $0.id == id } }
+            ?? sessions.first { $0.date == (date ?? todayString) && ($0.slot ?? 0) == currentWorkoutScope.slot }
+        let targets = plan?.weekTargets(on: session?.date ?? date ?? todayString)[ex.id]
+        // Local extra sets change only the session's finish target. Compare a
+        // swapped slot's original prescription so its approved earlier sets
+        // remain in the same physical set sequence.
+        let comparison: TemplateExercise
+        if let extra = sessionAdjustments.extraSets[ex.id],
+           extra.prescription.matches(current: RunnerPrescription(ex)),
+           ex.target_sets == extra.prescribedSets + extra.count {
+            comparison = ex.applying(SlotTargets(sets: extra.prescribedSets))
+        } else { comparison = ex }
+        guard let base = plan?.workouts.flatMap(\.exercises).first(where: { $0.id == ex.id }),
+              let swap = session?.exerciseSwap(for: base),
+              swap.replacement == comparison || swap.replacement.applying(targets) == comparison
+        else { return [ex.exercise_id] }
+        return Set(swap.exercise_ids)
+    }
+
+    var workoutSwapTarget: WorkoutSwapTarget? {
+        guard running, !finished, !timedActive, !isSwappingExercise,
+              !isTerminalMutationInFlight, !hasPendingTerminalIntentForCurrentWorkout,
+              let session = terminalActionTarget, let exercise = currentExercise,
+              !isSessionAddedExercise(exercise),
+              !isSetEntryBlocked(exercise), let version = plan?.version else { return nil }
+        return WorkoutSwapTarget(session: session, exercise: exercise,
+            planVersion: version, revision: todaySession?.exerciseSwaps.revision ?? 0)
+    }
+
+    @discardableResult
+    func swapWorkoutExercise(_ target: WorkoutSwapTarget, with exerciseID: String) async -> Bool {
+        guard !isPartnerWorkout else { return false }
+        guard let jwt = currentJWT, canInitiateBoundFeatureAction,
+              matchesTerminalActionTarget(target.session), running, !finished, !timedActive,
+              !isSwappingExercise, !isTerminalMutationInFlight, !hasPendingTerminalIntentForCurrentWorkout,
+              currentExercise == target.exercise, !isSessionAddedExercise(target.exercise), plan?.version == target.planVersion,
+              (todaySession?.exerciseSwaps.revision ?? 0) == target.revision else { return false }
+        isSwappingExercise = true
+        defer { isSwappingExercise = false }
+        do {
+            var session = todaySession
+            if session == nil {
+                let created = try await setWriteAPI.createSession(date: target.session.date, slot: target.session.slot,
+                    workoutID: selectedDayID, expectedAttempt: target.session.sessionAttempt ?? 0,
+                    restartDiscardedAttempt: target.session.restartDiscardedAttempt, jwt: jwt)
+                guard canInitiateBoundFeatureAction, matchesTerminalActionTarget(target.session) else { return false }
+                session = acceptSessionResolution(created)
+                if let session { bindRunnerCheckpoint(to: session) }
+            }
+            guard let session, ["planned", "in_progress"].contains(session.status),
+                  currentExercise == target.exercise, plan?.version == target.planVersion,
+                  session.exerciseSwaps.revision == target.revision,
+                  canInitiateBoundFeatureAction, running, !timedActive else { return false }
+            let response = try await sessionSwapAPI.swapSessionExercise(sessionID: session.id,
+                slotID: target.exercise.id, exerciseID: exerciseID, expectedAttempt: session.attempt ?? 0,
+                expectedVersion: target.planVersion, expectedRevision: target.revision, jwt: jwt)
+            // Persist the acknowledgement through the shared session ordering boundary.
+            // A later refresh failure must not invite the same swap a second time.
+            guard let accepted = acceptSessionResolution(response), canInitiateBoundFeatureAction,
+                  accepted.attempt == session.attempt else { return false }
+            if running, currentExercise?.id == target.exercise.id {
+                skipped.remove(target.exercise.id)
+                seedInputs()
+                rememberGroupProgress()
+                persistRunnerCheckpoint()
+                updateRestActivityAfterRunnerNormalization()
+            }
+            return true
+        } catch {
+            guard canInitiateBoundFeatureAction else { return false }
+            if case APIError.http(409, _) = error {
+                await loadAfterMutation()
+                loadError = "This workout changed. Reopen Swap exercise to choose again."
+            } else if case APIError.http(400, _) = error {
+                loadError = "Choose a replacement that uses the same reps or timer as this exercise."
+            } else {
+                handle(error, jwt: jwt)
+            }
+            return false
+        }
+    }
+
+    var exercises: [TemplateExercise] { selectedDay?.exercises ?? [] }
+    var currentExercise: TemplateExercise? {
+        exercises.indices.contains(exerciseIndex) ? exercises[exerciseIndex] : nil
+    }
+    /// 1-based number of the set about to be performed for the current exercise.
+    var currentSetNumber: Int {
+        if let control = partnerControl { return control.set }
+        guard let ex = currentExercise else { return 1 }
+        return groupProgress(for: ex)?.round ?? (runnerSetsDone(ex) + 1)
+    }
+
+    /// Tap identity stays slot-specific even when manual navigation selects a
+    /// member ahead of the group's displayed round.
+    var currentPhysicalSetNumber: Int {
+        currentExercise.map { nextReservedSetIndex(for: $0) } ?? 1
+    }
+
+    /// Stable write index for the next physical set. Failed intents remain in
+    /// the outbox and keep reserving their original index even though the
+    /// presentation count reopens them for retry.
+    private func nextReservedSetIndex(for ex: TemplateExercise) -> Int {
+        if let control = partnerControl, control.slotID == ex.id { return control.set }
+        return reservedSetIDs(for: ex).count + 1
+    }
+
+    /// Runner progress counts every locally durable set exactly once. Pending
+    /// rows share their eventual server id, so the set union avoids a transient
+    /// double count while an acknowledgement is being folded into the cache.
+    private func runnerSetIDs(_ ex: TemplateExercise) -> Set<String> {
+        Set(todaySlotSets(ex).map(\.id))
+            .union(pendingSetIntents(for: ex).lazy.filter {
+                $0.deliveryState == .queued
+            }.map(\.id))
+    }
+
+    func runnerSetsDone(_ ex: TemplateExercise) -> Int { runnerSetIDs(ex).count }
+
+    private func reservedSetIDs(for ex: TemplateExercise) -> Set<String> {
+        Set(todaySlotSets(ex).map(\.id)).union(pendingSetIntents(for: ex).map(\.id))
+    }
+
+    private func groupProgress(for ex: TemplateExercise) -> GroupRunnerProgress? {
+        guard let id = ex.group_id else { return nil }
+        return GroupRunnerProgress(id: id, members: exercises.filter { $0.group_id == id }.map {
+            .init(id: $0.id, target: $0.target_sets, completedIDs: runnerSetIDs($0), skipped: skipped.contains($0.id))
+        })
+    }
+
+    /// Read-only equipment preparation preview, sharing the commit scheduler's
+    /// durable progress and queued/acknowledged ID union.
+    func nextGroupExercise(afterLogging ex: TemplateExercise) -> TemplateExercise? {
+        guard let nextID = groupProgress(for: ex)?.nextMemberID(afterCompleting: ex.id) else { return nil }
+        return exercises.first { $0.id == nextID }
+    }
+
+    private func groupContext(for ex: TemplateExercise) -> RunnerGroupContext? {
+        guard let id = ex.group_id else { return nil }
+        return RunnerGroupContext(id: id, memberIDs: exercises.filter { $0.group_id == id }.map(\.id),
+            rounds: ex.target_sets, roundRest: ex.group_rest_seconds, transitionRest: ex.group_transition_seconds)
+    }
+
+    private func rememberGroupProgress() {
+        observedGroupProgress = [:]
+        for ex in exercises where ex.group_id != nil {
+            if let progress = groupProgress(for: ex) { observedGroupProgress[progress.id] = progress }
+        }
+    }
+
+    private func isRunnerComplete(_ ex: TemplateExercise) -> Bool {
+        !isFreestyle && runnerSetsDone(ex) >= ex.target_sets
+    }
+
+    private func isRunnerResolved(_ ex: TemplateExercise) -> Bool {
+        isRunnerComplete(ex) || isSkipped(ex)
+    }
+
+    private var nextRunnerIncompleteIndex: Int? {
+        let n = exercises.count
+        guard n > 0 else { return nil }
+        for offset in 1...n {
+            let i = (exerciseIndex + offset) % n
+            if !isRunnerResolved(exercises[i]) { return i }
+        }
+        return nil
+    }
+
+    private func normalizeMountedRunnerAfterLocalCommit(for date: String) {
+        guard !isPartnerWorkout else { return }
+        guard running, date == todayString, let current = currentExercise else {
+            return
+        }
+        if current.group_id != nil {
+            normalizeMountedRunnerProgress(for: date, forceGroupSelection: true)
+            return
+        }
+        if isRunnerComplete(current) {
+            if let next = nextRunnerIncompleteIndex {
+                selectRunnerExercise(at: next)
+            } else {
+                finished = true
+                persistRunnerCheckpoint()
+            }
+        }
+        if currentExercise?.group_id != nil {
+            normalizeMountedRunnerProgress(for: date, forceGroupSelection: true)
+        }
+        updateRestActivityAfterRunnerNormalization()
+    }
+
+    /// Correction causality survives enqueue, ACK/live-read reordering, and
+    /// cold recovery. A later manual choice owns focus until a physical commit
+    /// or skip; a new correction initiated after that choice remains eligible.
+    private func supersededDeletionGroupID(_ intent: PendingSetCorrection) -> String? {
+        guard intent.isDelete, runnerFocus.isExplicit,
+              (intent.runnerFocusRevision ?? 0) < runnerFocus.revision,
+              let checkpoint = persistedRunnerCheckpoint,
+              intent.workoutScope == checkpoint.workoutScope, intent.workoutScope == currentWorkoutScope,
+              intent.expectedAttempt == (todaySession?.attempt ?? checkpoint.sessionAttempt ?? 0),
+              let day = runnerDay(id: checkpoint.selectedDayID),
+              let slot = day.exercises.first(where: { $0.id == intent.slotID
+                  && approvedExerciseIDs(for: $0, date: intent.date).contains(intent.exerciseID) })
+        else { return nil }
+        return slot.group_id
+    }
+
+    private func absorbSupersededDeletion(_ intent: PendingSetCorrection) -> Bool {
+        guard intent.workoutScope == currentWorkoutScope else { return true }
+        if running {
+            rememberGroupProgress()
+            return persistRunnerCheckpoint()
+        }
+        // A cold ACK must update the observed UUIDs without certifying a live
+        // resume. Otherwise the next live validation would replay this change.
+        guard let checkpoint = persistedRunnerCheckpoint,
+              let progress = checkpoint.groupProgress else { return true }
+        let updated = GroupRunnerProgress(id: progress.id, members: progress.members.map {
+            .init(id: $0.id, target: $0.target, completedIDs: $0.completedIDs.subtracting([intent.setID]), skipped: $0.skipped)
+        })
+        return persistRunnerObservation(updated)
+    }
+
+    @discardableResult
+    private func persistRunnerObservation(_ progress: GroupRunnerProgress?, selecting slotID: String? = nil) -> Bool {
+        guard let checkpoint = persistedRunnerCheckpoint else { return true }
+        let replacement = WorkoutRunnerCheckpoint(date: checkpoint.date, sessionSlot: checkpoint.sessionSlot, sessionID: checkpoint.sessionID,
+            selectedDayID: checkpoint.selectedDayID, currentSlotID: slotID ?? checkpoint.currentSlotID,
+            skippedSlotIDs: checkpoint.skippedSlotIDs, workoutStartedAtMS: checkpoint.workoutStartedAtMS,
+            finished: slotID == nil ? checkpoint.finished : false, sessionAttempt: checkpoint.sessionAttempt,
+            restartDiscardedAttempt: checkpoint.restartDiscardedAttempt,
+            input: checkpoint.input, inputsBySlot: checkpoint.inputsBySlot, groupProgress: progress, focus: runnerFocus, deferredGroupRepair: deferredGroupRepair, feedback: checkpoint.feedback, freestyleExercises: checkpoint.freestyleExercises, sessionAdjustments: checkpoint.sessionAdjustments)
+        guard replaceRunnerCheckpoint(replacement, ifCurrent: checkpoint) else { return false }
+        persistedRunnerCheckpoint = replacement
+        if resumableCheckpoint == checkpoint { resumableCheckpoint = replacement }
+        return true
+    }
+
+    private func groupDeletionObservation(_ intent: PendingSetCorrection) -> String? {
+        observedGroupRepair(for: intent)?.groupID
+    }
+
+    private func observedGroupRepair(for intent: PendingSetCorrection) -> RunnerGroupRepair? {
+        guard intent.isDelete, let checkpoint = persistedRunnerCheckpoint,
+              checkpoint.workoutScope == intent.workoutScope, intent.workoutScope == currentWorkoutScope,
+              intent.expectedAttempt == (todaySession?.attempt ?? checkpoint.sessionAttempt ?? 0),
+              let day = runnerDay(id: checkpoint.selectedDayID),
+              let sessionID = todaySession?.id ?? checkpoint.sessionID,
+              let slot = day.exercises.first(where: { $0.id == intent.slotID
+                  && approvedExerciseIDs(for: $0, sessionID: sessionID).contains(intent.exerciseID) }),
+              let id = slot.group_id,
+              let repair = RunnerGroupRepair(groupID: id, day: day),
+              intent.runnerGroupRepair == nil || intent.runnerGroupRepair == repair,
+              intent.runnerGroupRepair == repair
+                || slotSets(slot, sessionID: sessionID, dayExercises: day.exercises).contains(where: { $0.id == intent.setID })
+                || setOutbox.pending.contains(where: { $0.id == intent.setID && $0.deliveryState == .queued
+                    && setIntent($0, matches: slot, on: intent.date) })
+        else { return nil }
+        return repair
+    }
+
+    /// Backfill older durable intents before any snapshot can erase their
+    /// counted UUID. The immutable evidence lets a new owner finish recovery.
+    private func retainGroupDeletionObservations() {
+        for var intent in setCorrections where intent.runnerGroupRepair == nil {
+            guard let repair = observedGroupRepair(for: intent) else { continue }
+            intent.runnerGroupRepair = repair
+            SetCorrectionOutboxStore.replace(intent, userID: accountID, defaults: defaults)
+        }
+        adoptDurableWorkoutWriteOutboxes()
+    }
+
+    @discardableResult
+    private func repairGroupAfterDeletedSet(_ intent: PendingSetCorrection, observedGroupID: String? = nil) -> Bool {
+        if isPartnerWorkout { return !running || persistRunnerCheckpoint() }
+        if intent.runnerGroupRepair != nil {
+            // A missing local plan/checkpoint is not evidence that a prepared
+            // repair became obsolete. An invalidated cache or retired model
+            // must leave this receipt for live validation/the current owner.
+            let durable = WorkoutRunnerCheckpointStore.load(userID: accountID, defaults: defaults)
+            guard durable != nil else { return true }
+            guard persistedRunnerCheckpoint == durable, plan != nil else { return false }
+        }
+        guard supersededDeletionGroupID(intent) == nil,
+              intent.date == todayString,
+              let checkpoint = persistedRunnerCheckpoint, checkpoint.workoutScope == intent.workoutScope,
+              let sessionID = intent.sessionID,
+              sessionID == (todaySession?.id ?? checkpoint.sessionID),
+              checkpoint.sessionID == nil || checkpoint.sessionID == sessionID,
+              intent.expectedAttempt == (todaySession?.attempt ?? checkpoint.sessionAttempt ?? 0),
+              let day = runnerDay(id: checkpoint.selectedDayID),
+              let slot = day.exercises.first(where: { $0.id == intent.slotID
+                  && approvedExerciseIDs(for: $0, sessionID: sessionID).contains(intent.exerciseID) }),
+              let id = slot.group_id,
+              intent.runnerGroupRepair == nil || intent.runnerGroupRepair == RunnerGroupRepair(groupID: id, day: day),
+              observedGroupID == id || observedGroupProgress[id]?.members.contains(where: { $0.completedIDs.contains(intent.setID) }) == true,
+              !sets.contains(where: { $0.id == intent.setID && $0.deleted_at == nil })
+        else { return true }
+        guard canInitiateBoundFeatureAction, !runnerArtifactsOwnedByOther else { return false }
+        runnerFocus.isExplicit = false
+        if !running {
+            // The deletion was initiated after the latest explicit choice.
+            // Its group owns recovery even if that choice was in another group
+            // or an ordinary slot. Persist the cursor without certifying resume;
+            // the existing live validator still owns date/attempt/status proof.
+            let progress = GroupRunnerProgress(id: id, members: day.exercises.filter { $0.group_id == id }.map { member in
+                let completedIDs = Set(slotSets(member, sessionID: sessionID, dayExercises: day.exercises).map(\.id))
+                    .union(setOutbox.pending.filter {
+                        $0.deliveryState == .queued && setIntent($0, matches: member, on: intent.date)
+                    }.map(\.id))
+                return .init(id: member.id, target: member.target_sets, completedIDs: completedIDs,
+                             skipped: checkpoint.skippedSlotIDs.contains(member.id))
+            })
+            if let nextID = progress.nextMemberID {
+                deferredGroupRepair = nil
+                return persistRunnerObservation(progress, selecting: nextID)
+            } else {
+                return persistRunnerObservation(checkpoint.groupProgress)
+            }
+        }
+        deferredGroupRepair = RunnerGroupRepair(groupID: id, day: day)
+        guard persistRunnerCheckpoint() else { return false }
+        repairDeferredGroupSelection()
+        return true
+    }
+
+    private func repairDeferredGroupSelection() {
+        guard running, !timedActive, let repair = deferredGroupRepair else { return }
+        deferredGroupRepair = nil
+        defer { persistRunnerCheckpoint() }
+        guard let day = selectedDay, RunnerGroupRepair(groupID: repair.groupID, day: day) == repair,
+              let slot = exercises.first(where: { $0.group_id == repair.groupID }),
+              let progress = groupProgress(for: slot), let nextID = progress.nextMemberID,
+              let next = exercises.firstIndex(where: { $0.id == nextID })
+        else { return }
+        finished = false
+        if exerciseIndex != next { exerciseIndex = next; seedInputs() }
+        rememberGroupProgress()
+        persistRunnerCheckpoint()
+        updateRestActivityAfterRunnerNormalization()
+    }
+
+    private func reopenFailedRunnerIntentIfStable(for date: String) {
+        guard !timedActive,
+              let failed = setOutbox.pending.first(where: { intent in
+                  intent.date == date
+                      && intent.deliveryState == .failed
+                      && exercises.contains(where: {
+                          setIntent(intent, matches: $0, on: date)
+                      })
+              })
+        else { return }
+        reopenMountedRunner(for: failed)
+    }
+
+    private func reopenMountedRunner(for failedIntent: PendingSetIntent) {
+        guard !isPartnerWorkout else { return }
+        guard running, failedIntent.date == todayString,
+              let index = exercises.firstIndex(where: {
+                  setIntent(failedIntent, matches: $0, on: todayString)
+              }) else { return }
+        // A delayed rejection must not abort a later physical timed set. The
+        // failed intent stays durable and visible; commitTimedSet reopens it as
+        // soon as that in-progress timer reaches its stable commit boundary.
+        guard !timedActive else { return }
+        finished = false
+        if exerciseIndex != index { runnerFocus.isExplicit = false }
+        exerciseIndex = index
+        seedInputs()
+        weight = failedIntent.body.weightUnit.convert(
+            failedIntent.body.weight, to: exercises[index].targetWeightUnit)
+        runnerWeightSource = .entered
+        reps = failedIntent.body.reps
+        // The rejected intent retains its assessment for retry/correction;
+        // opening a new physical set must not copy that assessment forward.
+        rpe = nil
+        rememberGroupProgress()
+        persistRunnerCheckpoint()
+        updateRestActivityAfterRunnerNormalization()
+    }
+
+    /// After a local commit or rollback, the runner has already settled on the
+    /// slot the user should perform when rest ends. Name that current slot—not
+    /// the later distinct slot returned by `upNextName`.
+    var restActivityCurrentStepName: String {
+        finished ? "Done" : (currentExercise?.exercise_name ?? "Done")
+    }
+
+    private func updateRestActivityAfterRunnerNormalization() {
+        guard let end = restEndDate else { return }
+        guard canInitiateBoundFeatureAction,
+              let checkpoint = persistedRunnerCheckpoint,
+              WorkoutRunnerCheckpointStore.load(
+                  userID: accountID, defaults: defaults) == checkpoint,
+              RunnerArtifactOwnership.isOwned(
+                  by: runnerArtifactOwnerID,
+                  featureSessionEpoch: featureSessionEpoch,
+                  userID: accountID,
+                  defaults: defaults)
+        else {
+            relinquishStaleRunnerCheckpoint()
+            return
+        }
+        restActivityUpdater(end, restActivityCurrentStepName)
+    }
+
+    private func allowNewWorkoutStart() -> Bool {
+        guard !isPartnerWorkout else {
+            #if DEBUG && targetEnvironment(simulator)
+            UIFixtureStartTrace.record(.eligibilityPartnerRejected)
+            #endif
+            return false
+        }
+        guard !isRoutineMutationInFlight else {
+            #if DEBUG && targetEnvironment(simulator)
+            UIFixtureStartTrace.record(.eligibilityMutationRejected)
+            #endif
+            loadError = "Wait for the routine change to finish before starting your workout."
+            return false
+        }
+        guard !todayIsCompleted else {
+            #if DEBUG && targetEnvironment(simulator)
+            UIFixtureStartTrace.record(.eligibilityCompletedRejected)
+            #endif
+            loadError = "Today's workout is already completed."
+            return false
+        }
+        guard !blocksNewWorkoutStart else {
+            #if DEBUG && targetEnvironment(simulator)
+            UIFixtureStartTrace.record(.eligibilityExistingWorkoutRejected)
+            #endif
+            if needsLiveWorkoutValidation {
+                loadError = hasSavedRunnerAwaitingValidation
+                    ? "Connect to validate and resume your saved workout before starting another."
+                    : "Connect to verify today's in-progress workout before starting another."
+            } else if hasRunnerAwaitingSetRecovery {
+                loadError = "Your saved workout is still waiting for its first set to sync."
+            } else {
+                loadError = "Resume your saved workout before starting another."
+            }
+            return false
+        }
+        #if DEBUG && targetEnvironment(simulator)
+        UIFixtureStartTrace.record(.eligibilityAccepted)
+        #endif
+        return true
+    }
+
+    func startWorkout() {
+        #if DEBUG && targetEnvironment(simulator)
+        UIFixtureStartTrace.record(.startWorkoutEntered)
+        #endif
+        guard !isPartnerWorkout else {
+            #if DEBUG && targetEnvironment(simulator)
+            UIFixtureStartTrace.record(.startPartnerRejected)
+            #endif
+            return
+        }
+        guard canInitiateBoundFeatureAction, currentJWT != nil else {
+            #if DEBUG && targetEnvironment(simulator)
+            UIFixtureStartTrace.record(.startAuthorityRejected)
+            #endif
+            return
+        }
+        guard allowNewWorkoutStart() else {
+            #if DEBUG && targetEnvironment(simulator)
+            UIFixtureStartTrace.record(.startEligibilityRejected)
+            #endif
+            return
+        }
+        let date = todaySession?.date ?? todayString
+        var restartDiscardedAttempt = sessions.first(where: {
+            $0.date == date && ($0.slot ?? 0) == currentWorkoutScope.slot && $0.status == "discarded"
+        })?.attempt
+        if let terminal = terminalOutbox.intent(for: date, slot: currentWorkoutScope.slot) {
+            guard terminal.action == .discard,
+                  terminal.deliveryState == .acknowledged
+            else {
+                #if DEBUG && targetEnvironment(simulator)
+                UIFixtureStartTrace.record(.startTerminalRejected)
+                #endif
+                loadError = "This workout still has a finish or discard waiting to sync."
+                return
+            }
+            // A legacy acknowledged barrier belongs to migration-default
+            // generation zero. Capture this authorization before clearing the
+            // barrier so only the user's explicit start can revive the date.
+            restartDiscardedAttempt = restartDiscardedAttempt
+                ?? terminal.expectedAttempt
+                ?? 0
+            terminalOutbox.clearAcknowledgedDiscard(date: date, slot: currentWorkoutScope.slot)
+            WorkoutTerminalOutboxStore.clearAcknowledgedDiscard(
+                date: date, slot: currentWorkoutScope.slot, userID: accountID, defaults: defaults)
+            ownedTerminalIntentIDs.remove(terminal.id)
+        }
+        guard clearRunnerCheckpointAndSharedRest() else {
+            #if DEBUG && targetEnvironment(simulator)
+            UIFixtureStartTrace.record(.startCheckpointClearRejected)
+            #endif
+            loadError = "This workout is already active in another app view. Refresh to continue."
+            return
+        }
+        runnerRestartDiscardedAttempt = restartDiscardedAttempt
+        workoutFeedback = nil
+        runnerFocus = RunnerFocusState()
+        deferredGroupRepair = nil
+        running = true
+        #if DEBUG && targetEnvironment(simulator)
+        UIFixtureStartTrace.record(.startRunningSet)
+        #endif
+        finished = false
+        exerciseIndex = 0
+        skipped = []
+        workoutStart = now()
+        seedInputs()
+        #if DEBUG && targetEnvironment(simulator)
+        UIFixtureStartTrace.record(persistRunnerCheckpoint() ? .startCheckpointSaved : .startCheckpointRejected)
+        #else
+        persistRunnerCheckpoint()
+        #endif
+        if currentExercise?.group_id != nil {
+            normalizeMountedRunnerProgress(for: todayString, forceGroupSelection: true)
+        } else { rememberGroupProgress() }
+        #if DEBUG && targetEnvironment(simulator)
+        UIFixtureStartTrace.record(.startWorkoutReturned)
+        #endif
+    }
+
+    /// Start ACKs bind the ordinary runner to the exact reviewed attempt. Never
+    /// replace its durable queue: it remains the sole authority for set writes.
+    @discardableResult
+    func mountPartnerWorkout(_ session: SessionRow) -> Bool {
+        guard canInitiateBoundFeatureAction,
+              currentWorkoutScope.slot == 0, (session.slot ?? 0) == 0,
+              (hasVerifiedPlanState && !isUsingCachedState || canUseOfflineWorkoutState),
+              session.date == todayString,
+              session.status == "in_progress", let workoutID = session.workout_id,
+              plan?.workouts.contains(where: { $0.id == workoutID }) == true else { return false }
+        guard let accepted = acceptSessionResolution(session), accepted.status == "in_progress",
+              accepted.partner_workout_id == session.partner_workout_id else { return false }
+        if running, selectedDayID == workoutID, todaySession?.id == accepted.id, todaySession?.attempt == accepted.attempt,
+           persistedRunnerCheckpoint?.sessionAttempt == accepted.attempt { return true }
+        guard clearRunnerCheckpointAndSharedRest() else { return false }
+        todaySession = accepted; selectedDayID = workoutID
+        runnerRestartDiscardedAttempt = nil; workoutFeedback = nil
+        runnerFocus = RunnerFocusState(); deferredGroupRepair = nil
+        running = true; finished = false; exerciseIndex = 0; skipped = []
+        workoutStart = session.started_at.map { Date(timeIntervalSince1970: Double($0) / 1000) } ?? now()
+        seedInputs()
+        return persistRunnerCheckpoint()
+    }
+
+    func partnerLoggedIndices(_ ex: TemplateExercise) -> Set<Int> {
+        let deleted = Set(setCorrections.filter { $0.isDelete && $0.deliveryState == .queued }.map(\.setID))
+        return Set(todaySlotSets(ex).filter { !deleted.contains($0.id) }.map(\.set_index))
+            .union(pendingSetIntents(for: ex).filter { $0.deliveryState == .queued && !deleted.contains($0.id) }
+                .map { $0.body.set_index })
+    }
+
+    func applyPartnerControl(_ value: PartnerRunnerControl) {
+        guard canInitiateBoundFeatureAction, running else { return }
+        let previous = partnerControl
+        partnerControl = value
+        if assessedRPE != nil && rpe == nil { rpe = nil }
+        finished = value.complete
+        if let index = exercises.firstIndex(where: { $0.id == value.slotID }),
+           previous?.slotID != value.slotID || exerciseIndex != index {
+            clearTimedSet(); exerciseIndex = index; seedInputs()
+        } else if previous?.set != value.set { clearTimedSet() }
+        if restEndDate != value.restUntil {
+            relinquishLocalRest(); restActivityEnder(); restNotificationCanceller()
+            if let end = value.restUntil, end > now() {
+                restEndDate = end; restExercise = currentExercise?.exercise_name ?? "Together"
+                restTotal = max(0, Int(ceil(end.timeIntervalSince(now()))))
+                scheduleRestCue(for: end); RestCue.scheduleNotification(at: end)
+            }
+        }
+        if previous != value { persistRunnerCheckpoint() }
+    }
+
+    @discardableResult
+    func releasePartnerWorkout(_ session: SessionRow?) -> Bool {
+        if let session {
+            guard let accepted = acceptSessionResolution(session), accepted.partner_workout_id == nil else { return false }
+            if accepted.status == "discarded" { stopRunnerForStateChange() }
+        }
+        partnerReserved = false; partnerControl = nil; partnerContinuingAlone = false
+        onPartnerSkip = nil
+        // The lane has closed irreversibly. Existing sets and the outbox carry
+        // on through the ordinary solo runner, with no partner credentials.
+        if running { normalizeMountedRunnerProgress(for: todayString) }
+        return true
+    }
+
+    /// Continuing alone is a durable local choice. The server marker is
+    /// cleared when connectivity returns; ordinary queued sets keep their IDs.
+    @discardableResult
+    func continuePartnerAlone() -> Bool {
+        guard canInitiateBoundFeatureAction, let accountID,
+              let saved = PartnerCheckpointStore.load(accountID, defaults: defaults), saved.phase == .leaving,
+              let attempt = saved.attempt, let sessionID = saved.sessionID,
+              let session = sessions.first(where: { $0.id == sessionID && $0.attempt == attempt }),
+              session.status == "in_progress", session.date == todayString else { return false }
+        if !running, !mountPartnerWorkout(session) { return false }
+        partnerReserved = false; partnerControl = nil; partnerContinuingAlone = true
+        onPartnerSkip = nil
+        normalizeMountedRunnerProgress(for: todayString)
+        return true
+    }
+
+    var hasResumableWorkout: Bool { resumableCheckpoint != nil }
+    private var hasSavedRunnerAwaitingValidation: Bool {
+        persistedRunnerCheckpoint?.date == todayString
+    }
+    var canUseOfflineWorkoutState: Bool {
+        guard canInitiateBoundFeatureAction, currentJWT != nil, let plan else { return false }
+        let session = sessions.first(where: { $0.date == todayString && ($0.slot ?? 0) == currentWorkoutScope.slot })
+        let checkpoint = persistedRunnerCheckpoint.flatMap { $0.date == todayString ? $0 : nil }
+        // Deferred group repairs must validate the current member identity
+        // before consuming their receipt. Corrections and terminal intents
+        // also settle through the existing live recovery boundary.
+        guard checkpoint?.deferredGroupRepair == nil,
+              !setCorrections.contains(where: { $0.workoutScope == currentWorkoutScope }),
+              terminalOutbox.intent(for: todayString, slot: currentWorkoutScope.slot) == nil else { return false }
+        if let checkpoint,
+           !RunnerRecovery.canResumeOffline(checkpoint, session: session) { return false }
+        if let session {
+            guard session.attempt != nil else { return false }
+            if session.status == "in_progress" && checkpoint == nil { return false }
+            if session.status != "planned" && session.status != "in_progress" {
+                guard let checkpoint,
+                      RunnerRecovery.canResumeOffline(checkpoint, session: session) else { return false }
+            }
+        }
+        let attempt = checkpoint?.sessionAttempt
+            ?? checkpoint?.restartDiscardedAttempt.map { $0 + 1 }
+            ?? session?.attempt ?? 0
+        let sessionID = checkpoint?.sessionID ?? session?.id
+        guard !setOutbox.pending.contains(where: { intent in
+            guard intent.workoutScope == currentWorkoutScope else { return false }
+            let queuedAttempt = intent.expectedAttempt
+                ?? intent.restartDiscardedAttempt.map { $0 + 1 } ?? 0
+            return queuedAttempt != attempt
+                || (intent.resolvedSessionID != nil && intent.resolvedSessionID != sessionID)
+        }) else { return false }
+        return StateSnapshotStore.supportsOfflineWorkout(
+            planID: plan.id, planVersion: plan.version, userID: accountID, defaults: defaults)
+    }
+    var needsLiveWorkoutValidation: Bool {
+        isUsingCachedState && !canUseOfflineWorkoutState
+    }
+    private var hasRunnerAwaitingSetRecovery: Bool {
+        guard hasSavedRunnerAwaitingValidation else { return false }
+        return setOutbox.pending.contains { $0.workoutScope == currentWorkoutScope }
+    }
+    var canAbandonRecoveredWorkout: Bool {
+        !running
+            && !isUsingCachedState
+            && hasRunnerAwaitingSetRecovery
+            && setOutbox.pending.contains {
+                $0.workoutScope == currentWorkoutScope && $0.deliveryState == .failed
+            }
+    }
+    var blocksNewWorkoutStart: Bool {
+        needsLiveWorkoutValidation
+            || hasResumableWorkout
+            || hasRunnerAwaitingSetRecovery
+            || isReopeningSkippedWorkout
+    }
+
+    /// Restore a live-validated checkpoint or eligible account-local offline
+    /// work. Pending writes remain pending and keep their exact attempt tokens.
+    /// Timed holds restart from a stable boundary rather than elapsed wall time.
+    func resumeWorkout() {
+        guard !isPartnerWorkout else { return }
+        guard canInitiateBoundFeatureAction, currentJWT != nil,
+              !isUsingCachedState || canUseOfflineWorkoutState else { return }
+        let candidate = resumableCheckpoint.flatMap { checkpoint in
+            sessions.first { $0.workoutScope == checkpoint.workoutScope }
+        }
+        guard !running,
+              let checkpoint = resumableCheckpoint,
+              (candidate?.id == checkpoint.sessionID && candidate?.status == "in_progress")
+                || RunnerRecovery.canResumeUnstarted(checkpoint, session: candidate)
+                || (isUsingCachedState && canUseOfflineWorkoutState
+                    && RunnerRecovery.canResumeOffline(checkpoint, session: candidate)),
+              let day = runnerDay(id: checkpoint.selectedDayID),
+              let currentSlotID = checkpoint.currentSlotID,
+              let index = day.exercises.firstIndex(where: {
+                  $0.id == currentSlotID
+              })
+        else {
+            _ = clearRunnerCheckpointAndSharedRest()
+            return
+        }
+
+        let liveSlotIDs = Set(day.exercises.map(\.id))
+        freestyleExercises = day.exercises
+        sessionAdjustments = checkpoint.sessionAdjustments ?? RunnerSessionAdjustments()
+        todaySession = candidate?.status == "discarded" ? nil : candidate
+        runnerRestartDiscardedAttempt = checkpoint.restartDiscardedAttempt
+        selectedDayID = day.id
+        exerciseIndex = index
+        skipped = Set(checkpoint.skippedSlotIDs.filter {
+            liveSlotIDs.contains($0)
+        })
+        workoutStart = Date(
+            timeIntervalSince1970:
+                TimeInterval(checkpoint.workoutStartedAtMS) / 1_000)
+        running = true
+        finished = checkpoint.finished
+        workoutFeedback = checkpoint.feedback
+        runnerFocus = checkpoint.focus ?? RunnerFocusState()
+        deferredGroupRepair = checkpoint.deferredGroupRepair
+        seedInputs()
+        rememberGroupProgress()
+        // Resume is the explicit same-epoch ownership handoff. A second model
+        // may have loaded the exact same checkpoint value, so claim before the
+        // value-based persistence CAS can otherwise look like an ABA success.
+        RunnerArtifactOwnership.claim(
+            runnerArtifactOwnerID,
+            featureSessionEpoch: featureSessionEpoch,
+            userID: accountID,
+            defaults: defaults)
+        persistRunnerCheckpoint()
+        guard running,
+              RunnerArtifactOwnership.isOwned(
+                  by: runnerArtifactOwnerID,
+                  featureSessionEpoch: featureSessionEpoch,
+                  userID: accountID,
+                  defaults: defaults)
+        else { return }
+        skipRest()
+    }
+
+    /// Keep only drafts for the same slot and current prescription. This map
+    /// inherits the checkpoint's account, date, session, attempt and CAS fence.
+    private func runnerInputsForCheckpoint() -> [String: RunnerInputState] {
+        var inputs = persistedRunnerCheckpoint?.inputsBySlot ?? [:]
+        if let legacy = persistedRunnerCheckpoint?.input {
+            inputs[legacy.prescription.slotID] = legacy
+        }
+        inputs = inputs.filter { id, input in
+            exercises.contains { $0.id == id && input.prescription.matches(current: RunnerPrescription($0)) }
+        }
+        if let currentInputState { inputs[currentInputState.prescription.slotID] = currentInputState }
+        return inputs
+    }
+
+    var currentInputState: RunnerInputState? {
+        guard let ex = currentExercise else { return nil }
+        return RunnerInputState(prescription: RunnerPrescription(ex), weight: weight,
+                                reps: reps, rpe: rpe, durationSeconds: holdDurationSeconds,
+                                weightSource: runnerWeightSource, setNumber: currentPhysicalSetNumber)
+    }
+
+    func comparablePreviousSets(for ex: TemplateExercise) -> [SetLog] {
+        let history = RunnerInputPolicy.comparableSets(ex, sets: sets, sessions: sessions,
+            currentSessionID: todaySession?.id, dayExercises: exercises, dayID: selectedDayID)
+        guard let lastSessionID = history.last?.session_id else { return [] }
+        return history.filter { $0.session_id == lastSessionID }
+    }
+
+    /// Read-only preview of the same prescription/history/draft precedence
+    /// used when the runner actually moves to this slot.
+    func runnerPreviewInput(for ex: TemplateExercise) -> RunnerInputState {
+        RunnerInputPolicy.seed(ex,
+            previous: comparablePreviousSets(for: ex).last,
+            draft: persistedRunnerCheckpoint?.inputsBySlot?[ex.id] ?? persistedRunnerCheckpoint?.input,
+            setNumber: nextReservedSetIndex(for: ex))
+    }
+
+    private func seedInputs() {
+        clearTimedSet()
+        guard let ex = currentExercise else { return }
+        let input = runnerPreviewInput(for: ex)
+        weight = input.weight
+        runnerWeightSource = input.weightSource ?? .needsEntry
+        reps = input.reps
+        rpe = input.rpe
+        holdDurationSeconds = input.durationSeconds
+    }
+
+    // MARK: timed exercises (plank, holds)
+
+    /// Starts the current timed set. A start that must first resolve the
+    /// previous timer's cue runs later: the returned task finishes once it
+    /// has started the set or given up. Nil when nothing waits.
+    @discardableResult
+    func startTimedSet(
+        expected renderedExercise: TemplateExercise,
+        expectedSetNumber: Int,
+        at start: Date? = nil
+    ) -> Task<Void, Never>? {
+        guard canInitiateBoundFeatureAction,
+              currentJWT != nil,
+              running,
+              !finished,
+              let ex = currentExercise,
+              currentExerciseMatchesRenderedAction(renderedExercise, current: ex),
+              currentPhysicalSetNumber == expectedSetNumber,
+              ex.isTimed,
+              !timedActive,
+              (partnerControl != nil || !isRunnerComplete(ex)),
+              !isTerminalMutationInFlight,
+              !hasPendingTerminalIntentForCurrentWorkout,
+              !isSetEntryBlocked(ex), !runnerNeedsWeight
+        else { return nil }
+        if let pendingCue = pendingTimedCueGeneration {
+            // Resolve the previous timer's notification before scheduling a
+            // replacement in that same OS slot. A quick new START can precede
+            // MainTabView's asynchronous foreground recovery.
+            return Task { [weak self] in
+                guard let self else { return }
+                await self.finishPendingTimedCue()
+                if self.pendingTimedCueGeneration != nil {
+                    // START explicitly acknowledges the previous completion.
+                    // After checking delivery/trying its tone, a hardware audio
+                    // failure must not prevent the member exercising. Only
+                    // this explicit action may retire a still-undelivered cue.
+                    guard self.pendingTimedCueGeneration == pendingCue,
+                          self.canInitiateBoundFeatureAction,
+                          self.canControlSharedRestArtifacts,
+                          RestCue.acknowledgeTimedCompletion(generation: pendingCue)
+                    else { return }
+                    self.pendingTimedCueGeneration = nil
+                }
+                await self.startTimedSet(expected: renderedExercise,
+                    expectedSetNumber: expectedSetNumber, at: start)?.value
+            }
+        }
+        if restEndDate != nil { skipRest() }
+        skipped.remove(ex.id)
+        timedControlID = UUID().uuidString
+        registerTimerControls()
+        timedActive = true
+        let startedAt = start ?? now()
+        let endDate = startedAt.addingTimeInterval(TimeInterval(holdDurationSeconds))
+        timedStartDate = startedAt
+        // Count down the prescribed hold (target_duration_s, fallback
+        // target_reps) — not target_reps directly, which was 1s for slots
+        // that never set a duration (the "plank ended instantly" bug).
+        timedEndDate = endDate
+        timedSetAttempt = TimedSetAttempt(
+            featureSessionEpoch: featureSessionEpoch,
+            slotID: ex.id,
+            exerciseID: ex.exercise_id,
+            setNumber: nextReservedSetIndex(for: ex),
+            reservedSetIDs: reservedSetIDs(for: ex),
+            groupContext: groupContext(for: ex),
+            holdSeconds: holdDurationSeconds,
+            prescribedHoldSeconds: ex.holdSeconds,
+            rpe: rpe,
+            weight: weight,
+            isWarmup: ex.isWarmup,
+            startedAt: startedAt,
+            endDate: endDate)
+        guard persistRunnerCheckpoint() else { return nil }
+        RestLiveActivity.start(exercise: ex.exercise_name, endDate: endDate,
+                               upNext: "\(holdDurationSeconds)s", timerKind: "set", controlID: timedControlID)
+        pendingTimedCueGeneration = nil
+        timedCountdown = TimedSetCountdown(end: endDate)
+        RestCue.prepareTimedCues()
+        timedCueGeneration = RestCue.scheduleTimedNotification(at: endDate)
+        scheduleTimedSetCompletion()
+        return nil
+    }
+
+    /// Own completion in the model so navigation cannot cancel the set. iOS
+    /// may suspend this task in the background; the foreground hook calls the
+    /// same due-date check as a catch-up path.
+    private func scheduleTimedSetCompletion() {
+        timedSetCompletionTask?.cancel()
+        guard let attempt = timedSetAttempt else { return }
+        timedSetCompletionTask = Task { [weak self] in
+            while !Task.isCancelled {
+                // Release the model before sleeping so an abandoned runner
+                // cannot be kept alive by its own countdown task.
+                let wake: Date? = {
+                    guard let self, self.timedSetAttempt == attempt,
+                          self.validatedTimedSetAttempt(requiring: attempt) != nil
+                    else { return nil }
+                    let date = self.now()
+                    if date >= attempt.endDate { return attempt.endDate }
+                    self.playTimedCountdownCue(at: date)
+                    return self.timedCountdown?.nextWake(after: date)
+                }()
+                guard let wake else { return }
+                let delay = max(0, wake.timeIntervalSince(self?.now() ?? Date()))
+                if delay == 0 {
+                    if wake < attempt.endDate { continue }
+                    guard let self, self.timedSetAttempt == attempt else { return }
+                    // Detach before commit clears timer state, avoiding
+                    // cancellation of the completion's own work.
+                    self.timedSetCompletionTask = nil
+                    await self.finishTimedSetIfDue(requiring: attempt)
+                    return
+                }
+                let maximumDelay = Double(UInt64.max / 1_000_000_000)
+                do {
+                    try await Task.sleep(nanoseconds:
+                        UInt64(min(delay, maximumDelay) * 1_000_000_000))
+                } catch { return }
+            }
+        }
+    }
+
+    /// Shared by the deadline task and completion. No notification lookup or
+    /// persistence/network work may delay the audible end of the set.
+    @discardableResult
+    func playTimedCountdownCue(at date: Date) -> Bool {
+        guard validatedTimedSetAttempt() != nil,
+              let cue = timedCountdown?.cue(at: date),
+              let end = timedEndDate
+        else { return false }
+        return timedCuePlayer(cue, end)
+    }
+
+    private func clearTimedSet(cancelCue: Bool = true) {
+        if timedActive, canControlSharedRestArtifacts {
+            if cancelCue { RestCue.cancelTimedNotification() }
+            RestLiveActivity.endNow()
+        }
+        timedControlID = nil
+        timedCountdown = nil
+        timedCueGeneration = nil
+        timedSetCompletionTask?.cancel()
+        timedSetCompletionTask = nil
+        timedActive = false
+        timedEndDate = nil
+        timedStartDate = nil
+        timedSetAttempt = nil
+    }
+
+    /// Return the original hold only while every identity component still
+    /// matches the rendered runner. Any mismatch invalidates the timer and
+    /// clears it before it can enqueue a set.
+    private func validatedTimedSetAttempt(
+        requiring expected: TimedSetAttempt? = nil
+    ) -> (attempt: TimedSetAttempt, exercise: TemplateExercise)? {
+        guard timedActive,
+              canInitiateBoundFeatureAction,
+              currentJWT != nil,
+              let attempt = timedSetAttempt,
+              expected == nil || expected == attempt,
+              attempt.featureSessionEpoch == featureSessionEpoch,
+              auth.featureSessionEpoch == attempt.featureSessionEpoch,
+              let ex = currentExercise,
+              ex.id == attempt.slotID,
+              ex.exercise_id == attempt.exerciseID,
+              (ex.group_id == nil
+                ? nextReservedSetIndex(for: ex) == attempt.setNumber
+                : reservedSetIDs(for: ex).isSubset(of: attempt.reservedSetIDs)),
+              groupContext(for: ex) == attempt.groupContext,
+              ex.isTimed,
+              (partnerControl != nil || !isRunnerComplete(ex)),
+              ex.holdSeconds == attempt.prescribedHoldSeconds,
+              ex.isWarmup == attempt.isWarmup,
+              timedStartDate == attempt.startedAt,
+              timedEndDate == attempt.endDate
+        else {
+            clearTimedSet()
+            return nil
+        }
+        return (attempt, ex)
+    }
+
+    /// Whole seconds held so far in the running timed set (0 when idle).
+    /// FLOORED, not rounded: a tap at 1.6s is a 1s hold, so it must stay
+    /// below the `>= 2` STOP guard (rounding would bump it to 2 and log a
+    /// junk set — the exact thing the guard exists to prevent).
+    var timedElapsed: Int {
+        guard let start = timedStartDate else { return 0 }
+        return max(0, Int(now().timeIntervalSince(start)))
+    }
+
+    /// The prescribed hold completed (countdown reached the end) — logs the
+    /// FULL target hold. The model-owned deadline task does NOT come through
+    /// here: it calls the private `finishTimedSetIfDue(requiring:)` variant,
+    /// which re-validates the exact attempt it was scheduled for. This is the
+    /// unconditional entry point.
+    func finishTimedSetAuto() async {
+        guard let validated = validatedTimedSetAttempt() else { return }
+        await commitTimedSet(validated, held: validated.attempt.holdSeconds)
+    }
+
+    /// Complete only after the stored deadline. Called by both the model-owned
+    /// task and foreground recovery after iOS resumes a suspended app.
+    func finishTimedSetIfDue(at date: Date? = nil) async {
+        if !timedActive {
+            await finishPendingTimedCue()
+            return
+        }
+        guard let validated = validatedTimedSetAttempt(),
+              (date ?? now()) >= validated.attempt.endDate
+        else { return }
+        await commitTimedSet(validated, held: validated.attempt.holdSeconds)
+    }
+
+    /// Model-owned completion additionally proves that the sleeping task still
+    /// owns the attempt it captured before it detached itself from the model.
+    private func finishTimedSetIfDue(requiring attempt: TimedSetAttempt) async {
+        guard let validated = validatedTimedSetAttempt(requiring: attempt),
+              now() >= validated.attempt.endDate
+        else { return }
+        await commitTimedSet(validated, held: validated.attempt.holdSeconds)
+    }
+
+    /// Manual STOP — logs the ACTUAL elapsed hold (capped at the prescribed
+    /// target, which the auto-log would otherwise own). A reflexive tap in
+    /// the first 2s — STOP sits where START just was — is NOT a real hold:
+    /// it's ignored (the timer keeps running) so it can't log a junk "1s"
+    /// set, the symptom in #55.
+    func stopTimedSet() async {
+        guard let validated = validatedTimedSetAttempt() else { return }
+        let elapsed = timedElapsed
+        guard elapsed >= 2 else { return }
+        await commitTimedSet(
+            validated, held: min(elapsed, validated.attempt.holdSeconds))
+    }
+
+    /// A false start leaves the physical set unrecorded. The rendered timer
+    /// token prevents an older button from cancelling a later attempt.
+    @discardableResult
+    func cancelTimedSet(controlID: String) -> Bool {
+        guard !isPartnerWorkout, canControlSharedRestArtifacts,
+              timedControlID == controlID, validatedTimedSetAttempt() != nil else { return false }
+        clearTimedSet()
+        return persistRunnerCheckpoint()
+    }
+
+    /// Single commit path for a timed set — logs reps=held, duration=held
+    /// (≥1s) and advances. Both auto and manual completion route here.
+    private func commitTimedSet(
+        _ validated: (attempt: TimedSetAttempt, exercise: TemplateExercise),
+        held: Int
+    ) async {
+        guard timedSetAttempt == validated.attempt, timedActive else { return }
+        let reachedDeadline = held >= validated.attempt.holdSeconds && now() >= validated.attempt.endDate
+        let playedCompletion = reachedDeadline && playTimedCountdownCue(at: now())
+        let pendingCue = reachedDeadline && !playedCompletion ? timedCueGeneration : nil
+        let ex = validated.exercise
+        // Only an audible foreground completion or an explicit early stop can
+        // cancel immediately. Foreground catch-up checks actual OS delivery.
+        clearTimedSet(cancelCue: pendingCue == nil)
+        pendingTimedCueGeneration = pendingCue
+        if pendingCue != nil {
+            Task { [weak self] in await self?.finishPendingTimedCue() }
+        }
+        skipped.remove(ex.id)   // logging work un-skips this slot
+        persistRunnerCheckpoint()
+        let secs = max(1, held)
+        guard queueRunnerSet(
+            ex,
+            weight: validated.attempt.weight,
+            reps: secs,
+            durationOverride: secs, rpe: validated.attempt.rpe)
+        else {
+            persistRunnerCheckpoint()
+            return
+        }
+        guard running, currentExercise != nil else { return }
+        let date = todaySession?.date ?? todayString
+        normalizeMountedRunnerAfterLocalCommit(for: date)
+        reopenFailedRunnerIntentIfStable(for: date)
+        repairDeferredGroupSelection()
+    }
+
+    /// Background execution can log the set before its OS alert is delivered.
+    /// Retain this handoff after timer state clears so a quick foreground
+    /// return still checks delivery, without replaying an already heard tone.
+    private func finishPendingTimedCue() async {
+        guard let generation = pendingTimedCueGeneration,
+              canInitiateBoundFeatureAction else { return }
+        let finished = await timedCueFinisher(generation, { [weak self] in
+            self?.canInitiateBoundFeatureAction == true
+        })
+        if finished, pendingTimedCueGeneration == generation {
+            pendingTimedCueGeneration = nil
+        }
+    }
+
+    func adjustWeight(_ delta: Double) { setWeight(weight + delta) }
+    var runnerNeedsWeight: Bool { runnerWeightSource == .needsEntry }
+    func clearWeightChoice() {
+        guard !timedActive else { return }
+        runnerWeightSource = .needsEntry
+        persistRunnerCheckpoint()
+    }
+    func setWeight(_ value: Double) {
+        guard value.isFinite, !timedActive else { return }
+        weight = currentExercise?.allowsAssistance == true ? value : max(0, value)
+        runnerWeightSource = .entered
+        persistRunnerCheckpoint()
+    }
+    func adjustReps(_ delta: Int) { setReps(reps + delta) }
+    func setReps(_ value: Int) {
+        reps = max(0, value)
+        persistRunnerCheckpoint()
+    }
+    func setRPE(_ value: Double?) {
+        guard value == nil || (value!.isFinite && (0...10).contains(value!)) else { return }
+        rpe = value
+        persistRunnerCheckpoint()
+    }
+    func setHoldDuration(_ seconds: Int) {
+        guard !timedActive else { return }
+        holdDurationSeconds = max(1, seconds)
+        persistRunnerCheckpoint()
+    }
+
+    func setsDone(_ ex: TemplateExercise) -> Int { todaySlotSets(ex).count }
+    func isComplete(_ ex: TemplateExercise) -> Bool { !isFreestyle && setsDone(ex) >= ex.target_sets }
+    func isSkipped(_ ex: TemplateExercise) -> Bool { skipped.contains(ex.id) }
+    /// "Resolved" = nothing left to do here: either completed or skipped.
+    /// Drives requeue/finish so a skipped exercise is never auto-represented.
+    func isResolved(_ ex: TemplateExercise) -> Bool { isComplete(ex) || isSkipped(ex) }
+
+    /// First UNRESOLVED exercise after the current one (wraps), so a
+    /// completed-or-skipped lift never traps you and order is flexible.
+    /// Skipped exercises are excluded — they do not requeue (#3).
+    var nextIncompleteIndex: Int? {
+        let n = exercises.count
+        guard n > 0 else { return nil }
+        for offset in 1...n {
+            let i = (exerciseIndex + offset) % n
+            let slot = exercises[i]
+            if slot.group_id == nil ? !isResolved(slot) : !isRunnerResolved(slot) { return i }
+        }
+        return nil
+    }
+
+    /// Final review may retain its cursor when a correction removes a set
+    /// elsewhere. Resume unresolved work using durable runner progress, which
+    /// includes queued sets and excludes skipped exercises.
+    func reviewIncompleteExercises() {
+        guard running, !hasPendingTerminalIntentForCurrentWorkout,
+              !isTerminalMutationInFlight, let index = nextRunnerIncompleteIndex else { return }
+        jump(to: index)
+    }
+
+    func jump(to index: Int) {
+        guard !isPartnerWorkout else { return }
+        guard exercises.indices.contains(index) else { return }
+        // Returning from final review is an explicit runner selection too.
+        // Persist the reopened state with the selected exercise below.
+        finished = false
+        // Explicit focus supersedes deferred repair and every older pending
+        // deletion. A deletion initiated after this choice remains eligible.
+        deferredGroupRepair = nil
+        runnerFocus.revision &+= 1
+        runnerFocus.isExplicit = true
+        selectRunnerExercise(at: index)
+    }
+
+    /// Automatic advancement does not create a new explicit selection revision.
+    private func selectRunnerExercise(at index: Int) {
+        guard exercises.indices.contains(index) else { return }
+        exerciseIndex = index
+        seedInputs()
+        rememberGroupProgress()
+        persistRunnerCheckpoint()
+    }
+
+    func logCurrentSet(
+        expected renderedExercise: TemplateExercise,
+        expectedSetNumber: Int
+    ) async {
+        // A SwiftUI button action launches an unstructured Task. Bind that
+        // work to the slot and set number visible at tap time so a queued
+        // duplicate cannot run after the first tap advances the runner and
+        // accidentally log the successor exercise.
+        guard canInitiateBoundFeatureAction,
+              running,
+              !finished,
+              let ex = currentExercise,
+              currentExerciseMatchesRenderedAction(renderedExercise, current: ex),
+              currentPhysicalSetNumber == expectedSetNumber,
+              (partnerControl != nil || !isRunnerComplete(ex)),
+              !isSetEntryBlocked(ex),
+              !runnerNeedsWeight
+        else { return }
+        skipped.remove(ex.id)   // logging work un-skips this slot
+        persistRunnerCheckpoint()
+        guard queueRunnerSet(ex, weight: weight, reps: reps, rpe: rpe) else {
+            persistRunnerCheckpoint()
+            return
+        } // starts rest immediately; delivery continues in the background
+        guard running, currentExercise != nil else { return }
+        normalizeMountedRunnerAfterLocalCommit(for: todaySession?.date ?? todayString)
+    }
+
+    /// A run saved in the run recorder from a planned outdoor run slot is that
+    /// slot's work: one timed set of the run's moving time, as stopping a
+    /// timed set logs it. Inside a started workout the runner moves on as
+    /// usual. A workout that is only that run starts and finishes here, so
+    /// today shows it done (docs/plans/planned-runs P7). Returns false when
+    /// nothing was logged, such as a run from another day or a slot already
+    /// done.
+    @discardableResult
+    func logRecordedRun(slotID: String, date: String, movingSeconds: Int, sessionSlot: Int = 0) async -> Bool {
+        guard date == todayString, currentWorkoutScope == WorkoutSessionScope(date: date, slot: sessionSlot),
+              movingSeconds > 0, !isPartnerWorkout,
+              canInitiateBoundFeatureAction, currentJWT != nil else { return false }
+        var finishesWorkout = false
+        if !running {
+            guard !isFreestyle, !todayIsCompleted, !blocksNewWorkoutStart,
+                  let workout = todayPreviewWorkout,
+                  workout.exercises.count == 1, workout.exercises[0].id == slotID else { return false }
+            startToday()
+            guard running, selectedDay?.id == workout.id else { return false }
+            finishesWorkout = true
+        }
+        guard !isFreestyle, !finished,
+              let ex = exercises.first(where: { $0.id == slotID }),
+              !isRunnerComplete(ex), !isSetEntryBlocked(ex) else { return false }
+        skipped.remove(ex.id)
+        persistRunnerCheckpoint()
+        let seconds = max(1, movingSeconds)
+        guard queueRunnerSet(ex, weight: 0, reps: seconds, durationOverride: seconds) else {
+            persistRunnerCheckpoint()
+            return false
+        }
+        if running, currentExercise != nil {
+            normalizeMountedRunnerAfterLocalCommit(for: todaySession?.date ?? todayString)
+        }
+        if finishesWorkout {
+            // Nothing follows the run, so it needs no rest timer.
+            if restEndDate != nil { skipRest() }
+            await finishWorkout()
+        }
+        return true
+    }
+
+    /// Manual "move on" — marks the current exercise skipped for this
+    /// session (so it is NOT requeued, #3) and advances to the next
+    /// unresolved exercise; ends the workout if none remain.
+    func skip() {
+        if isPartnerWorkout { onPartnerSkip?(); return }
+        guard !isSwappingExercise else { return }
+        // Skip is a terminal decision for the rendered hold even when there is
+        // no next slot and `jump` therefore never calls `seedInputs`.
+        clearTimedSet()
+        runnerFocus.isExplicit = false
+        let wasGrouped = currentExercise?.group_id != nil
+        if let ex = currentExercise { skipped.insert(ex.id) }
+        if wasGrouped {
+            normalizeMountedRunnerProgress(for: todaySession?.date ?? todayString, forceGroupSelection: true)
+        } else if let next = nextIncompleteIndex { selectRunnerExercise(at: next) } else { finished = true }
+        repairDeferredGroupSelection()
+        rememberGroupProgress()
+        persistRunnerCheckpoint()
+        if finished && restEndDate != nil { skipRest() }
+    }
+
+    func previous() {
+        guard exerciseIndex > 0 else { return }
+        jump(to: exerciseIndex - 1)
+    }
+
+    /// Non-destructive forward navigation — move to the next exercise in order
+    /// WITHOUT marking the current one skipped. Going "out of order" (stepping
+    /// ahead to a later lift you'll come back to) must never strike out the
+    /// ones you pass; only an explicit Skip does that (#3). Pairs with
+    /// `previous()`; the jump strip still allows arbitrary jumps.
+    func next() {
+        guard exerciseIndex < exercises.count - 1 else { return }
+        jump(to: exerciseIndex + 1)
+    }
+
+    func completedWorkoutFeedbackTarget(for session: SessionRow) -> CompletedWorkoutFeedbackTarget? {
+        guard canInitiateBoundFeatureAction, isCurrentAccount, let accountID,
+              let current = sessions.first(where: { $0.id == session.id }), current.status == "completed",
+              current.date == session.date, current.workoutScope == session.workoutScope,
+              (current.attempt ?? 0) == (session.attempt ?? 0) else { return nil }
+        return CompletedWorkoutFeedbackTarget(sessionID: current.id, date: current.date,
+            slot: current.slot ?? 0, attempt: current.attempt ?? 0, accountID: accountID,
+            featureSessionEpoch: featureSessionEpoch,
+            baseline: WorkoutFeedbackBaseline(notes: current.notes, perceivedFatigue: current.perceived_fatigue))
+    }
+
+    private func ownsCompletedFeedbackTarget(_ target: CompletedWorkoutFeedbackTarget) -> Bool {
+        target.accountID == accountID && target.featureSessionEpoch == featureSessionEpoch
+            && auth.isCurrentFeatureSession(accountID: target.accountID, epoch: target.featureSessionEpoch)
+    }
+
+    /// A completed-record edit is an online CAS, independent of the runner's
+    /// approved feedback, terminal intent, selected date, and session slot.
+    func saveCompletedWorkoutFeedback(_ request: CompletedWorkoutFeedbackRequest) async -> CompletedWorkoutFeedbackOutcome {
+        let target = request.target
+        let changed = "This completed workout changed or is no longer available. Close this editor and reopen its record."
+        guard ownsCompletedFeedbackTarget(target), let jwt = currentJWT,
+              let current = sessions.first(where: { $0.id == target.sessionID }), target.matches(current) else {
+            return .unavailable(changed)
+        }
+        guard canInitiateBoundFeatureAction else {
+            return .retry("Saved training is temporarily unavailable. Resolve the storage alert, then retry this same feedback.")
+        }
+        guard request.isValid else { return .invalid("Choose a fatigue rating from 1 to 10, or Not rated.") }
+        do {
+            let response = try await completedFeedbackAPI.updateCompletedWorkoutFeedback(request, jwt: jwt)
+            guard ownsCompletedFeedbackTarget(target), target.matches(response),
+                  sessions.first(where: { $0.id == target.sessionID }).map(target.matches) == true else {
+                return .unavailable(changed)
+            }
+            guard acceptCompletedFeedback(response, target: target) else { return .unavailable(changed) }
+            await loadAfterMutation()
+            // An acknowledged edit must not become a duplicate retry when
+            // refreshing the rest of the record fails.
+            return ownsCompletedFeedbackTarget(target) ? .saved : .unavailable(changed)
+        } catch {
+            guard ownsCompletedFeedbackTarget(target) else { return .unavailable(changed) }
+            if let apiError = error as? APIError, apiError.httpStatus == 409 {
+                struct Conflict: Decodable { let error: String; let current_session: SessionRow? }
+                if let data = apiError.httpBody?.data(using: .utf8),
+                   let conflict = try? JSONDecoder().decode(Conflict.self, from: data),
+                   conflict.error == "session_feedback_conflict", let saved = conflict.current_session,
+                   target.matches(saved), sessions.first(where: { $0.id == target.sessionID }).map(target.matches) == true {
+                    guard acceptCompletedFeedback(saved, target: target) else { return .unavailable(changed) }
+                    return .conflict(saved)
+                }
+                return .unavailable(changed)
+            }
+            if let status = (error as? APIError)?.httpStatus {
+                if status == 400 || status == 422 { return .invalid("The feedback was not saved. Review the note and fatigue rating, then try again.") }
+                if status == 401 { handle(error, jwt: jwt); return .unavailable("Sign in again, then reopen this workout's feedback.") }
+                if status == 403 || status == 404 { return .unavailable(changed) }
+            }
+            return .retry("The save could not be confirmed. Retry sends the same feedback to this workout only.")
+        }
+    }
+
+    private func acceptCompletedFeedback(_ response: SessionRow, target: CompletedWorkoutFeedbackTarget) -> Bool {
+        // Merge through the shared ACK generation so an older in-flight pull
+        // cannot undo the note. Preserve summary/timing and every sibling row.
+        let merged = StateSnapshotStore.mergeAcknowledgement(userID: accountID,
+            fallback: currentStateResponse(), defaults: defaults) { newest in
+                var sessions = newest.sessions
+                if let index = sessions.firstIndex(where: { $0.id == target.sessionID }),
+                   target.accepts(response, replacing: sessions[index]) {
+                    sessions[index].notes = response.notes
+                    sessions[index].perceived_fatigue = response.perceived_fatigue
+                    sessions[index].updated_at = response.updated_at
+                }
+                return StateResponse(plan: newest.plan, plan_version: newest.plan_version,
+                    sessions: sessions, sets: newest.sets, external_events: newest.external_events,
+                    external_activities: newest.external_activities, activities: newest.activities,
+                    server_time: newest.server_time, manualActivityCursorCapable: newest.manualActivityCursorCapable,
+                    externalSyncCursorsVersion: newest.externalSyncCursorsVersion, planGroupsVersion: newest.planGroupsVersion)
+            }
+        let authoritative = merged?.state.sessions.first(where: { $0.id == target.sessionID })
+        if let index = sessions.firstIndex(where: { $0.id == target.sessionID }), target.matches(sessions[index]) {
+            if let authoritative {
+                // A newer persisted attempt or discard wins over this ACK.
+                sessions[index] = authoritative
+            } else if target.accepts(response, replacing: sessions[index]) {
+                sessions[index].notes = response.notes
+                sessions[index].perceived_fatigue = response.perceived_fatigue
+                sessions[index].updated_at = response.updated_at
+            }
+            if todaySession?.id == target.sessionID { todaySession = sessions[index] }
+        }
+        return sessions.first(where: { $0.id == target.sessionID }).map(target.matches) == true
+    }
+
+    var currentWorkoutFeedback: WorkoutFeedback? {
+        if let workoutFeedback { return workoutFeedback }
+        guard let session = todaySession else { return nil }
+        let value = WorkoutFeedback(notes: session.notes, perceivedFatigue: session.perceived_fatigue)
+        return value.isEmpty ? nil : value
+    }
+
+    /// Explicit save is local and synchronous, before the member finishes.
+    /// The checkpoint CAS and editor baseline prevent a stale view from
+    /// replacing a newer approved edit. Queued finish choices are immutable.
+    @discardableResult
+    func saveWorkoutFeedback(_ feedback: WorkoutFeedback,
+                             expected target: WorkoutTerminalActionTarget,
+                             previous: WorkoutFeedback?) -> Bool {
+        guard (matchesTerminalActionTarget(target) || matchesFeedbackSessionBinding(target)), running,
+              !hasPendingTerminalIntentForCurrentWorkout,
+              currentWorkoutFeedback == previous,
+              feedback.perceivedFatigue.map({ (1...10).contains($0) }) ?? true else { return false }
+        let old = workoutFeedback
+        var approved = feedback
+        approved.expected = previous?.expected ?? WorkoutFeedbackBaseline(
+            notes: todaySession?.notes, perceivedFatigue: todaySession?.perceived_fatigue)
+        workoutFeedback = approved
+        guard persistRunnerCheckpoint() else {
+            workoutFeedback = old
+            return false
+        }
+        return true
+    }
+
+    /// A first-set ACK may establish the session while this editor is open.
+    /// Accept only that proven binding of the same checkpoint and attempt.
+    private func matchesFeedbackSessionBinding(_ target: WorkoutTerminalActionTarget) -> Bool {
+        guard canInitiateBoundFeatureAction, target.featureSessionEpoch == featureSessionEpoch,
+              target.sessionID == nil, let original = target.nilBoundRunnerCheckpoint,
+              original.sessionID == nil, let current = persistedRunnerCheckpoint,
+              let session = todaySession, target.date == session.date,
+              current.sessionID == session.id, current.date == original.date,
+              current.workoutStartedAtMS == original.workoutStartedAtMS,
+              current.selectedDayID == original.selectedDayID,
+              session.attempt == (original.restartDiscardedAttempt.map { $0 + 1 } ?? 0),
+              current.sessionAttempt == session.attempt,
+              original.feedback == current.feedback else { return false }
+        return true
+    }
+
+    func finishWorkout() async {
+        guard !isPartnerWorkout else { return }
+        guard !isSwappingExercise else { return }
+        guard canInitiateBoundFeatureAction, currentJWT != nil else { return }
+        let date = todaySession?.date ?? todayString
+        if terminalOutbox.intent(for: date, slot: currentWorkoutScope.slot) == nil {
+            // A newer view can own a more recent approved edit. Refusing its
+            // checkpoint must also refuse a new finish from this stale view.
+            guard !runnerArtifactsOwnedByOther else { return }
+            if running || workoutFeedback != nil {
+                guard persistRunnerCheckpoint() else { return }
+            }
+            let intent = WorkoutTerminalIntent(
+                id: uuidFactory().uuidString,
+                action: .finish,
+                date: date, sessionSlot: currentWorkoutScope.slot,
+                workoutID: isFreestyle ? nil : todaySession?.workout_id ?? selectedDay?.id,
+                resolvedSessionID: todaySession?.id,
+                deliveryState: .queued,
+                failedHTTPStatus: nil,
+                expectedAttempt: todaySession?.attempt,
+                restartDiscardedAttempt: runnerRestartDiscardedAttempt,
+                feedback: workoutFeedback)
+            // The complete user choice is durable before the coordinator can
+            // await set delivery, session resolution, or the terminal PATCH.
+            terminalOutbox.enqueue(intent)
+            guard persistEnqueuedTerminalIntent(intent) else {
+                terminalOutbox = WorkoutTerminalOutboxStore.load(userID: accountID, defaults: defaults)
+                loadError = "Couldn't save the finish request on your iPhone. Retry saved data, then finish again."
+                return
+            }
+        }
+        await drainWorkoutWriteOutboxes()
+    }
+
+    func finishWorkout(expected target: WorkoutTerminalActionTarget) async {
+        guard matchesTerminalActionTarget(target) || matchesFeedbackSessionBinding(target) else { return }
+        await finishWorkout()
+    }
+
+    /// FinishedView is rendered only after every slot resolves, but a live
+    /// refresh may reopen work before SwiftUI removes that view. Revalidate
+    /// the completion state at action time; the overflow menu intentionally
+    /// keeps `finishWorkout()` as its explicit early-end path.
+    var canFinishResolvedWorkout: Bool {
+        if isFreestyle { return running && finished }
+        return running && finished && !exercises.isEmpty
+            && exercises.allSatisfy { isRunnerResolved($0) }
+    }
+
+    func finishResolvedWorkout() async {
+        guard canFinishResolvedWorkout else { return }
+        await finishWorkout()
+    }
+
+    func finishResolvedWorkout(
+        expected target: WorkoutTerminalActionTarget
+    ) async {
+        guard !isSwappingExercise, matchesTerminalActionTarget(target) else { return }
+        await finishResolvedWorkout()
+    }
+
+    /// Discard today's session — "I didn't really do this." Throws the
+    /// logged sets away and marks the session discarded server-side; the
+    /// day VANISHES (reverts to its scheduled/rest projection) rather than
+    /// recording a workout. Same local-state teardown as finishWorkout so
+    /// the runner/Live Activity don't linger; `load()` then pulls the
+    /// vanished state. Restarting the day creates a fresh session.
+    func discardWorkout() async {
+        guard !isPartnerWorkout else { return }
+        guard !isSwappingExercise else { return }
+        guard canInitiateBoundFeatureAction, currentJWT != nil else { return }
+        let date = todaySession?.date ?? todayString
+        let intent = WorkoutTerminalIntent(
+            id: uuidFactory().uuidString,
+            action: .discard,
+            date: date, sessionSlot: currentWorkoutScope.slot,
+            workoutID: isFreestyle ? nil : todaySession?.workout_id ?? selectedDay?.id,
+            resolvedSessionID: todaySession?.id,
+            deliveryState: .queued,
+            failedHTTPStatus: nil,
+            expectedAttempt: todaySession?.attempt,
+            restartDiscardedAttempt: runnerRestartDiscardedAttempt)
+
+        // Saving the discard first is the atomic semantic commit. If the app
+        // dies before the following physical set-key cleanup, init observes
+        // this barrier and performs the same supersession before any drain.
+        terminalOutbox.enqueue(intent)
+        guard persistEnqueuedTerminalIntent(intent) else {
+            terminalOutbox = WorkoutTerminalOutboxStore.load(userID: accountID, defaults: defaults)
+            loadError = "Couldn't save the discard request on your iPhone. Retry saved data, then discard again."
+            return
+        }
+        supersedeSetIntentsForDiscardBarriers()
+        applyLocalDiscardMask()
+        await drainWorkoutWriteOutboxes()
+    }
+
+    func discardWorkout(expected target: WorkoutTerminalActionTarget) async {
+        guard !isSwappingExercise, matchesTerminalActionTarget(target) else { return }
+        await discardWorkout()
+    }
+
+    func resolveWorkoutFeedbackConflict(id: String, expected: WorkoutFeedbackBaseline, useMine: Bool) async {
+        guard canInitiateBoundFeatureAction,
+              let current = terminalOutbox.intents.first(where: { $0.id == id }),
+              let conflict = current.feedbackConflict, conflict == expected,
+              let durable = durableTerminalIntent(matching: current), durable.feedbackConflict == expected else { return }
+        var feedback = useMine ? current.feedback : nil
+        feedback?.expected = conflict
+        let replacement = WorkoutTerminalIntent(id: uuidFactory().uuidString, action: .finish,
+            date: current.date, sessionSlot: current.sessionSlot, workoutID: current.workoutID, resolvedSessionID: current.resolvedSessionID,
+            deliveryState: .queued, failedHTTPStatus: nil, expectedAttempt: current.expectedAttempt,
+            restartDiscardedAttempt: current.restartDiscardedAttempt, feedback: feedback)
+        WorkoutTerminalOutboxStore.resolveFeedbackConflict(id: id, replacement: replacement,
+            userID: accountID, defaults: defaults)
+        guard WorkoutTerminalOutboxStore.load(userID: accountID, defaults: defaults).intent(for: current.date, slot: current.sessionSlot ?? 0)?.id == replacement.id else { return }
+        terminalOutbox.resolveFeedbackConflict(id: id, replacement: replacement)
+        ownedTerminalIntentIDs.remove(id)
+        ownedTerminalIntentIDs.insert(replacement.id)
+        await drainWorkoutWriteOutboxes()
+    }
+
+    func retryTerminalIntent(id: String) async {
+        guard canInitiateBoundFeatureAction,
+              var intent = terminalOutbox.intents.first(where: { $0.id == id }),
+              intent.deliveryState == .failed,
+              intent.feedbackConflict == nil
+        else { return }
+        intent.deliveryState = .queued
+        intent.failedHTTPStatus = nil
+        terminalOutbox.replace(intent)
+        persistReplacedTerminalIntent(intent)
+        await drainWorkoutWriteOutboxes()
+    }
+
+    func retryFailedTerminalIntents() async {
+        guard canInitiateBoundFeatureAction else { return }
+        var changed = false
+        for var intent in terminalOutbox.intents
+        where intent.deliveryState == .failed && intent.feedbackConflict == nil {
+            intent.deliveryState = .queued
+            intent.failedHTTPStatus = nil
+            terminalOutbox.replace(intent)
+            persistReplacedTerminalIntent(intent)
+            changed = true
+        }
+        guard changed else { return }
+        await drainWorkoutWriteOutboxes()
+    }
+
+    // MARK: in-app workout editing
+    //
+    // Direct edits to the active plan's day template from the app — the
+    // "Claude is the brain, the app is the executor, but I can still tweak
+    // today's workout" loop (#1/#2). These mutate the versioned plan tree via
+    // the REST editor endpoints (thin wrappers over the same updateExercise /
+    // deleteTemplateExercise the MCP tools use) and reload so the change is
+    // reflected immediately. Editing the DAY TEMPLATE (not a per-session
+    // override) keeps one source of truth and mirrors how Claude edits — an
+    // added erg warm-up recurs on that day, which is what you want for a
+    // warm-up. Any edit can shift slot indices (add/delete/reorder before the
+    // current one) or remove the active slot itself. The live-state apply path
+    // owns stable-slot remapping and only reseeds when executable identity
+    // changes, preserving an in-flight timed hold across harmless edits.
+
+    @discardableResult
+    func addExerciseToDay(_ dayID: String, exercise: String, isWarmup: Bool,
+                          targetSets: Int, targetReps: Int, targetRepsMax: Int?,
+                          restSeconds: Int, targetDurationS: Int?,
+                          load: [String: Any] = [:],
+                          expectedVersion: Int? = nil) async -> Bool {
+        guard canInitiateBoundFeatureAction, let jwt = currentJWT,
+              !workoutEditorRefreshNeeded,
+              let version = expectedVersion ?? plan?.version else { return false }
+        return await performSlotEdit(jwt: jwt) {
+            _ = try await self.planEditingAPI.addExercise(
+                dayID: dayID, exercise: exercise, isWarmup: isWarmup,
+                targetSets: targetSets, targetReps: targetReps, targetRepsMax: targetRepsMax,
+                restSeconds: restSeconds, targetDurationS: targetDurationS, load: load,
+                expectedVersion: version, jwt: jwt)
+        }
+    }
+
+    func deleteSlot(dayID: String, teID: String, expectedVersion: Int? = nil) async {
+        guard canInitiateBoundFeatureAction, let jwt = currentJWT,
+              !workoutEditorRefreshNeeded,
+              let version = expectedVersion ?? plan?.version else { return }
+        _ = await performSlotEdit(jwt: jwt) {
+            try await self.planEditingAPI.deleteExerciseSlot(
+                dayID: dayID, teID: teID, expectedVersion: version, jwt: jwt)
+        }
+    }
+
+    @discardableResult
+    func replaceSlot(dayID: String, teID: String, exercise: String,
+                     targets: [String: Any]? = nil,
+                     expectedVersion: Int) async -> Bool {
+        guard canInitiateBoundFeatureAction, let jwt = currentJWT,
+              !workoutEditorRefreshNeeded else { return false }
+        do {
+            _ = try await planEditingAPI.replaceExerciseSlot(
+                dayID: dayID, teID: teID, exercise: exercise, targets: targets,
+                expectedVersion: expectedVersion, jwt: jwt)
+            guard canInitiateBoundFeatureAction else {
+                auth.noteAccountStatePersisted(for: accountID)
+                return false
+            }
+            workoutEditorRefreshNeeded = true
+            await loadAfterMutation()
+            guard canInitiateBoundFeatureAction else {
+                auth.noteAccountStatePersisted(for: accountID)
+                return false
+            }
+            // The swap is committed even if the following pull fails. Close
+            // the picker and require a refresh before allowing further edits.
+            return true
+        } catch {
+            guard canInitiateBoundFeatureAction else { return false }
+            if case APIError.http(409, _) = error {
+                workoutEditorRefreshNeeded = true
+                await loadAfterMutation()
+                guard canInitiateBoundFeatureAction else { return false }
+                loadError = "The workout changed. Review the current targets before saving again. Your unfinished replacement is kept open."
+            } else if case APIError.http(400, _) = error {
+                loadError = "Review the replacement's targets before saving, or choose another exercise."
+            } else {
+                handle(error, jwt: jwt)
+            }
+            return false
+        }
+    }
+
+    /// Move a slot to a new position. The backend densifies sibling
+    /// order_index values around the requested destination.
+    func moveSlot(dayID: String, teID: String, toIndex: Int, expectedVersion: Int? = nil) async {
+        guard canInitiateBoundFeatureAction, let jwt = currentJWT,
+              !workoutEditorRefreshNeeded,
+              let version = expectedVersion ?? plan?.version else { return }
+        _ = await performSlotEdit(jwt: jwt) {
+            _ = try await self.planEditingAPI.updateExerciseSlot(
+                dayID: dayID, teID: teID, fields: ["order_index": toIndex],
+                expectedVersion: version, jwt: jwt)
+        }
+    }
+
+    @discardableResult
+    func updateSlot(
+        dayID: String,
+        teID: String,
+        isWarmup: Bool,
+        targetSets: Int,
+        targetReps: Int,
+        targetRepsMax: Int?,
+        restSeconds: Int,
+        targetDurationS: Int?,
+        load: [String: Any] = [:],
+        expectedVersion: Int? = nil
+    ) async -> Bool {
+        guard canInitiateBoundFeatureAction, let jwt = currentJWT,
+              !workoutEditorRefreshNeeded,
+              let version = expectedVersion ?? plan?.version else { return false }
+        // Target weight, its unit and target RPE, only when the member changed
+        // them (SlotLoadDraft.changedFields).
+        var fields: [String: Any] = load
+        fields.merge([
+            "is_warmup": isWarmup,
+            "target_sets": targetSets,
+            "target_reps": targetReps,
+            "rest_seconds": restSeconds,
+        ]) { _, new in new }
+        if plan?.workouts.first(where: { $0.id == dayID })?.exercises.first(where: { $0.id == teID })?.group_id != nil {
+            fields.removeValue(forKey: "target_sets")
+            fields.removeValue(forKey: "rest_seconds")
+        }
+        fields["target_reps_max"] = targetRepsMax.map { $0 as Any } ?? NSNull()
+        fields["target_duration_s"] = targetDurationS.map { $0 as Any } ?? NSNull()
+        return await performSlotEdit(jwt: jwt) {
+            _ = try await self.planEditingAPI.updateExerciseSlot(
+                dayID: dayID, teID: teID, fields: fields, expectedVersion: version, jwt: jwt)
+        }
+    }
+
+    /// Saves a run slot's planned steps, or clears them with nil, so a member
+    /// can plan a run without the coach (docs/plans/planned-runs P5).
+    func updateRunSteps(dayID: String, teID: String, steps: RunPlan?,
+                        expectedVersion: Int? = nil) async -> Bool {
+        guard canInitiateBoundFeatureAction, let jwt = currentJWT,
+              !workoutEditorRefreshNeeded,
+              let version = expectedVersion ?? plan?.version else { return false }
+        let fields: [String: Any] = ["run_steps": steps.map { $0.jsonObject as Any } ?? NSNull()]
+        return await performSlotEdit(jwt: jwt) {
+            _ = try await self.planEditingAPI.updateExerciseSlot(
+                dayID: dayID, teID: teID, fields: fields, expectedVersion: version, jwt: jwt)
+        }
+    }
+
+    /// An accepted mutation stays successful even if its refresh fails. A
+    /// rejected version refreshes the view and requires an explicitly reviewed
+    /// edit; it never retries a form's stale prescription against newer state.
+    private func performSlotEdit(jwt: String, operation: () async throws -> Void) async -> Bool {
+        do {
+            try await operation()
+            guard canInitiateBoundFeatureAction else {
+                auth.noteAccountStatePersisted(for: accountID)
+                return false
+            }
+            workoutEditorRefreshNeeded = true
+            await loadAfterMutation()
+            guard canInitiateBoundFeatureAction else {
+                auth.noteAccountStatePersisted(for: accountID)
+                return false
+            }
+            return true
+        } catch {
+            guard canInitiateBoundFeatureAction else { return false }
+            if (error as? APIError)?.httpStatus == 409 {
+                workoutEditorRefreshNeeded = true
+                await loadAfterMutation()
+                guard canInitiateBoundFeatureAction else { return false }
+                loadError = "The workout changed. Review the current workout details before trying again."
+            } else { handle(error, jwt: jwt) }
+            return false
+        }
+    }
+
+    /// Group drafts remain visible during temporary storage failures. This
+    /// guard gates writes and callbacks without retiring their presentation.
+    var canEditExerciseGroups: Bool { canInitiateBoundFeatureAction && isCurrentAccount }
+
+    @discardableResult
+    func saveExerciseGroup(dayID: String, groupID: String, memberIDs: [String],
+                           expectedVersion: Int, roundRest: Int, transitionRest: Int,
+                           targetSets: Int, orderIndex: Int? = nil) async -> Bool {
+        await saveExerciseGroupResult(dayID: dayID, groupID: groupID, memberIDs: memberIDs,
+            expectedVersion: expectedVersion, roundRest: roundRest, transitionRest: transitionRest,
+            targetSets: targetSets, orderIndex: orderIndex) == .saved
+    }
+
+    func saveExerciseGroupResult(dayID: String, groupID: String, memberIDs: [String],
+                                 expectedVersion: Int, roundRest: Int, transitionRest: Int,
+                                 targetSets: Int, orderIndex: Int? = nil) async -> ExerciseGroupWriteResult {
+        guard canEditExerciseGroups, let jwt = currentJWT else { return .unavailable }
+        guard !workoutEditorRefreshNeeded else { return .reviewRequired }
+        return await performExerciseGroupWrite(jwt: jwt) {
+            try await self.planEditingAPI.setExerciseGroup(dayID: dayID, groupID: groupID,
+                memberIDs: memberIDs, expectedVersion: expectedVersion, roundRest: roundRest,
+                transitionRest: transitionRest, targetSets: targetSets, orderIndex: orderIndex, jwt: jwt)
+        }
+    }
+
+    @discardableResult
+    func clearExerciseGroup(dayID: String, groupID: String, expectedVersion: Int) async -> Bool {
+        await clearExerciseGroupResult(dayID: dayID, groupID: groupID, expectedVersion: expectedVersion) == .saved
+    }
+
+    func clearExerciseGroupResult(dayID: String, groupID: String,
+                                  expectedVersion: Int) async -> ExerciseGroupWriteResult {
+        guard canEditExerciseGroups, let jwt = currentJWT else { return .unavailable }
+        guard !workoutEditorRefreshNeeded else { return .reviewRequired }
+        return await performExerciseGroupWrite(jwt: jwt) {
+            try await self.planEditingAPI.clearExerciseGroup(dayID: dayID, groupID: groupID,
+                expectedVersion: expectedVersion, jwt: jwt)
+        }
+    }
+
+    private func performExerciseGroupWrite(jwt: String,
+        operation: () async throws -> APIClient.ExerciseGroupAcknowledgement) async -> ExerciseGroupWriteResult {
+        do {
+            _ = try await operation()
+            guard canEditExerciseGroups else {
+                auth.noteAccountStatePersisted(for: accountID)
+                return .unavailable
+            }
+            workoutEditorRefreshNeeded = true
+            await loadAfterMutation()
+            guard canEditExerciseGroups else {
+                auth.noteAccountStatePersisted(for: accountID)
+                return .unavailable
+            }
+            return .saved
+        } catch {
+            guard canEditExerciseGroups else { return .unavailable }
+            if (error as? APIError)?.httpStatus == 409 {
+                workoutEditorRefreshNeeded = true
+                await loadAfterMutation()
+                guard canEditExerciseGroups else { return .unavailable }
+                loadError = "Workout changed. Review its current group while keeping your proposed changes."
+                return .reviewRequired
+            }
+            handle(error, jwt: jwt)
+            if let status = (error as? APIError)?.httpStatus, (400..<500).contains(status) {
+                return .reviewRequired
+            }
+            return .retry
+        }
+    }
+
+    // MARK: manual routine + calendar authoring
+
+    var recentPlanChanges: [PlanHistoryItem] {
+        guard canInitiateBoundFeatureAction, let plan,
+              let history = recentPlanHistory, history.plan_id == plan.id,
+              history.current_version == plan.version else { return [] }
+        let through = PlanChangeDismissalStore.load(userID: accountID, planID: plan.id, defaults: defaults)
+        return history.items.filter { $0.version > through }
+    }
+
+    func dismissRecentPlanChanges(through version: Int, planID: String) {
+        guard canInitiateBoundFeatureAction, plan?.id == planID,
+              recentPlanHistory?.plan_id == planID,
+              recentPlanHistory?.items.contains(where: { $0.version == version }) == true else { return }
+        PlanChangeDismissalStore.dismiss(through: version, userID: accountID,
+                                        planID: planID, defaults: defaults)
+        planDismissalRevision += 1
+    }
+
+    func refreshRecentPlanChanges() async {
+        let request = UUID()
+        planHistoryRequest = request
+        planChangesError = nil
+        guard canInitiateBoundFeatureAction, let jwt = currentJWT, let requestedPlan = plan else {
+            recentPlanHistory = nil
+            return
+        }
+        do {
+            let response = try await routineEditingAPI.getPlanHistory(limit: 5, beforeVersion: nil, jwt: jwt)
+            guard canInitiateBoundFeatureAction, !Task.isCancelled, planHistoryRequest == request,
+                  plan?.id == requestedPlan.id, plan?.version == requestedPlan.version else { return }
+            guard response.plan_id == requestedPlan.id, response.current_version == requestedPlan.version else {
+                recentPlanHistory = nil
+                planChangesError = "Your plan changed. Refresh to see recent changes."
+                return
+            }
+            recentPlanHistory = response
+        } catch {
+            guard canInitiateBoundFeatureAction, !Task.isCancelled, planHistoryRequest == request,
+                  plan?.id == requestedPlan.id, plan?.version == requestedPlan.version else { return }
+            recentPlanHistory = nil
+            planChangesError = "Recent changes are unavailable. Try again when connected."
+            if (error as? APIError)?.httpStatus == 401 { handle(error, jwt: jwt) }
+        }
+    }
+
+    func loadPlanHistory(limit: Int = 25, beforeVersion: Int? = nil) async -> PlanHistoryResponse? {
+        guard canInitiateBoundFeatureAction, let jwt = currentJWT else { return nil }
+        do {
+            let result = try await routineEditingAPI.getPlanHistory(limit: limit, beforeVersion: beforeVersion, jwt: jwt)
+            guard canInitiateBoundFeatureAction else { return nil }
+            return result
+        }
+        catch { handle(error, jwt: jwt); return nil }
+    }
+
+    func comparePlanVersion(_ version: Int, toVersion: Int) async -> PlanComparisonResponse? {
+        guard canInitiateBoundFeatureAction, let jwt = currentJWT else { return nil }
+        do {
+            let result = try await routineEditingAPI.comparePlanVersion(version, toVersion: toVersion, jwt: jwt)
+            guard canInitiateBoundFeatureAction else { return nil }
+            return result
+        }
+        catch { handle(error, jwt: jwt); return nil }
+    }
+
+    /// Returns true once the server acknowledges the restore. A following
+    /// state refresh may fail, but that never turns the acknowledged mutation
+    /// into a retry invitation; the existing sync error remains visible.
+    func restorePlanVersion(
+        _ snapshotVersion: Int,
+        expectedPlanID: String,
+        reviewedCurrentVersion: Int,
+        reason: String?
+    ) async -> Bool {
+        guard canInitiateBoundFeatureAction else { return false }
+        while isRoutineMutationInFlight {
+            await withCheckedContinuation { routineMutationWaiters.append($0) }
+            guard canInitiateBoundFeatureAction else { return false }
+        }
+        guard let jwt = currentJWT else { return false }
+        isRoutineMutationInFlight = true
+        defer {
+            isRoutineMutationInFlight = false
+            let waiters = routineMutationWaiters
+            routineMutationWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+        }
+        do {
+            _ = try await routineEditingAPI.restorePlanVersion(
+                snapshotVersion, expectedPlanID: expectedPlanID,
+                expectedVersion: reviewedCurrentVersion, reason: reason, jwt: jwt)
+            guard canInitiateBoundFeatureAction else {
+                auth.noteAccountStatePersisted(for: accountID)
+                return true
+            }
+            await loadAfterMutation()
+            return true
+        } catch {
+            if case let APIError.http(code, body) = error,
+               Self.routineMutationNeedsReload(code: code, body: body) {
+                await loadAfterMutation()
+                if body.contains("active_workout") {
+                    loadError = "Finish or discard the active workout before restoring a routine."
+                } else if loadError == nil {
+                    loadError = "The routine changed elsewhere. Latest version loaded — review and try again."
+                }
+            } else {
+                handle(error, jwt: jwt)
+            }
+            return false
+        }
+    }
+
+    private func performRoutineMutation<T>(
+        _ operation: (any RoutineEditingAPI, String) async throws -> T
+    ) async -> T? {
+        guard canInitiateBoundFeatureAction else { return nil }
+        // UI controls are disabled while this flag is set, but serializing
+        // here also closes the tap-to-Task scheduling window. A second edit
+        // waits and then reaches the server (where its captured version can
+        // conflict) instead of being silently dropped.
+        while isRoutineMutationInFlight {
+            // Suspend until the active edit finishes. Task.yield() here was a
+            // MainActor busy loop for the whole network timeout.
+            await withCheckedContinuation { continuation in
+                routineMutationWaiters.append(continuation)
+            }
+            guard canInitiateBoundFeatureAction else { return nil }
+        }
+        guard let jwt = currentJWT else { return nil }
+        isRoutineMutationInFlight = true
+        defer {
+            isRoutineMutationInFlight = false
+            let waiters = routineMutationWaiters
+            routineMutationWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+        }
+        do {
+            let result = try await operation(routineEditingAPI, jwt)
+            guard canInitiateBoundFeatureAction else {
+                auth.noteAccountStatePersisted(for: accountID)
+                return nil
+            }
+            await loadAfterMutation()
+            guard canInitiateBoundFeatureAction else {
+                auth.noteAccountStatePersisted(for: accountID)
+                return nil
+            }
+            // The write was acknowledged. A failed refresh remains visible in
+            // loadError, but must not turn that acknowledgement into a retry.
+            return result
+        } catch {
+            if case let APIError.http(code, body) = error,
+               Self.routineMutationNeedsReload(code: code, body: body)
+            {
+                await loadAfterMutation()
+                guard loadError == nil else { return nil }
+                if canInitiateBoundFeatureAction {
+                    if body.contains("day_in_progress") || body.contains("active_workout") {
+                        loadError = "Finish or discard the active workout before removing or archiving this workout."
+                    } else if body.contains("session_already_started") {
+                        loadError = "A started workout cannot be reassigned to another day or rest."
+                    } else {
+                        loadError = "The routine changed elsewhere. Latest version loaded — review and try again."
+                    }
+                }
+            } else {
+                handle(error, jwt: jwt)
+            }
+            return nil
+        }
+    }
+
+    private static func routineMutationNeedsReload(code: Int, body: String) -> Bool {
+        if code == 409 { return true }
+        if code == 404 {
+            return body.contains("\"not_found\"")
+                || body.contains("\"day_not_found\"")
+                || body.contains("\"trip_not_found\"")
+        }
+        if code == 400 {
+            return body.contains("\"active_workout\"")
+                || body.contains("\"unknown_day_ref\"")
+                || body.contains("\"no_active_plan\"")
+        }
+        return false
+    }
+
+    /// Returns the exact ensured identity/version. A concurrent coach/app
+    /// winner is loaded without being replaced.
+    func ensureRoutinePlan(name: String) async -> APIClient.EnsureActivePlanResult? {
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return nil }
+        return await performRoutineMutation { api, jwt in
+            try await api.ensureActivePlan(name: clean, jwt: jwt)
+        }
+    }
+
+    func addWorkoutDay(
+        name: String,
+        expectedPlanID: String? = nil,
+        expectedVersion: Int? = nil
+    ) async -> String? {
+        if case let .created(id) = await createLibraryWorkout(name: name,
+            expectedPlanID: expectedPlanID, expectedVersion: expectedVersion) { return id }
+        return nil
+    }
+
+    enum WorkoutCreationOutcome: Equatable { case created(String), needsReview, retrySameRequest }
+
+    /// Never rebuild an uncertain request from refreshed plan state: the
+    /// caller owns its frozen workout/slot IDs, targets, and reviewed version.
+    /// A successful receipt remains successful if its follow-up refresh fails.
+    func saveWorkoutPrescription(request: WorkoutPrescriptionRequest) async -> WorkoutPrescriptionOutcome {
+        struct VersionConflict: Decodable { let conflict: Bool }
+        var rejection: WorkoutPrescriptionOutcome?
+        let receipt = await performRoutineMutation { api, jwt in
+            do {
+                return try await api.createPrescribedWorkout(request: request, jwt: jwt)
+            } catch {
+                if case let APIError.http(status, body) = error {
+                    if status == 400 {
+                        rejection = .reviewDraft
+                    } else if status == 409 {
+                        let conflict = try? JSONDecoder().decode(VersionConflict.self, from: Data(body.utf8))
+                        rejection = conflict?.conflict == true ? .reviewDraft : .needsReview
+                    }
+                }
+                throw error
+            }
+        }
+        if let receipt { return .saved(receipt) }
+        return rejection ?? .retrySameRequest
+    }
+
+    func createLibraryWorkout(
+        name: String,
+        exerciseIDs: [String] = [],
+        expectedPlanID: String? = nil,
+        expectedVersion: Int? = nil
+    ) async -> WorkoutCreationOutcome {
+        guard let currentPlan = plan else { return .retrySameRequest }
+        let planID = expectedPlanID ?? currentPlan.id
+        let version = expectedVersion ?? currentPlan.version
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return .needsReview }
+        var definitiveRejection = false
+        let result = await performRoutineMutation { api, jwt in
+            do {
+                return try await api.addWorkout(name: clean, exerciseIDs: exerciseIDs, expectedPlanID: planID,
+                    expectedVersion: version, jwt: jwt)
+            } catch {
+                if let status = (error as? APIError)?.httpStatus, status == 400 || status == 409 {
+                    definitiveRejection = true
+                }
+                throw error
+            }
+        }
+        if let result { return .created(result.id) }
+        return definitiveRejection ? .needsReview : .retrySameRequest
+    }
+
+    @discardableResult
+    func saveWorkoutTags(dayID: String, tags: [String], expectedVersion: Int) async -> Bool {
+        let result: APIClient.WorkoutIDRow? = await performRoutineMutation { api, jwt in
+            try await api.updateWorkout(dayID: dayID, fields: ["tags": tags],
+                expectedVersion: expectedVersion, jwt: jwt)
+        }
+        return result != nil
+    }
+
+    func setWorkoutArchived(dayID: String, archived: Bool) async {
+        guard !archived || !runnerProtectsWorkoutDay(dayID) else {
+            loadError = "Finish or discard the active workout before archiving it."
+            return
+        }
+        guard let version = plan?.version else { return }
+        let value: Any = archived ? Int(now().timeIntervalSince1970 * 1000) : NSNull()
+        _ = await performRoutineMutation { api, jwt in
+            try await api.updateWorkout(dayID: dayID, fields: ["archived_at": value],
+                expectedVersion: version, jwt: jwt)
+        } as APIClient.WorkoutIDRow?
+    }
+
+    func renameWorkoutDay(dayID: String, name: String) async {
+        guard let version = plan?.version else { return }
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        _ = await performRoutineMutation { api, jwt in
+            try await api.updateWorkout(
+                dayID: dayID, fields: ["name": clean],
+                expectedVersion: version, jwt: jwt)
+        } as APIClient.WorkoutIDRow?
+    }
+
+    func moveWorkoutDay(dayID: String, toIndex: Int) async {
+        guard let version = plan?.version else { return }
+        _ = await performRoutineMutation { api, jwt in
+            try await api.updateWorkout(
+                dayID: dayID, fields: ["order_index": toIndex],
+                expectedVersion: version, jwt: jwt)
+        } as APIClient.WorkoutIDRow?
+    }
+
+    private func runnerProtectsWorkoutDay(_ dayID: String) -> Bool {
+        (running && selectedDayID == dayID)
+            || persistedRunnerCheckpoint?.selectedDayID == dayID
+    }
+
+    private func runnerProtectsCalendarDate(_ date: String) -> Bool {
+        (running && date == todayString)
+            || persistedRunnerCheckpoint?.date == date
+    }
+
+    func deleteWorkoutDay(dayID: String) async {
+        guard !runnerProtectsWorkoutDay(dayID) else {
+            loadError = "Finish or discard the active workout before removing or archiving this workout."
+            return
+        }
+        guard let version = plan?.version else { return }
+        _ = await performRoutineMutation { api, jwt in
+            try await api.deleteWorkout(
+                dayID: dayID, expectedVersion: version, jwt: jwt)
+        } as APIClient.DeleteWorkoutResult?
+    }
+
+    @discardableResult
+    func saveRecurringSchedule(
+        _ week: [String: String],
+        extras: [String: [String]]? = nil,
+        times: [String: [String: String]]? = nil,
+        expectedPlanID: String? = nil,
+        expectedVersion: Int? = nil
+    ) async -> Bool {
+        guard let currentPlan = plan else { return false }
+        let result: APIClient.ScheduleWriteResult? = await performRoutineMutation { api, jwt in
+            try await api.setSchedule(
+                week,
+                extras: extras,
+                times: times,
+                expectedPlanID: expectedPlanID ?? currentPlan.id,
+                expectedVersion: expectedVersion ?? currentPlan.version,
+                jwt: jwt)
+        }
+        return result?.ok == true
+    }
+
+    /// Changes one weekday of the repeating week, leaving the others as saved.
+    /// It carries the plan version on screen, so a week changed elsewhere in
+    /// the meantime is a conflict to review rather than overwritten.
+    @discardableResult
+    func setWeekday(_ weekdayKey: String, to workoutID: String?) async -> Bool {
+        guard let plan, PlanSchedule.weekdayKeys.contains(weekdayKey) else { return false }
+        return await saveRecurringSchedule(
+            WorkoutLibraryPolicy.week(plan, setting: weekdayKey, to: workoutID),
+            expectedPlanID: plan.id, expectedVersion: plan.version)
+    }
+
+    /// Takes one activity off a weekday's extras, keeping the week and the
+    /// other extras as saved, at the plan version on screen.
+    @discardableResult
+    func removeScheduleExtra(_ workoutID: String, from weekdayKey: String) async -> Bool {
+        guard let plan, PlanSchedule.weekdayKeys.contains(weekdayKey) else { return false }
+        return await saveRecurringSchedule(
+            PlanComposer.week(plan, setting: [], to: ""),
+            extras: ScheduleExtras.removing(workoutID, from: weekdayKey, plan: plan),
+            expectedPlanID: plan.id, expectedVersion: plan.version)
+    }
+
+    /// Sets or clears (nil) the time of one item a weekday holds, keeping the
+    /// week and its extras as saved, at the plan version on screen. Setting a
+    /// time is independent of the explicit notification-permission action.
+    @discardableResult
+    func setScheduleTime(_ minutes: Int?, for workoutID: String, on weekdayKey: String) async -> Bool {
+        await setScheduleTime(minutes, for: workoutID, on: [weekdayKey])
+    }
+
+    /// The same on several weekdays in one write, for "every day it's on".
+    @discardableResult
+    func setScheduleTime(_ minutes: Int?, for workoutID: String, on weekdayKeys: [String]) async -> Bool {
+        guard let plan, !weekdayKeys.isEmpty,
+              weekdayKeys.allSatisfy(PlanSchedule.weekdayKeys.contains) else { return false }
+        return await saveRecurringSchedule(
+            PlanComposer.week(plan, setting: [], to: ""),
+            times: ScheduleTimes.setting(minutes, for: workoutID, on: weekdayKeys, plan: plan),
+            expectedPlanID: plan.id, expectedVersion: plan.version)
+    }
+
+    /// Adds away dates (`id == nil`) or edits one range, at the plan version
+    /// the editor opened with. A newer plan, from the coach or another device,
+    /// comes back as a conflict, reloads and asks the member to review; the
+    /// editor closes rather than resend its stale fields at the new version.
+    @discardableResult
+    func saveAwayDates(id: String?, fields: [String: Any], expectedVersion version: Int) async -> Bool {
+        let result: APIClient.TripWriteResult? = await performRoutineMutation { api, jwt in
+            if let id {
+                return try await api.updateTrip(id: id, fields: fields, expectedVersion: version, jwt: jwt)
+            }
+            return try await api.addTrip(fields: fields, expectedVersion: version, jwt: jwt)
+        }
+        return result?.ok == true
+    }
+
+    /// Saves the whole block of weeks (P2), or ends it with nil, at the plan
+    /// version the Plan tab showed. A block changed elsewhere in the
+    /// meantime comes back as a conflict to review, never overwritten.
+    @discardableResult
+    func saveProgram(_ program: PlanProgram?, expectedVersion version: Int) async -> Bool {
+        let live = plan.map(ProgramEditing.liveSlots)
+        let activities = plan.map(ProgramEditing.liveWorkouts)
+        let body = program.map { ProgramEditing.wire($0, liveSlots: live, activities: activities) }
+        let result: APIClient.ProgramWriteResult? = await performRoutineMutation { api, jwt in
+            try await api.setProgram(body, expectedVersion: version, jwt: jwt)
+        }
+        return result?.ok == true
+    }
+
+    /// "Train for an event": the weeks the rules lay out, without saving.
+    /// A refused rule comes back as the member-facing reason.
+    func previewEventBlock(_ request: EventBuildRequest) async -> Result<EventBuildPreview, EventBuildFailure> {
+        guard canInitiateBoundFeatureAction, let jwt = currentJWT else {
+            return .failure(EventBuildFailure(message: "Sign in to plan the weeks."))
+        }
+        do {
+            return .success(try await routineEditingAPI.buildEventBlock(request.body, expectedVersion: nil, jwt: jwt)
+                .preview)
+        } catch let APIError.http(code, body) where code == 400 || code == 404 {
+            return .failure(EventBuildFailure(message: EventBuilding.message(for: body)))
+        } catch {
+            if (error as? APIError)?.httpStatus == 401 { handle(error, jwt: jwt) }
+            return .failure(EventBuildFailure(message: EventBuilding.message(for: "")))
+        }
+    }
+
+    /// Saves the event and its block of weeks together, replacing any block.
+    func saveEventBlock(_ request: EventBuildRequest, expectedVersion version: Int) async -> Bool {
+        let result: APIClient.EventBuildResult? = await performRoutineMutation { api, jwt in
+            try await api.buildEventBlock(request.body, expectedVersion: version, jwt: jwt)
+        }
+        return result?.ok == true
+    }
+
+    @discardableResult
+    func removeAwayDates(id: String, expectedVersion version: Int) async -> Bool {
+        let result: APIClient.TripWriteResult? = await performRoutineMutation { api, jwt in
+            try await api.removeTrip(id: id, expectedVersion: version, jwt: jwt)
+        }
+        return result?.ok == true
+    }
+
+    func unscheduleWorkout(workoutID: String) async {
+        guard let currentPlan = plan,
+              WorkoutLibraryPolicy.isScheduled(workoutID: workoutID, plan: currentPlan) else { return }
+        let week = WorkoutLibraryPolicy.unscheduling(workoutID: workoutID, plan: currentPlan)
+        _ = await performRoutineMutation { api, jwt in
+            // Unschedule takes it off every weekday, beside a workout too.
+            try await api.setSchedule(week, extras: ScheduleExtras.removingEverywhere(workoutID, plan: currentPlan),
+                                      times: nil,
+                                      expectedPlanID: currentPlan.id,
+                                      expectedVersion: currentPlan.version, jwt: jwt)
+        } as APIClient.ScheduleWriteResult?
+    }
+
+    /// Shared by the library, agenda and the actual mutation. A sheet kept open
+    /// across midnight or a state refresh must recheck before sending a write.
+    func calendarAssignmentUnavailableReason(date: String, today: String? = nil) -> String? {
+        let today = today ?? todayString
+        if date < today { return "Choose today or a future date." }
+        if runnerProtectsCalendarDate(date) {
+            return "Finish or discard the active workout before changing today's assignment."
+        }
+        if projection(for: date, today: today).suppressesScheduleAndEndurance {
+            return "This date is unavailable while the hard travel blackout is active."
+        }
+        if let session = sessionsByDate[date], ["in_progress", "completed"].contains(session.status) {
+            return "A started workout cannot be reassigned to another day or rest."
+        }
+        return nil
+    }
+
+    @discardableResult
+    func setCalendarOverride(date: String, dayID: String?) async -> Bool {
+        if let dayID, workout(id: dayID)?.isArchived != false {
+            loadError = "This workout is unavailable. Choose another workout."
+            return false
+        }
+        if let reason = calendarAssignmentUnavailableReason(date: date) {
+            loadError = reason
+            return false
+        }
+        // Zero is the explicit CAS token for "no assignment row observed".
+        // The Worker persists the first choice as attempt one, so two clients
+        // creating different overrides from the same empty view cannot both win.
+        let expectedAttempt = sessionsByDate[date]?.attempt ?? 0
+        let result = await performRoutineMutation { api, jwt in
+            try await api.setCalendarDate(
+                date, dayID: dayID, expectedAttempt: expectedAttempt, jwt: jwt)
+        } as APIClient.CalendarWriteResult?
+        return result != nil
+    }
+
+    /// Retry ids for "Change for <date> only", by date and source workout, so
+    /// a retry after a lost response reuses the workout the first try made.
+    private var pendingOneTimeWorkoutIDs: [String: String] = [:]
+
+    /// "Change for today only" (docs/plans/workout-library P3): copy the
+    /// date's workout, as it reads that date, into a one-time workout and put
+    /// it on the date in its place. The saved workout and every other date
+    /// stay as they are. Returns the copy's id for the editor.
+    func makeOneTimeWorkout(date: String, from source: Workout) async -> String? {
+        await makeOneTimeWorkout(date: date, name: source.name, copyFrom: source.id, exerciseIDs: [],
+                                 key: date + "|" + source.id)
+    }
+
+    /// A new one-time workout on `date` in place of what it holds
+    /// (docs/plans/app-design-pass P25): a run (`[RunPlan.exerciseID]`),
+    /// or an activity such as soccer or a ride (no exercises). The week and
+    /// every saved workout stay as they are. Returns its id.
+    func makeOneTimeWorkout(date: String, name: String, exerciseIDs: [String]) async -> String? {
+        await makeOneTimeWorkout(date: date, name: name, copyFrom: nil, exerciseIDs: exerciseIDs,
+                                 key: date + "|new|" + name + "|" + exerciseIDs.joined(separator: ","))
+    }
+
+    private func makeOneTimeWorkout(date: String, name: String, copyFrom: String?, exerciseIDs: [String],
+                                    key: String) async -> String? {
+        guard let plan else { return nil }
+        if let reason = calendarAssignmentUnavailableReason(date: date) {
+            loadError = reason
+            return nil
+        }
+        let id = pendingOneTimeWorkoutIDs[key] ?? UUID().uuidString.lowercased()
+        pendingOneTimeWorkoutIDs[key] = id
+        let expectedAttempt = sessionsByDate[date]?.attempt ?? 0
+        let made = await performRoutineMutation { api, jwt in
+            let row = try await api.addOneTimeWorkout(
+                id: id, name: name, date: date, copyFrom: copyFrom, exerciseIDs: exerciseIDs,
+                expectedPlanID: plan.id, expectedVersion: plan.version, jwt: jwt)
+            if self.sessionsByDate[date]?.workout_id != row.id {
+                _ = try await api.setCalendarDate(date, dayID: row.id, expectedAttempt: expectedAttempt, jwt: jwt)
+            }
+            return row
+        } as APIClient.WorkoutIDRow?
+        guard let made else { return nil }
+        pendingOneTimeWorkoutIDs[key] = nil
+        return made.id
+    }
+
+    /// The member's training thresholds, for the targets of a run planned
+    /// in the app (app-design-pass P25). Empty when they can't be read, so
+    /// the run is planned by feel rather than not at all.
+    func planningThresholds() async -> [AthleteThreshold] {
+        guard canInitiateBoundFeatureAction, let jwt = currentJWT else { return [] }
+        return (try? await APIClient().athleteThresholds(jwt: jwt)) ?? []
+    }
+
+    func calendarMoveUnavailableReason(from: String, to: String, workoutID: String) -> String? {
+        if from == to { return "Choose a different date." }
+        // A workout changed for one day stays on that day (workout-library P3).
+        if workout(id: workoutID)?.isOneTime == true { return "A workout changed for one day stays on that day." }
+        if let reason = calendarAssignmentUnavailableReason(date: from) { return reason }
+        if let reason = calendarAssignmentUnavailableReason(date: to) { return reason }
+        if previewWorkout(forDateString: from)?.id != workoutID { return "The original workout changed. Reopen the date to review it." }
+        if previewWorkout(forDateString: to) != nil { return "This date already has a workout. Choose an empty date." }
+        return nil
+    }
+
+    func calendarMoveRequest(from: String, to: String, workoutID: String) -> APIClient.CalendarMoveRequest? {
+        guard let plan, calendarMoveUnavailableReason(from: from, to: to, workoutID: workoutID) == nil else { return nil }
+        return .init(id: UUID().uuidString, fromDate: from, toDate: to, today: todayString,
+                     workoutID: workoutID, planID: plan.id, planVersion: plan.version,
+                     fromAttempt: sessionsByDate[from]?.attempt ?? 0,
+                     toAttempt: sessionsByDate[to]?.attempt ?? 0)
+    }
+
+    enum CalendarMoveOutcome: Equatable { case acknowledged, needsReview, retrySameRequest }
+
+    func moveCalendarWorkout(_ request: APIClient.CalendarMoveRequest) async -> CalendarMoveOutcome {
+        // Retry uses the same request and receipt id, even after a lost response.
+        // Local runners and the civil-day boundary remain current action gates.
+        guard request.fromDate >= todayString, request.toDate >= todayString,
+              !runnerProtectsCalendarDate(request.fromDate), !runnerProtectsCalendarDate(request.toDate) else {
+            loadError = "This move is no longer available. Reopen Calendar to review both dates."
+            return .needsReview
+        }
+        var definitiveConflict = false
+        let result = await performRoutineMutation { api, jwt in
+            // Another edit can finish while this request waits for the shared
+            // mutation slot. Check runner ownership and the date again here.
+            guard request.fromDate >= self.todayString, request.toDate >= self.todayString,
+                  !self.runnerProtectsCalendarDate(request.fromDate),
+                  !self.runnerProtectsCalendarDate(request.toDate) else {
+                definitiveConflict = true
+                throw APIError.http(409, "calendar_move_unavailable")
+            }
+            do {
+                return try await api.moveCalendarWorkout(request, jwt: jwt)
+            } catch {
+                // A 409 acknowledges rejection, so a refreshed choice needs a
+                // new request. Network/server failures keep the original receipt.
+                if (error as? APIError)?.httpStatus == 409 { definitiveConflict = true }
+                throw error
+            }
+        } as APIClient.CalendarMoveResult?
+        if result != nil { return .acknowledged }
+        return definitiveConflict ? .needsReview : .retrySameRequest
+    }
+
+    // MARK: rest timer
+
+    /// Name of the next not-complete exercise (for the rest screen's UP NEXT).
+    var upNextName: String {
+        if let i = nextRunnerIncompleteIndex { return exercises[i].exercise_name }
+        return "Done"
+    }
+
+    func removeSet(_ set: SetLog) async {
+        enqueueCorrection(set: set, values: nil)
+        await drainWorkoutWriteOutboxes()
+    }
+
+    /// Fires the "rest's up" audio cue exactly when the current rest elapses.
+    /// Cancelled/rescheduled whenever the rest changes (+15 / −15 / DONE / a
+    /// new set's rest), so it never double-fires or fires for a stale timer.
+    private var restCueTask: Task<Void, Never>?
+
+    private func startWorkoutRest(seconds: Int, name: String, source: TemplateExercise? = nil) {
+        guard !isPartnerWorkout else { return }
+        guard seconds > 0, !exercises.isEmpty,
+              !exercises.allSatisfy({ isRunnerResolved($0) }) else {
+            if restEndDate != nil { skipRest() }
+            return
+        }
+        startRest(seconds: seconds, name: name, source: source.map(RunnerPrescription.init))
+    }
+
+    func runnerRestSeconds(for exercise: TemplateExercise) -> Int {
+        guard let choice = sessionAdjustments.restOverrides[exercise.id], choice.matches(exercise) else {
+            return exercise.rest_seconds
+        }
+        return choice.seconds
+    }
+
+    var restEditTarget: RestEditTarget? {
+        guard running, !isPartnerWorkout, currentJWT != nil,
+              !isTerminalMutationInFlight, !hasPendingTerminalIntentForCurrentWorkout,
+              canInitiateBoundFeatureAction, canControlSharedRestArtifacts,
+              let controlID = restControlID, restEndDate != nil else { return nil }
+        let validSource = restSource.flatMap { source in
+            exercises.first { $0.id == source.slotID && $0.group_id == nil
+                && source.matches(current: RunnerPrescription($0)) }.map(RunnerPrescription.init)
+        }
+        return RestEditTarget(controlID: controlID, seconds: restTotal, exerciseName: restExercise,
+                              prescription: validSource)
+    }
+
+    /// Exact entry restarts this countdown from now. Remaining-set scope also
+    /// persists the duration for this ordinary slot in this session only.
+    @discardableResult
+    func setRest(seconds: Int, forRemainingSets: Bool, expected: RestEditTarget) -> Bool {
+        guard (0...3_600).contains(seconds), !isPartnerWorkout,
+              canInitiateBoundFeatureAction, canControlSharedRestArtifacts,
+              let current = restEditTarget, current.controlID == expected.controlID,
+              current.prescription == expected.prescription else { return false }
+        if forRemainingSets {
+            guard let prescription = current.prescription,
+                  let exercise = exercises.first(where: { $0.id == prescription.slotID }),
+                  exercise.group_id == nil,
+                  prescription.matches(current: RunnerPrescription(exercise)) else { return false }
+            sessionAdjustments.restOverrides[exercise.id] = RunnerRestOverride(prescription: prescription, seconds: seconds)
+            guard persistRunnerCheckpoint() else { return false }
+        }
+        if seconds == 0 { skipRest() }
+        else { startRest(seconds: seconds, name: current.exerciseName, source: current.prescription) }
+        return true
+    }
+
+    func startRest(seconds: Int, name: String, source: RunnerPrescription? = nil) {
+        guard canControlSharedRestArtifacts else {
+            relinquishStaleRunnerCheckpoint()
+            return
+        }
+        restExercise = name
+        restTotal = seconds
+        restSource = source
+        let end = Date().addingTimeInterval(TimeInterval(seconds))
+        restEndDate = end
+        restControlID = UUID().uuidString
+        registerTimerControls()
+        RestLiveActivity.start(exercise: name, endDate: end, upNext: restActivityCurrentStepName, controlID: restControlID)
+        scheduleRestCue(for: end)
+        RestCue.scheduleNotification(at: end)
+    }
+    func addRest(_ seconds: Int) {
+        guard !isPartnerWorkout else { return }
+        guard canControlSharedRestArtifacts, let end = restEndDate else {
+            if restEndDate != nil { relinquishStaleRunnerCheckpoint() }
+            return
+        }
+        let newEnd = end.addingTimeInterval(TimeInterval(seconds))
+        restEndDate = newEnd
+        RestLiveActivity.update(endDate: newEnd, upNext: restActivityCurrentStepName)
+        scheduleRestCue(for: newEnd)
+        RestCue.scheduleNotification(at: newEnd)
+    }
+    func skipRest() {
+        if isPartnerWorkout {
+            // Internal runner teardown also calls this method. Only the
+            // explicit partner control may ask the iPad to skip shared rest.
+            relinquishLocalRest(); restActivityEnder(); restNotificationCanceller(); return
+        }
+        guard canControlSharedRestArtifacts else {
+            relinquishStaleRunnerCheckpoint()
+            return
+        }
+        relinquishLocalRest()
+        restActivityEnder()
+        restNotificationCanceller()
+    }
+
+    /// Cancel only this model's local rest state. A stale same-account model
+    /// that loses the runner-checkpoint CAS must not end the replacement
+    /// model's process-global Live Activity or notification.
+    private func relinquishLocalRest() {
+        restControlID = nil
+        restSource = nil
+        restEndDate = nil
+        restCueTask?.cancel()
+        restCueTask = nil
+    }
+
+    /// The lift to name in the rest cue: the one the runner is ON when rest
+    /// ends — same value the foreground cue computes at fire time, but resolved
+    /// up front for the scheduled notification. The index has already advanced
+    /// by the time rest starts (logCurrentSet jumps only when the slot
+    /// completed), so currentExercise is the SAME exercise mid-sets, the next
+    /// one when it's done, and empty ("workout complete") when finished.
+    private var restCueLift: String {
+        finished ? "" : (currentExercise?.exercise_name ?? "")
+    }
+
+    /// Poll-to-fire (250ms ticks) rather than one long sleep so the cue lands
+    /// reliably "at the end of rest" even if a single sleep is suspended — the
+    /// same robustness the timed-set runner needed (#55). The cue only sounds
+    /// if this is still the same, still-active rest when the deadline arrives.
+    private func scheduleRestCue(for end: Date) {
+        guard canControlSharedRestArtifacts else {
+            relinquishStaleRunnerCheckpoint()
+            return
+        }
+        restCueTask?.cancel()
+        restCueTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, self.restEndDate == end else { return }
+                guard self.canControlSharedRestArtifacts else {
+                    self.relinquishStaleRunnerCheckpoint()
+                    return
+                }
+                if Date() >= end { break }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            if Task.isCancelled { return }
+            guard let self, self.restEndDate == end else { return }
+            guard self.canControlSharedRestArtifacts else {
+                self.relinquishStaleRunnerCheckpoint()
+                return
+            }
+            // Announce the exercise the runner is actually ON when rest ends —
+            // NOT upNextName, which returns the next DIFFERENT exercise. By the
+            // time rest ends the index has already advanced (logCurrentSet jumps
+            // only when the slot completed), so currentExercise is the next set's
+            // lift: the SAME exercise mid-sets, the next one when it's done.
+            // Empty when the workout finished → RestCue says "workout complete".
+            //
+            // Exactly-once across the foreground/background boundary: if the app
+            // was locked/backgrounded across `end`, this Task was suspended and
+            // the scheduled local notification already cued the user. Detect that
+            // authoritatively via the OS delivered list (iOS suppresses the
+            // notification while we're foreground, so a delivered one means we
+            // were genuinely backgrounded) and skip the in-app replay — rather
+            // than guessing from how late this resumed tick is, which double-cues
+            // when the user taps the notification within the lateness window.
+            let alreadyCued = await RestCue.notificationWasDelivered()
+            if Task.isCancelled || self.restEndDate != end { return }
+            guard self.canControlSharedRestArtifacts else {
+                self.relinquishStaleRunnerCheckpoint()
+                return
+            }
+            if !alreadyCued {
+                RestCue.play(upNext: self.restCueLift)
+            }
+            RestCue.cancelNotification()
+        }
+    }
+
+    // MARK: calendar projection (read-only future calendar)
+
+    /// Plan day_template ids (for dangling-schedule detection).
+    var planTemplateIDs: Set<String> {
+        Set(plan?.availableWorkouts.map(\.id) ?? [])
+    }
+
+    /// Real cached sessions keyed by YYYY-MM-DD. If multiple sessions share
+    /// a date, prefer the most "advanced" one (completed > in_progress >
+    /// planned > skipped) so the calendar shows the strongest signal.
+    var sessionsByDate: [String: SessionRow] {
+        historyIndex.sessionsByDate
+    }
+
+    /// Non-deleted external events for a `YYYY-MM-DD` date (read-only).
+    func rides(on dateString: String) -> [ExternalEvent] {
+        rides.filter { !$0.isDeleted && $0.date == dateString }
+    }
+
+    /// Non-deleted COMPLETED activities for a `YYYY-MM-DD` date (read-only).
+    func activities(on dateString: String) -> [ExternalActivity] {
+        activities.filter { !$0.isDeleted && $0.date == dateString }
+    }
+
+    /// Non-deleted manual activities (Pilates / walk / …) the user logged
+    /// for a `YYYY-MM-DD` date. Newest-logged first so the most recent
+    /// entry sits on top when several share a day.
+    func manualActivities(on dateString: String) -> [ActivityRow] {
+        manualActivities
+            .filter { $0.deleted_at == nil && $0.date == dateString }
+            .sorted { $0.logged_at > $1.logged_at }
+    }
+
+    /// The endurance "noun" for a date — "Bike" / "Run" / "Swim" / "Active"
+    /// — drawn from BOTH completed activities and planned rides, or nil when
+    /// the date carries no cycling/endurance at all. A no-lift day with
+    /// endurance is a "<noun> day", NOT a rest day; a lift day with endurance
+    /// is "lift + <noun>". Cycling wins when several kinds coexist (the
+    /// athlete is primarily a cyclist).
+    func enduranceNoun(on dateString: String) -> String? {
+        let kinds = activities(on: dateString).map(\.kind)
+            + rides(on: dateString).map(\.kind)
+        guard !kinds.isEmpty else { return nil }
+        if kinds.contains("ride") { return "Bike" }
+        if kinds.contains("run")  { return "Run" }
+        if kinds.contains("swim") { return "Swim" }
+        return "Active"
+    }
+
+    /// The headline noun for a NO-LIFT day — what the day "is" when no lift
+    /// is scheduled or logged. Endurance (Bike/Run/Swim/Active, from
+    /// intervals actuals + planned rides) wins; otherwise a user-logged
+    /// manual activity makes it a "<kind> day" (e.g. "Pilates"/"Walk"/
+    /// "Run", or "Active" for the generic/mixed cases); nil = a true rest
+    /// day. SEPARATE from `enduranceNoun` on purpose: enduranceNoun also
+    /// feeds the lift-day "+ BIKE" cross-training suffix, where folding a
+    /// Pilates log in would wrongly read "PUSH + ACTIVE". This helper is
+    /// only for the no-lift title/note/cell classification.
+    func noLiftDayNoun(on dateString: String) -> String? {
+        if let endurance = enduranceNoun(on: dateString) { return endurance }
+        let kinds = Set(manualActivities(on: dateString).map(\.type))
+        guard !kinds.isEmpty else { return nil }
+        // A single, nameable kind reads nicely as "PILATES DAY" / "WALK DAY".
+        // "other"/"lift" (→ "Lift (other)") and mixed kinds fall back to the
+        // generic "Active" — the activity card(s) below carry the specifics.
+        if kinds.count == 1, let only = kinds.first,
+           only != "other", only != "lift" {
+            return PendingActivity.label(for: only)
+        }
+        return "Active"
+    }
+
+    /// Count of live (non-deleted) logged sets for the session on `ymd`, 0
+    /// when there is no session or all its sets were deleted. An
+    /// `in_progress` session with 0 here is a PHANTOM — sets were logged
+    /// then removed — and should be presented as the planned workout, not as
+    /// an active in-progress one (it records no work).
+    func loggedSetCount(forDate ymd: String) -> Int {
+        guard let sid = sessionsByDate[ymd]?.id else { return 0 }
+        return historyIndex.setsBySession[sid]?.count ?? 0
+    }
+
+    /// Live (non-deleted) logged sets for one session, for the Activity
+    /// tab's history, without sorting them.
+    func loggedSetCount(sessionID: String) -> Int {
+        historyIndex.setsBySession[sessionID]?.count ?? 0
+    }
+
+    /// True if this calendar date carries a lift (real session OR a
+    /// projected lift) — the precondition for any ride conflict.
+    func dateHasLift(_ dateString: String) -> Bool {
+        RideConflict.dateHasLift(projection(for: dateString))
+    }
+
+    /// Ride conflict severity for a date, mirroring the backend's
+    /// `detectConflicts` byte-for-byte (see RideConflict).
+    func rideConflict(for dateString: String) -> RideConflict.Severity {
+        RideConflict.severity(
+            forLiftDate: dateString,
+            hasLift: { [self] in dateHasLift($0) },
+            ridesOn: { [self] eventDate in
+                projection(for: eventDate).suppressesScheduleAndEndurance
+                    ? []
+                    : rides(on: eventDate)
+            })
+    }
+
+    /// Resolve one calendar day via the frozen projection algorithm,
+    /// against an EXPLICITLY supplied `today`. Lets a caller that also
+    /// needs the same `today` for a second decision (e.g. the
+    /// `allowScheduleInference` gate in `dayLabel`) capture `todayString`
+    /// ONCE and pass it here — eliminating the midnight TOCTOU where two
+    /// separate `todayString` reads in one logical operation straddle the
+    /// rollover and disagree. Same single algorithm; no forked logic.
+    func projection(for dateString: String, today: String) -> DayProjection {
+        CalendarProjection.project(
+            dateString: dateString,
+            today: today,
+            sessionByDate: sessionsByDate,
+            additionalSessions: sessions.filter { ($0.slot ?? 0) > 0 },
+            schedule: plan?.schedule(on: dateString),
+            templateIDs: planTemplateIDs,
+            trips: plan?.trips ?? [])
+    }
+
+    /// Resolve one calendar day via the frozen projection algorithm
+    /// (convenience: reads `todayString` once for callers that don't
+    /// need to share the clock with another decision).
+    ///
+    /// WARNING: reads todayString internally. Do NOT use at any call site
+    /// that ALSO reads todayString separately (midnight TOCTOU) — use
+    /// projection(for:today:) with a single captured clock there. Safe
+    /// only when the result is used in isolation.
+    func projection(for dateString: String) -> DayProjection {
+        projection(for: dateString, today: todayString)
+    }
+
+    // MARK: schedule-driven Today
+
+    /// Today's resolved projection — the SAME `projection(for:)` /
+    /// `CalendarProjection` the calendar uses (single source of truth, no
+    /// parallel resolution). Today screen reads this, not a manual default.
+    ///
+    /// Single-clock: `todayString` is a computed var (fresh `Date()` each
+    /// access). It is read EXACTLY ONCE here and supplied as BOTH the date
+    /// to resolve and the `today` reference, so the past/future split
+    /// can't straddle midnight against itself (the convenience
+    /// `projection(for:)` would otherwise read the clock a second time
+    /// internally for `today:`).
+    var todayProjection: DayProjection {
+        let t = todayString
+        return projection(for: t, today: t)
+    }
+
+    /// The widget snapshot and reminders belong to the feature session that
+    /// rendered them, like any other new user-visible action.
+    var canPublishTrainingAgenda: Bool { canInitiateBoundFeatureAction }
+
+    /// SINGLE definition of "is this raw session status a workout?" (i.e.
+    /// not skipped / not a non-training terminal state). The ONLY place this
+    /// rule is written on the iOS side.
+    ///
+    /// COUPLED TWIN — keep in lockstep with the `case "skipped": return
+    /// .skipped` arm in the frozen, byte-for-byte `DayProjection.kind`
+    /// status switch in `CalendarProjection.swift`. That `"skipped"` arm
+    /// is the ONLY non-workout session state; every other status (incl.
+    /// `default: return .planned` for unknowns) maps to a workout kind,
+    /// which already agrees with this predicate returning `true` for
+    /// anything but `"skipped"`. That file is the frozen projection
+    /// contract, so the two sites cannot literally share one symbol; a new
+    /// NON-workout status must be reflected here.
+    ///
+    /// `"discarded"` is the second non-workout status (a thrown-away
+    /// session). Unlike `"skipped"`, it does NOT flow through the `kind`
+    /// switch: `CalendarProjection.project` drops a discarded session up
+    /// front (treats it as if absent — the byte-for-byte mirror of the
+    /// backend `projectCalendar` `discarded` carve-out), so a discarded
+    /// date never resolves to `.session(...)` at all. This predicate still
+    /// excludes it defensively for the paths that read a raw session
+    /// status directly (e.g. today's row arriving via the /api/state delta
+    /// before any restart/revival).
+    static func isWorkoutStatus(_ status: String) -> Bool {
+        status != "skipped" && status != "discarded"
+    }
+
+    /// True when today's real session is already COMPLETED — Today renders
+    /// a done/recap state with NO start/override path (the single
+    /// session-per-(user,date) invariant means any "start" re-opens and
+    /// double-logs the completed row; see `WorkoutDoneView`).
+    var todayIsCompleted: Bool { todaySessionStatus == "completed" }
+
+    /// The day template to DISPLAY for today when it's a workout — and
+    /// the SINGLE authority for the Today workout-vs-rest split: non-nil
+    /// ⇒ workout, nil ⇒ rest/skipped (callers use `todayResolvedDay !=
+    /// nil` / its negation; there is no separate `todayIsWorkout` twin).
+    /// A real session can BE a workout while its `workout_id` is
+    /// null (server-side `getOrCreateSession` ignores the passed template
+    /// id for an existing same-date row). Fallback order so the workout
+    /// still renders sensibly:
+    ///   1. the session's own `workout_id` (if populated), else
+    ///   2. today's scheduled template (the SAME projection/schedule the
+    ///      calendar uses — derived from `meta.schedule`, no fork), else
+    ///   3. `selectedDay` (whatever the runner last targeted), else
+    ///   4. the first plan day.
+    /// Returns nil ONLY when today is genuinely not a workout.
+    var todayResolvedDay: Workout? {
+        if isFreestyle { return freestyleDay }
+        if let session = todaySession, (session.slot ?? 0) > 0 {
+            return Self.isWorkoutStatus(session.status) ? session.workout_id.flatMap { workout(id: $0, on: session.date) } : nil
+        }
+        // Single-clock: capture `todayString` ONCE and derive the
+        // projection ONCE from it, instead of touching the computed clock
+        // multiple times (workout test + template switch +
+        // `sessionDisplayTemplate(todayString)`). At a midnight rollover
+        // those independent reads could otherwise resolve against
+        // different civil days within this one property evaluation (the
+        // workout-guard sees day N, the template switch day N+1, etc.).
+        let today = todayString
+        // Live validation can recover approved feedback before the first set
+        // creates a session, including an explicit workout on a rest day.
+        if let checkpoint = resumableCheckpoint,
+           checkpoint.date == today,
+           let checkpointDay = workout(id: checkpoint.selectedDayID, on: today) {
+            return checkpointDay
+        }
+        let proj = projection(for: today, today: today)
+        // The workout-vs-rest test, evaluated ONCE against the SAME local
+        // projection. This is the ONLY copy of this switch (no separate
+        // `todayIsWorkout` property) — it still delegates to the single
+        // `isWorkoutStatus` predicate, mirroring the projection's
+        // `.skipped`-aware semantics, no forked logic.
+        let isWorkout: Bool
+        switch proj {
+        case .projected:      isWorkout = true
+        case .session(let s, _): isWorkout = Self.isWorkoutStatus(s)
+        // M4 (multisport) — a trip day is not a scheduled strength workout
+        // (unavailable = blacked out; light = unstructured travel training).
+        case .rest, .none, .unavailable, .light: isWorkout = false
+        }
+        guard isWorkout else { return nil }
+        switch proj {
+        case .projected(let tid):
+            // Schedule projection: the template id IS the schedule's.
+            return workout(id: tid, on: today) ?? selectedDay ?? plan?.workouts.first
+        case .session(_, let hardBlackoutTripType):
+            // Real workout-status session. Outside a hard blackout, the
+            // shared session→schedule inference preserves the existing
+            // null-template fallback. During a hard blackout the schedule is
+            // suppressed on both platforms, so only an explicit session day
+            // is eligible before the selected/first display fallback.
+            return sessionDisplayTemplate(
+                forDateString: today,
+                allowScheduleInference: hardBlackoutTripType == nil)
+                ?? selectedDay ?? plan?.workouts.first
+        case .rest, .none, .unavailable, .light:
+            return nil   // unreachable (guarded by isWorkout)
+        }
+    }
+
+    /// The workout a started runner owns on `date`, before or after its first
+    /// set creates a session: the mounted runner's own selection, or a
+    /// resumable checkpoint after relaunch (freestyle included). A runner
+    /// carried past midnight keeps its original date.
+    func startedRunnerWorkout(on date: String) -> Workout? {
+        if running {
+            let owned = persistedRunnerCheckpoint?.date ?? todaySession?.date
+                ?? workoutStart.map { TrainingAgendaCalendar.dateString($0, calendar: TrainingAgendaCalendar.calendar()) }
+            return owned == date ? selectedDay : nil
+        }
+        guard let checkpoint = resumableCheckpoint, checkpoint.date == date else { return nil }
+        if let day = runnerDay(id: checkpoint.selectedDayID) ?? workout(id: checkpoint.selectedDayID) { return day }
+        guard checkpoint.selectedDayID.hasPrefix("freestyle:") else { return nil }
+        return Workout(id: checkpoint.selectedDayID, name: "Freestyle", day_label: nil,
+                       order_index: 0, exercises: checkpoint.freestyleExercises ?? [])
+    }
+
+    /// Station observes the workout Today is displaying. A mounted runner may
+    /// explicitly override the schedule; otherwise an old selection must not
+    /// replace today's resolved workout or turn a rest day into a workout.
+    var stationWorkout: Workout? { running ? selectedDay : todayResolvedDay }
+
+    /// Identity for preview/edit navigation. Display fallbacks used by legacy
+    /// runners are not authority to open an unrelated saved workout's editor.
+    var todayPreviewWorkout: Workout? {
+        if isFreestyle { return nil }
+        if let session = todaySession, (session.slot ?? 0) > 0 {
+            return session.workout_id.flatMap { workout(id: $0, on: session.date) }
+        }
+        let today = todayString
+        if let checkpoint = resumableCheckpoint, checkpoint.date == today {
+            return workout(id: checkpoint.selectedDayID, on: today)
+        }
+        return previewWorkout(forDateString: today, today: today)
+    }
+
+    func previewWorkout(forDateString date: String, today: String? = nil) -> Workout? {
+        let today = today ?? todayString
+        switch projection(for: date, today: today) {
+        // A block's week can give the slots their own targets on this date.
+        case .projected(let id): return workout(id: id, on: date)
+        case .session(let status, let blackout):
+            guard Self.isWorkoutStatus(status) else { return nil }
+            if let explicitID = sessionsByDate[date]?.workout_id { return workout(id: explicitID, on: date) }
+            return sessionDisplayTemplate(forDateString: date,
+                                          allowScheduleInference: blackout == nil && date >= today && status != "completed")
+        case .rest, .none, .unavailable, .light: return nil
+        }
+    }
+
+    /// Raw status of today's real session, if any (for the Today header /
+    /// CTA wording — e.g. "completed" vs "in_progress"). nil ⇒ no real
+    /// session today (pure schedule projection or rest).
+    var todaySessionStatus: String? {
+        if let session = todaySession, session.date == todayString { return session.status }
+        if case .session(let s, _) = todayProjection { return s }
+        return nil
+    }
+
+    /// The day template the WEEKLY SCHEDULE assigns to `ymd` (the same
+    /// `meta.schedule` + civil-weekday lookup `CalendarProjection` uses —
+    /// the ONE place this fallback is written). Used to recover a sensible
+    /// template/label when a real session row carries a null
+    /// `workout_id` (server `getOrCreateSession` drops it for an
+    /// existing same-date row). Read-only — never writes the schedule.
+    func scheduledTemplate(forDateString ymd: String) -> Workout? {
+        guard let key = CalendarProjection.weekdayKey(forDateString: ymd),
+              let tid = plan?.schedule(on: ymd)?.templateID(forWeekdayKey: key)
+        else { return nil }
+        return workout(id: tid, on: ymd)
+    }
+
+    /// The template to DISPLAY for a real session on `ymd`, regardless of
+    /// whether its `workout_id` is populated: session's own id →
+    /// scheduled-by-weekday fallback. No `selectedDay`/first-day fallback
+    /// here (callers that need a guaranteed non-nil add their own). Shared
+    /// by Today and the calendar's `dayLabel` so the inference is identical.
+    ///
+    /// `allowScheduleInference` (default `true`) gates ONLY the
+    /// schedule-by-weekday fallback (step 2). The session's own
+    /// `workout_id` (step 1) is ALWAYS honoured. Pass `false` for
+    /// HISTORICAL dates: the *current* `meta.schedule` must not relabel a
+    /// past completed session (a schedule edit would otherwise rewrite its
+    /// A/B), so a null-`workout_id` past session resolves to nil
+    /// (glyph-only, no possibly-wrong label) rather than today's mapping.
+    /// `true` is REQUIRED for today/future (the BLOCKER fix:
+    /// `todayResolvedDay` must still infer today's template) — the valid
+    /// inference window is exactly `ymd >= today`, the same civil-date
+    /// boundary `CalendarProjection.project` uses (`dateString < today`),
+    /// not a forked date rule. Callers pass `ymd >= todayString`.
+    func sessionDisplayTemplate(forDateString ymd: String,
+                                allowScheduleInference: Bool = true) -> Workout? {
+        if let day = workout(id: sessionsByDate[ymd]?.workout_id, on: ymd) {
+            return day
+        }
+        guard allowScheduleInference, sessionsByDate[ymd]?.isFreestyle != true else { return nil }
+        return scheduledTemplate(forDateString: ymd)
+    }
+
+    /// Upcoming days that carry something to do, found by forward-scanning
+    /// the SAME projection used by the calendar (no second algorithm). Starts
+    /// at tomorrow, walks up to `maxDays` civil days, and returns at most
+    /// `limit` dates whose resolved state is a workout (a weekly-schedule
+    /// projection OR a real planned/in_progress session — `.skipped` does not
+    /// count) or that carry a planned ride/run or an activity beside the
+    /// weekday's workout.
+    ///
+    /// `workout` is OPTIONAL: when the resolved template isn't in the local
+    /// cache we still return THAT date (with `hasWorkout` and `workout == nil`)
+    /// rather than skipping ahead. The view renders the date without
+    /// exercise detail. Planned endurance is read-only context; a hard
+    /// blackout suppresses it exactly as the calendar does.
+    struct UpcomingDay: Identifiable {
+        let dateString: String
+        let hasWorkout: Bool
+        let workout: Workout?
+        let rides: [ExternalEvent]
+        /// Activities the weekday holds beside its workout (schedule extras).
+        var extras: [Workout] = []
+        var id: String { dateString }
+    }
+
+    /// Activities a date holds beside its workout (schedule extras, such as
+    /// morning stretching), from the same projection rule as the server and
+    /// the calendar, as live saved workouts in plan order.
+    func plannedExtras(on ymd: String, today: String) -> [Workout] {
+        guard let plan else { return [] }
+        let live = plan.availableWorkouts
+        return CalendarProjection.extras(
+            dateString: ymd, today: today, schedule: plan.schedule(on: ymd),
+            templateIDs: ScheduleExtras.workoutIDs(plan), trips: plan.trips
+        ).compactMap { id in live.first { $0.id == id } }
+    }
+
+    func upcomingDays(within maxDays: Int = 14, limit: Int = 3) -> [UpcomingDay] {
+        // Single-clock: capture `todayString` ONCE (it's a computed var,
+        // fresh `Date()` per access) for BOTH the `start` anchor and every
+        // per-offset `projection(for:today:)` in the loop, so the whole scan
+        // runs off one clock.
+        let today = todayString
+        guard maxDays > 0, limit > 0,
+              let start = CalendarProjection.date(from: today) else { return [] }
+        var out: [UpcomingDay] = []
+        for offset in 1...maxDays where out.count < limit {
+            guard let d = CalendarProjection.calendar
+                .date(byAdding: .day, value: offset, to: start) else { continue }
+            let ymd = CalendarProjection.dateString(d)
+            let proj = projection(for: ymd, today: today)
+            var hasWorkout = false
+            var workout: Workout?
+            switch proj {
+            case .projected(let tid):
+                hasWorkout = true
+                workout = self.workout(id: tid, on: ymd)
+            case .session(let status, let hardBlackoutTripType):
+                if status == "planned" || status == "in_progress" {
+                    // Use the SHARED session→schedule resolver (the same one
+                    // Today/calendar use), not a bare workout_id read: a real
+                    // planned/in_progress session with a null workout_id
+                    // normally resolves via the weekly schedule. A hard
+                    // blackout is the one exception: its schedule is
+                    // suppressed, so only the session's explicit template can
+                    // be returned.
+                    hasWorkout = true
+                    workout = sessionDisplayTemplate(
+                        forDateString: ymd,
+                        allowScheduleInference: hardBlackoutTripType == nil)
+                }
+                // A COMPLETED future session (e.g. pre-logged via MCP) is
+                // already done, and skipped is not upcoming.
+            // Trip days are not a strength workout (unavailable = blacked
+            // out; light = unstructured travel).
+            case .rest, .none, .unavailable, .light:
+                break
+            }
+            let dayRides = proj.suppressesScheduleAndEndurance ? [] : rides(on: ymd)
+            let dayExtras = plannedExtras(on: ymd, today: today)
+            if hasWorkout || !dayRides.isEmpty || !dayExtras.isEmpty {
+                out.append(UpcomingDay(dateString: ymd, hasWorkout: hasWorkout,
+                                       workout: workout, rides: dayRides, extras: dayExtras))
+            }
+        }
+        return out
+    }
+
+    /// Start the guided workout for the template TODAY resolves to (via
+    /// `todayResolvedDay`, i.e. the SAME CalendarProjection the calendar
+    /// uses). Reuses the EXISTING session-start path verbatim.
+    func startToday() {
+        #if DEBUG && targetEnvironment(simulator)
+        UIFixtureStartTrace.record(.startTodayEntered)
+        #endif
+        guard allowNewWorkoutStart() else {
+            #if DEBUG && targetEnvironment(simulator)
+            UIFixtureStartTrace.record(.startTodayRejected)
+            #endif
+            return
+        }
+        if let id = todayResolvedDay?.id { selectedDayID = id }
+        startWorkout()
+    }
+
+    /// Start a guided workout for an explicitly chosen day template — the
+    /// "train a different day" OVERRIDE. Reuses the EXISTING session-start
+    /// path verbatim (set `selectedDayID`, then `startWorkout()`); the
+    /// session row is created lazily on the first logged set. This is a
+    /// one-off `sessions` write only — it never touches `plans.meta.schedule`.
+    func startOverride(dayID: String) {
+        guard allowNewWorkoutStart() else { return }
+        guard workout(id: dayID)?.isArchived == false else {
+            loadError = "This workout is unavailable. Choose another workout."
+            return
+        }
+        selectedDayID = dayID
+        if let skipped = todaySession, skipped.status == "skipped" {
+            guard !isReopeningSkippedWorkout else { return }
+            isReopeningSkippedWorkout = true
+            Task {
+                await reopenSkippedWorkoutAndStart(
+                    skipped, requestedDayID: dayID)
+            }
+            return
+        }
+        startWorkout()
+    }
+
+    private func reopenSkippedWorkoutAndStart(
+        _ skipped: SessionRow,
+        requestedDayID: String
+    ) async {
+        defer { isReopeningSkippedWorkout = false }
+        guard canInitiateBoundFeatureAction, let jwt = currentJWT else { return }
+        do {
+            let response = try await setWriteAPI.reopenSkippedSession(
+                sessionId: skipped.id,
+                workoutID: requestedDayID,
+                expectedAttempt: skipped.attempt ?? 0,
+                jwt: jwt)
+            guard canMutateBoundSetAccount,
+                  response.id == skipped.id,
+                  response.workoutScope == skipped.workoutScope,
+                  response.status == "planned",
+                  response.workout_id == requestedDayID,
+                  response.attempt == nil
+                    || response.attempt == (skipped.attempt ?? 0) + 1,
+                  let accepted = acceptSessionResolution(response),
+                  accepted.status == "planned",
+                  accepted.workout_id == requestedDayID
+            else {
+                throw APIError.decoding(
+                    "Skipped-session reopen did not advance the workout")
+            }
+            guard canInitiateBoundFeatureAction,
+                  currentWorkoutScope == skipped.workoutScope else {
+                // The account still owns the accepted server mutation, but
+                // the feature session or selected workout may have changed
+                // while it was in flight (including a new civil date).
+                // Preserve the ACK without mounting a runner in another scope.
+                auth.noteAccountStatePersisted(for: accountID)
+                return
+            }
+            loadError = nil
+            selectedDayID = requestedDayID
+            // The network gate has completed; clear it before entering the
+            // shared start guard, which intentionally blocks while a reopen
+            // is still in flight.
+            isReopeningSkippedWorkout = false
+            startWorkout()
+        } catch {
+            if let conflict = sessionWriteConflict(from: error),
+               conflict.current_session.date == skipped.date
+            {
+                adoptSessionWriteConflict(conflict.current_session)
+                guard canInitiateBoundFeatureAction else {
+                    auth.noteAccountStatePersisted(for: accountID)
+                    return
+                }
+                loadError = "Today's session changed elsewhere. Review it before starting."
+                return
+            }
+            handle(error, jwt: jwt)
+        }
+    }
+
+    /// Plan day for a template id (agenda exercise targets).
+    func workout(id: String?) -> Workout? {
+        guard let id else { return nil }
+        return plan?.workouts.first { $0.id == id }
+    }
+
+    /// The plan day as it reads on a date: a block's week can give its slots
+    /// their own targets (progressive-plans P1). Editors use `workout(id:)`.
+    func workout(id: String?, on ymd: String) -> Workout? {
+        guard let plan, let day = workout(id: id) else { return nil }
+        return plan.workout(day, on: ymd)
+    }
+
+    /// Logged working + warmup sets for a session (agenda "completed").
+    func setsForSession(_ sessionID: String) -> [SetLog] {
+        (historyIndex.setsBySession[sessionID] ?? [])
+            .sorted {
+                $0.exercise_id == $1.exercise_id
+                    ? $0.set_index < $1.set_index
+                    : $0.logged_at < $1.logged_at
+            }
+    }
+
+    private func handle(_ error: Error, jwt: String) {
+        if (error as? APIError)?.httpStatus == 401 {
+            if isCurrentBearer(jwt) {
+                auth.requireReauthentication()
+            }
+        } else {
+            loadError = error.localizedDescription
+        }
+    }
+}
+
+private extension SetLog {
+    func replacingSessionID(with sessionID: String) -> SetLog {
+        SetLog(
+            id: id,
+            session_id: sessionID,
+            exercise_id: exercise_id,
+            template_exercise_id: template_exercise_id,
+            set_index: set_index,
+            weight: weight,
+            reps: reps,
+            rpe: rpe,
+            is_warmup: is_warmup,
+            logged_at: logged_at,
+            duration_s: duration_s,
+            is_timed: is_timed,
+            deleted_at: deleted_at,
+            updated_at: updated_at,
+            weight_unit: weight_unit)
+    }
+}
+
+// MARK: - Durable set corrections
+
+extension SyncModel {
+    func refreshTimerCues() {
+        guard canInitiateBoundFeatureAction, canControlSharedRestArtifacts else { return }
+        if !RestCue.enabled {
+            timedCueGeneration = nil
+            pendingTimedCueGeneration = nil
+            RestCue.cancelNotification()
+            RestCue.cancelTimedNotification()
+        } else if timedActive, let end = timedEndDate, end > now() {
+            timedCueGeneration = RestCue.scheduleTimedNotification(at: end)
+        } else if let end = restEndDate, end > now() {
+            RestCue.scheduleNotification(at: end)
+        }
+    }
+
+    private func registerTimerControls() {
+        WorkoutTimerControl.handler = { [weak self] id, action in
+            await self?.controlTimer(id: id, action: action) ?? false
+        }
+    }
+
+    func controlTimer(id: String, action: String) async -> Bool {
+        guard canInitiateBoundFeatureAction, canControlSharedRestArtifacts else { return false }
+        if id == restControlID, restEndDate != nil {
+            if action == "extend" { addRest(15); return true }
+            if action == "stop" { skipRest(); return true }
+        }
+        if id == timedControlID, timedActive, action == "stop", timedElapsed >= 2 {
+            await stopTimedSet()
+            return true
+        }
+        return false
+    }
+
+    func setRunnerValues(_ values: SetCorrectionValues, expected: RunnerPrescription, expectedSetNumber: Int) -> Bool {
+        guard canInitiateBoundFeatureAction, !timedActive, values.isValid,
+              expectedSetNumber == currentPhysicalSetNumber,
+              currentExercise.map(RunnerPrescription.init) == expected else { return false }
+        setWeight(values.weight)
+        setReps(values.reps)
+        setRPE(values.rpe)
+        if let duration = values.durationSeconds { setHoldDuration(duration) }
+        return true
+    }
+
+    func correction(for setID: String) -> PendingSetCorrection? {
+        setCorrections.first { $0.setID == setID }
+    }
+
+    @discardableResult
+    func enqueueCorrection(set: SetLog, values: SetCorrectionValues?) -> Bool {
+        guard canInitiateBoundFeatureAction, values?.isValid != false,
+              let session = sessions.first(where: { $0.id == set.session_id }),
+              !["discarded", "skipped"].contains(session.status),
+              sets.contains(where: { $0.id == set.id && $0.session_id == set.session_id }),
+              set.deleted_at == nil
+        else { return false }
+        return saveCorrection(PendingSetCorrection(
+            sessionSlot: session.slot,
+            id: uuidFactory().uuidString, setID: set.id, date: session.date,
+            slotID: set.template_exercise_id, exerciseID: set.exercise_id,
+            sessionID: set.session_id, expectedAttempt: session.attempt ?? 0,
+            expectedUpdatedAt: set.updated_at ?? set.logged_at, values: values))
+    }
+
+    @discardableResult
+    func enqueueCorrection(pending: PendingSetIntent, values: SetCorrectionValues?) -> Bool {
+        guard canInitiateBoundFeatureAction, values?.isValid != false,
+              durableSetIntent(matching: pending)?.body == pending.body
+        else { return false }
+        return saveCorrection(PendingSetCorrection(
+            sessionSlot: pending.sessionSlot,
+            id: uuidFactory().uuidString, setID: pending.id, date: pending.date,
+            slotID: pending.slotID, exerciseID: pending.body.exercise_id,
+            sessionID: pending.resolvedSessionID, expectedAttempt: pending.expectedAttempt,
+            expectedUpdatedAt: nil, values: values))
+    }
+
+    private func saveCorrection(_ intent: PendingSetCorrection) -> Bool {
+        adoptDurableWorkoutWriteOutboxes()
+        guard !setCorrections.contains(where: { $0.setID == intent.setID }),
+              terminalOutbox.intent(for: intent.date, slot: intent.sessionSlot ?? 0) == nil
+        else { return false }
+        var intent = intent
+        intent.runnerFocusRevision = runnerFocus.revision
+        intent.runnerGroupRepair = observedGroupRepair(for: intent)
+        guard SetCorrectionOutboxStore.enqueue(intent, userID: accountID, defaults: defaults) else {
+            loadError = "Couldn't save this correction on your iPhone. Retry saved data, then try again."
+            return false
+        }
+        ownedCorrectionIDs.insert(intent.id)
+        adoptDurableWorkoutWriteOutboxes()
+        guard setCorrections.contains(where: { $0.id == intent.id }) else { return false }
+        Task { await drainWorkoutWriteOutboxes() }
+        return true
+    }
+
+    func retryCorrection(id: String) async {
+        guard canInitiateBoundFeatureAction else { return }
+        adoptDurableWorkoutWriteOutboxes()
+        guard var intent = setCorrections.first(where: { $0.id == id }),
+              !sendingCorrectionIDs.contains(id)
+        else { return }
+        // Retain the revision even for a 409. Retrying never overwrites a
+        // remote correction the member has not reviewed.
+        intent.deliveryState = .queued
+        intent.failedHTTPStatus = nil
+        SetCorrectionOutboxStore.replace(intent, userID: accountID, defaults: defaults)
+        adoptDurableWorkoutWriteOutboxes()
+        await drainWorkoutWriteOutboxes()
+    }
+
+    /// Permanent rejection proves this request was not accepted. Clearing it
+    /// permits a fresh review of the server row; queued/time-out operations
+    /// cannot be abandoned while their acknowledgement is uncertain.
+    func dismissRejectedCorrection(id: String) async {
+        guard canInitiateBoundFeatureAction else { return }
+        adoptDurableWorkoutWriteOutboxes()
+        guard let intent = setCorrections.first(where: { $0.id == id }),
+              intent.deliveryState == .failed, !sendingCorrectionIDs.contains(id)
+        else { return }
+        SetCorrectionOutboxStore.remove(id: id, userID: accountID, defaults: defaults)
+        adoptDurableWorkoutWriteOutboxes()
+        await loadAfterMutation()
+    }
+
+    private func performSetCorrectionDrain() async -> Bool {
+        adoptDurableWorkoutWriteOutboxes()
+        while canInitiateBoundFeatureAction,
+              var intent = setCorrections.first(where: { correction in
+                  correction.deliveryState == .queued && ownedCorrectionIDs.contains(correction.id)
+                      && !setOutbox.pending.contains(where: { $0.id == correction.setID })
+              }), let jwt = currentJWT {
+            guard !discardBarrierScopes.contains(intent.workoutScope) else {
+                supersedeSetIntentsForDiscardBarriers()
+                continue
+            }
+            if intent.expectedUpdatedAt == nil {
+                // Only an acknowledged original UUID can bind an offline
+                // correction. Never create another set to stand in for it.
+                guard let set = sets.first(where: { $0.id == intent.setID }),
+                      let session = sessions.first(where: { $0.id == set.session_id }),
+                      session.workoutScope == intent.workoutScope, set.exercise_id == intent.exerciseID,
+                      set.template_exercise_id == intent.slotID || set.template_exercise_id == nil,
+                      intent.expectedAttempt == nil || intent.expectedAttempt == (session.attempt ?? 0)
+                else {
+                    failCorrection(&intent, status: 409)
+                    continue
+                }
+                intent.sessionID = session.id
+                intent.slotID = set.template_exercise_id
+                intent.expectedAttempt = session.attempt ?? 0
+                intent.expectedUpdatedAt = set.updated_at ?? set.logged_at
+                SetCorrectionOutboxStore.replace(intent, userID: accountID, defaults: defaults)
+                adoptDurableWorkoutWriteOutboxes()
+                guard let bound = setCorrections.first(where: { $0.id == intent.id }) else { continue }
+                intent = bound
+            }
+            retainGroupDeletionObservations()
+            if let retained = setCorrections.first(where: { $0.id == intent.id }) { intent = retained }
+            sendingCorrectionIDs.insert(intent.id)
+            do {
+                let result = try await setWriteAPI.correctSet(intent, jwt: jwt)
+                sendingCorrectionIDs.remove(intent.id)
+                guard canMutateBoundSetAccount else { return true }
+                adoptDurableWorkoutWriteOutboxes()
+                guard setCorrections.contains(where: { $0.id == intent.id }),
+                      !discardBarrierScopes.contains(intent.workoutScope)
+                else { continue }
+                guard result.set.id == intent.setID,
+                      result.set.session_id == intent.sessionID,
+                      result.set.exercise_id == intent.exerciseID,
+                      result.set.template_exercise_id == intent.slotID || result.set.template_exercise_id == nil,
+                      result.session.id == intent.sessionID,
+                      result.session.workoutScope == intent.workoutScope,
+                      result.session.attempt == intent.expectedAttempt
+                else { throw APIError.decoding("Correction acknowledgement changed its identity") }
+                summaryRevision &+= 1
+                retainGroupDeletionObservations()
+                if let retained = setCorrections.first(where: { $0.id == intent.id }) { intent = retained }
+                let observedDeletionGroupID = groupDeletionObservation(intent)
+                let merged = StateSnapshotStore.mergeAcknowledgement(
+                    userID: accountID, fallback: currentStateResponse(), defaults: defaults
+                ) { state in
+                    Self.mergingSetAcknowledgement(into: state, acceptedSet: result.set,
+                                                  acknowledgedSession: result.session)
+                }
+                // ACK is the mutation boundary. Before retiring its durable
+                // intent, preserve either the merged rows or a small durable
+                // invalidation marker. Repacking the same oversized snapshot
+                // merely to clear its cursors can fail again.
+                let recoveryCommitted = merged != nil || StateSnapshotStore.invalidate(
+                    userID: accountID, defaults: defaults)
+                let durableRunner = WorkoutRunnerCheckpointStore.load(userID: accountID, defaults: defaults)
+                let needsRunnerRecovery = result.set.deleted_at != nil
+                    && (observedDeletionGroupID != nil || intent.runnerGroupRepair != nil)
+                    && durableRunner.map {
+                        $0.workoutScope == intent.workoutScope
+                            && ($0.sessionID == nil || $0.sessionID == intent.sessionID)
+                            && ($0.sessionAttempt == nil || $0.sessionAttempt == intent.expectedAttempt)
+                    } == true
+                var runnerRecoveryCommitted = !needsRunnerRecovery
+                if canInitiateBoundFeatureAction && (!needsRunnerRecovery
+                    || (!runnerArtifactsOwnedByOther && persistedRunnerCheckpoint == durableRunner)) {
+                    let state = merged?.state ?? Self.mergingSetAcknowledgement(
+                        into: currentStateResponse(), acceptedSet: result.set,
+                        acknowledgedSession: result.session)
+                    applyState(state, preferredTodaySessionID: todaySession?.id, isLiveResponse: false)
+                    // Value-only corrections preserve focus/review/rest. An
+                    // accepted group deletion repairs the derived round at a
+                    // stable physical-set boundary without emitting another rest.
+                    if needsRunnerRecovery {
+                        if supersededDeletionGroupID(intent) != nil {
+                            runnerRecoveryCommitted = absorbSupersededDeletion(intent)
+                        } else {
+                            runnerRecoveryCommitted = repairGroupAfterDeletedSet(intent, observedGroupID: observedDeletionGroupID)
+                        }
+                    }
+                    persistRunnerCheckpoint()
+                    correctionRefreshNeeded = merged == nil
+                    if merged == nil {
+                        loadError = "Correction saved. Refresh to update the recovery cache."
+                    }
+                } else if recoveryCommitted {
+                    auth.noteAccountStatePersisted(for: accountID)
+                }
+                if recoveryCommitted && runnerRecoveryCommitted {
+                    SetCorrectionOutboxStore.remove(id: intent.id, userID: accountID, defaults: defaults)
+                    adoptDurableWorkoutWriteOutboxes()
+                } else {
+                    // The snapshot may already contain the tombstone. Keep the
+                    // correction and its counted-group evidence until the current
+                    // checkpoint owner can durably settle selection or deferral.
+                    if !canInitiateBoundFeatureAction || runnerArtifactsOwnedByOther
+                        || WorkoutRunnerCheckpointStore.load(userID: accountID, defaults: defaults) != persistedRunnerCheckpoint {
+                        ownedCorrectionIDs.remove(intent.id)
+                    }
+                    return true
+                }
+            } catch {
+                sendingCorrectionIDs.remove(intent.id)
+                guard canMutateBoundSetAccount else { return true }
+                adoptDurableWorkoutWriteOutboxes()
+                guard setCorrections.contains(where: { $0.id == intent.id }) else { continue }
+                if isPermanentSetClientError(error) {
+                    failCorrection(&intent, status: (error as? APIError)?.httpStatus ?? 400)
+                    continue
+                }
+                recordRetryAfter(from: error)
+                handle(error, jwt: jwt)
+                return true
+            }
+            adoptDurableWorkoutWriteOutboxes()
+        }
+        return false
+    }
+
+    private func failCorrection(_ intent: inout PendingSetCorrection, status: Int) {
+        intent.deliveryState = .failed
+        intent.failedHTTPStatus = status
+        SetCorrectionOutboxStore.replace(intent, userID: accountID, defaults: defaults)
+        adoptDurableWorkoutWriteOutboxes()
+    }
+}
+
+
+extension SyncModel {
+    func completionSummary(for sessionID: String) -> WorkoutSummary? {
+        guard completionSummaryRevisions[sessionID] == summaryRevision else { return nil }
+        return completionSummaries[sessionID]
+    }
+
+    func loadCompletionSummary(sessionID: String) async {
+        guard canInitiateBoundFeatureAction, let jwt = currentJWT,
+              let session = sessions.first(where: { $0.id == sessionID && $0.status == "completed" }),
+              completionSummary(for: sessionID) == nil else { return }
+        let revision = summaryRevision
+        do {
+            let summary = try await setWriteAPI.getWorkoutSummary(sessionID: sessionID, jwt: jwt)
+            guard canInitiateBoundFeatureAction, summaryRevision == revision,
+                  summary.version == 1, summary.final, summary.session_id == sessionID,
+                  summary.attempt == (session.attempt ?? 0),
+                  sessions.contains(where: { $0.id == sessionID && $0.status == "completed"
+                      && ($0.attempt ?? 0) == summary.attempt }) else { return }
+            completionSummaries[sessionID] = summary
+            completionSummaryRevisions[sessionID] = revision
+            summaryErrors[sessionID] = nil
+        } catch {
+            guard canInitiateBoundFeatureAction, summaryRevision == revision else { return }
+            summaryErrors[sessionID] = "Summary unavailable until the next successful sync."
+            if (error as? APIError)?.httpStatus == 401 { handle(error, jwt: jwt) }
+        }
+    }
+}

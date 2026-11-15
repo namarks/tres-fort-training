@@ -1,0 +1,21 @@
+import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { connectPage } from './connect.mjs';
+import { homePage } from './home.mjs';
+import { PRIVACY_HTML } from './privacy.mjs';
+import { termsPage } from './terms.mjs';
+
+const root = new URL('./', import.meta.url);
+const dist = new URL('dist/', root);
+await rm(dist, { recursive: true, force: true });
+await mkdir(dist, { recursive: true });
+await cp(new URL('public/', root), dist, { recursive: true });
+for (const name of ['today', 'runner', 'workouts']) await readFile(new URL(`public/assets/${name}.png`, root));
+await writeFile(new URL('index.html', dist), homePage());
+await mkdir(new URL('privacy/', dist), { recursive: true });
+await writeFile(new URL('privacy/index.html', dist), PRIVACY_HTML);
+await mkdir(new URL('connect/', dist), { recursive: true });
+await writeFile(new URL('connect/index.html', dist), connectPage());
+await mkdir(new URL('terms/', dist), { recursive: true });
+await writeFile(new URL('terms/index.html', dist), termsPage());
+console.log(`Built Très Fort website: ${fileURLToPath(dist)}`);

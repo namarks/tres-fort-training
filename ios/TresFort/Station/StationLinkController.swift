@@ -1,0 +1,341 @@
+import Combine
+import Foundation
+import UIKit
+
+/// iPhone side of the iPad Station link. It mirrors which set is armed, shows
+/// the iPad's live count, holds a finished count as a proposal and hands the
+/// controls tapped on the iPad to the runner. Logging itself stays with the
+/// runner, through SyncModel's ordinary guarded actions.
+@MainActor
+final class StationLinkController: ObservableObject {
+    @Published private(set) var connection: StationLinkTransport.Connection = .off
+    @Published private(set) var arm: StationLinkArm?
+    @Published private(set) var progress: StationLinkProgress?
+    @Published private(set) var stationState: StationLinkStationState?
+    @Published private(set) var proposal: StationLinkProposal?
+    @Published private(set) var lastLogged: StationLinkLoggedSet?
+    /// An undone iPad set whose deletion is still on its way. Runner progress
+    /// counts the set until then, so the iPad waits instead of counting the
+    /// set after it; the runner arms the undone set afresh once it is gone.
+    @Published private(set) var pendingUndo: StationLinkLoggedSet?
+    /// No link key yet: the device must reach the server once to set up.
+    @Published private(set) var needsKey = false
+    @Published private(set) var display: WorkoutDisplayState?
+    @Published private(set) var connectionAttempt = 0
+
+    /// Retry discovery without discarding an acknowledged set or its Undo.
+    /// A loaded key restarts here, even while Today is off screen; the new
+    /// attempt also asks Today to load the key again.
+    func retryConnection() {
+        transport.restart()
+        connectionAttempt += 1
+    }
+
+    /// Back in the foreground. Suspension closes local sessions, sometimes
+    /// without telling this side, so reconnect unless still connected, and
+    /// try again for a key that could not load before.
+    func appBecameActive() {
+        if needsKey { connectionAttempt += 1 } else { transport.resume() }
+    }
+
+    var onPartnerMessage: ((PartnerPacket) -> Void)?
+    func sendPartner(_ packet: PartnerPacket) { transport.send(.partner(packet)) }
+
+    /// Applies a control tapped on the iPad to the runner. Commands arrive
+    /// only while a published display accepts them, and run one at a time
+    /// in the order the iPad sent them.
+    var onCommand: ((StationLinkCommand) async -> StationLinkCommandReceipt)?
+
+    private let transport: StationLinkTransport
+    /// Seconds an applied command's answer waits for the display showing its
+    /// result, so the iPad never offers the old step again after the answer.
+    private let receiptDelay: TimeInterval
+    private var seenCommands: Set<UUID> = []
+    private var commandQueue: [StationLinkCommand] = []
+    private var isApplyingCommands = false
+    private var heldReceipts: [StationLinkCommandReceipt] = []
+    private var seenEvents: Set<UUID> = []
+    private var completedArmID: UUID?
+    private var cancellable: AnyCancellable?
+    private let idleTimer: StationIdleTimerOverride
+    private var workoutActive = false
+
+    init(transport: StationLinkTransport? = nil, idleTimer: StationIdleTimerOverride? = nil,
+         receiptDelay: TimeInterval = 0.3) {
+        self.transport = transport ?? StationLinkTransport(role: .controller)
+        self.idleTimer = idleTimer ?? StationIdleTimerOverride()
+        self.receiptDelay = receiptDelay
+        cancellable = self.transport.$connection.sink { [weak self] value in
+            self?.connectionChanged(value)
+        }
+        self.transport.onMessage = { [weak self] in self?.receive($0) }
+        // A fresh connection learns the current arm, if any.
+        self.transport.onConnect = { [weak self] in
+            guard let self else { return }
+            self.resendCurrentState()
+        }
+    }
+
+    deinit {
+        // A torn-down runner (sign-out, a replaced session) publishes no
+        // disconnect: stop the link and give the phone its sleep policy back.
+        let transport = self.transport
+        let idleTimer = self.idleTimer
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                transport.stop()
+                idleTimer.end()
+            }
+        }
+    }
+
+    var isConnected: Bool { connection.isConnected }
+
+    /// Discovery can outlive a workout. Only an open foreground workout
+    /// needs to keep the phone awake to receive counts and publish guidance.
+    func setWorkoutActive(_ active: Bool) {
+        workoutActive = active
+        updateIdleTimer()
+    }
+
+    func connectionChanged(_ value: StationLinkTransport.Connection) {
+        connection = value
+        if !value.isConnected {
+            progress = nil
+            stationState = nil
+        }
+        updateIdleTimer()
+    }
+
+    private func updateIdleTimer() {
+        if workoutActive && isConnected {
+            idleTimer.begin()
+            idleTimer.update(cameraRunning: false, partnerOpen: false, foreground: true, workoutDisplay: true)
+        } else {
+            idleTimer.end()
+        }
+    }
+
+    var displayToResend: WorkoutDisplayState? { display }
+
+    /// The existing authenticated transport owns reconnect delivery. Publishing
+    /// can happen before pairing, so a fresh peer receives the latest state.
+    func publishDisplay(_ state: WorkoutDisplayState?) {
+        guard display != state else { return }
+        display = state
+        transport.send(.display(state))
+        releaseReceipts()
+    }
+
+    func resendCurrentState() {
+        transport.send(.display(displayToResend))
+        if let arm = armToResend { transport.send(.arm(arm)) }
+    }
+
+    /// The arm a reconnected iPad should count, if any. An arm whose count
+    /// already arrived (waiting for a tap, handed to Edit, or logged) is spent:
+    /// only a new set or "Not right" asks the iPad to count again.
+    var armToResend: StationLinkArm? {
+        guard proposal == nil, let arm, arm.armID != completedArmID else { return nil }
+        return arm
+    }
+
+    func start(key: Data) {
+        needsKey = false
+        transport.start(key: key)
+    }
+
+    func keyUnavailable() {
+        publishDisplay(nil)
+        transport.stop()
+        needsKey = true
+    }
+
+    func stop() {
+        clearWorkoutState()
+        transport.stop()
+        needsKey = false
+    }
+
+    /// Keep remembered pairing available between workouts without carrying a
+    /// count, Undo or armed set into a later workout with the same template.
+    func resetWorkout() {
+        setWorkoutActive(false)
+        clearWorkoutState()
+    }
+
+    private func clearWorkoutState() {
+        publishDisplay(nil)
+        request(nil)
+        progress = nil
+        stationState = nil
+        proposal = nil
+        lastLogged = nil
+        pendingUndo = nil
+        seenEvents.removeAll()
+        completedArmID = nil
+        // Queued controls belonged to the old workout; IDs stay spent.
+        commandQueue.removeAll()
+    }
+
+    /// Queues a control from the iPad. Each command is applied at most once:
+    /// one repeated by a reconnect is ignored.
+    private func receive(_ command: StationLinkCommand) {
+        guard seenCommands.insert(command.id).inserted else { return }
+        commandQueue.append(command)
+        guard !isApplyingCommands else { return }
+        isApplyingCommands = true
+        Task { @MainActor [weak self] in await self?.applyCommands() }
+    }
+
+    private func applyCommands() async {
+        while !commandQueue.isEmpty {
+            let command = commandQueue.removeFirst()
+            // Only a live, published workout takes controls; a withdrawn
+            // display means the runner closed or changed hands meanwhile.
+            guard display?.acceptsCommands == true, let onCommand else {
+                answer(.refused(command, StationLinkCommandReceipt.openWorkout))
+                continue
+            }
+            // A control acts only on what this iPhone last showed, a set
+            // control only on a set, and a choice only where one is offered.
+            if !command.matches(display) || command.actsOnShownSet && command.step == nil
+                || command.choosesExercise && display?.phase.offersExerciseChoice != true {
+                answer(.refused(command, StationLinkCommandReceipt.movedOn))
+                continue
+            }
+            answer(await onCommand(command))
+        }
+        isApplyingCommands = false
+    }
+
+    private func answer(_ receipt: StationLinkCommandReceipt) {
+        guard receipt.accepted else {
+            transport.send(.commandReceipt(receipt))
+            return
+        }
+        // The runner changed, so the display showing it is about to be
+        // published; the answer follows it, or goes alone if nothing changed.
+        heldReceipts.append(receipt)
+        let delay = receiptDelay
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            self?.releaseReceipts()
+        }
+    }
+
+    private func releaseReceipts() {
+        guard !heldReceipts.isEmpty else { return }
+        let receipts = heldReceipts
+        heldReceipts.removeAll()
+        for receipt in receipts { transport.send(.commandReceipt(receipt)) }
+    }
+
+    /// Arms the iPad for the runner's current set, or disarms it with nil.
+    /// While a proposal waits, the arm is kept so the iPad doesn't count rest.
+    func request(_ target: StationLinkTarget?) {
+        guard StationLink.cameraCountingAvailable else { return }
+        if StationLinkPolicy.arm(arm, matches: target) { return }
+        if let proposal, target?.slotID != proposal.slotID || target?.setNumber != proposal.setNumber
+            || target?.exerciseName != proposal.exerciseName {
+            // The runner moved on (logged by hand, skipped, navigated): a count
+            // for the previous set must not follow it.
+            seenEvents.insert(proposal.eventID)
+            self.proposal = nil
+        }
+        if let old = arm { transport.send(.disarm(armID: old.armID)) }
+        progress = nil
+        guard let target else { arm = nil; return }
+        let next = StationLinkArm(armID: UUID(), slotID: target.slotID, setNumber: target.setNumber,
+                                  exercise: target.exercise, exerciseName: target.exerciseName,
+                                  targetReps: target.targetReps)
+        arm = next
+        transport.send(.arm(next))
+    }
+
+    /// The runner was minimized: disarm the iPad, but keep a finished count
+    /// that waits for a tap (the iPad is already stopped) until it returns.
+    func pause() {
+        guard proposal == nil else { return }
+        request(nil)
+    }
+
+    /// The member rejected the count. The set stays manual and the iPad
+    /// counts the same set again under a fresh arm.
+    func dismissProposal() {
+        guard let proposal else { return }
+        seenEvents.insert(proposal.eventID)
+        self.proposal = nil
+        rearm()
+    }
+
+    /// An iPad-logged set was undone and its deletion is queued.
+    func undoQueued(_ logged: StationLinkLoggedSet) {
+        if lastLogged == logged { lastLogged = nil }
+        pendingUndo = logged
+    }
+
+    private func rearm() {
+        guard let old = arm else { return }
+        let fresh = StationLinkArm(armID: UUID(), slotID: old.slotID, setNumber: old.setNumber,
+                                   exercise: old.exercise, exerciseName: old.exerciseName,
+                                   targetReps: old.targetReps)
+        transport.send(.disarm(armID: old.armID))
+        progress = nil
+        arm = fresh
+        transport.send(.arm(fresh))
+    }
+
+    /// The runner logged the count, or handed it to the rep control (Edit).
+    func finishProposal(_ eventID: UUID) {
+        seenEvents.insert(eventID)
+        if proposal?.eventID == eventID { proposal = nil }
+    }
+
+    /// Saving the count failed: keep it on screen for a tap instead of
+    /// logging it again on its own.
+    func holdProposal(_ eventID: UUID) {
+        guard let proposal, proposal.eventID == eventID, proposal.logsAutomatically else { return }
+        self.proposal = StationLinkProposal(
+            eventID: proposal.eventID, slotID: proposal.slotID, setNumber: proposal.setNumber,
+            exerciseName: proposal.exerciseName, reps: proposal.reps, leftCount: proposal.leftCount,
+            rightCount: proposal.rightCount, partial: proposal.partial, logsAutomatically: false)
+    }
+
+    /// A Station count was logged; it stays undoable until the next count.
+    func recordLogged(_ logged: StationLinkLoggedSet) { lastLogged = logged }
+
+    func clearLogged() { lastLogged = nil }
+
+    func receive(_ message: StationLinkMessage) {
+        switch message {
+        case .partner(let packet): onPartnerMessage?(packet)
+        case .progress(let value):
+            guard StationLink.cameraCountingAvailable, value.armID == arm?.armID else { return }
+            progress = value
+        case .completion(let completion):
+            guard StationLink.cameraCountingAvailable, proposal == nil,
+                  let next = StationLinkPolicy.proposal(for: completion, arm: arm,
+                                                        seenEvents: seenEvents) else { return }
+            seenEvents.insert(completion.eventID)
+            completedArmID = completion.armID
+            lastLogged = nil
+            proposal = next
+        case .station(let state, let armID):
+            guard StationLink.cameraCountingAvailable else { return }
+            if let armID, armID != arm?.armID {
+                // The iPad still holds a set this iPhone moved past, as when a
+                // replaced connection lost the disarm: withdraw it.
+                transport.send(.disarm(armID: armID))
+                return
+            }
+            stationState = state
+            // A set taken over by hand stays manual, even across a reconnect.
+            if state == .manual, let armID { completedArmID = armID }
+        case .command(let command):
+            receive(command)
+        case .display, .arm, .disarm, .commandReceipt, .challenge, .proof:
+            break // only the iPhone arms sets; the transport authenticates
+        }
+    }
+}

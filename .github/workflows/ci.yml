@@ -1,0 +1,290 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+    # closed: merging or closing a PR cancels its unfinished runs (below).
+    types: [opened, synchronize, reopened, closed]
+  push:
+    branches: [main]
+  schedule:
+    # Nightly release check on main (early morning Pacific time): the full UI
+    # suite plus the iPad Station and App Store device jobs, which PRs skip.
+    - cron: '17 11 * * *'
+  workflow_dispatch:
+
+# A newer push to the same branch/PR cancels the in-flight run. So does
+# closing or merging the PR: its closed event joins the same group, which is
+# keyed by PR number because a merged PR's closed event runs on the base ref
+# rather than refs/pull/<n>/merge. This needs no token, so it covers fork PRs.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Merging or closing a PR also cancels runs its concurrency group cannot
+  # reach, such as a manual full check started on the PR's branch. Only a
+  # branch in this repository can carry such runs; a fork PR's token is
+  # read-only, and its own runs are cancelled by the concurrency group.
+  cancel-closed-pr-runs:
+    name: cancel runs for closed PR
+    if: >-
+      github.event_name == 'pull_request' && github.event.action == 'closed'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel unfinished CI runs on the PR branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          SELF: ${{ github.run_id }}
+        run: |
+          for status in queued in_progress waiting pending requested; do
+            gh run list --workflow ci.yml --branch "$BRANCH" --status "$status" \
+              --limit 100 --json databaseId --jq '.[].databaseId'
+          done | sort -u | while read -r run; do
+            [ "$run" = "$SELF" ] && continue
+            echo "Cancelling run $run on $BRANCH"
+            gh run cancel "$run" || echo "Run $run already finished"
+          done
+
+  plans:
+    name: plan graph
+    # A closed PR's run only cancels; it never tests.
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    outputs:
+      ios-suite: ${{ steps.ios-scope.outputs.suite }}
+      ios-runner: ${{ steps.ios-runner.outputs.runner }}
+      backend: ${{ steps.backend-scope.outputs.backend }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          # PR merge parents and the entire push range are needed for scope.
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+      - run: npm run plans:check
+      - name: Select iOS coverage
+        id: ios-scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          suite="$(python3 scripts/ci-ios-scope.py --event "$EVENT" --before "$BEFORE")"
+          echo "suite=$suite" >> "$GITHUB_OUTPUT"
+          echo "iOS coverage: $suite"
+      # Only public repositories can start hosted macOS jobs under this policy.
+      # Keep Actions disabled during private preparation. This repository has
+      # no self-hosted runners and never routes work to an owner's computer.
+      - name: Select iOS runner
+        id: ios-runner
+        env:
+          PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          runner=none
+          if [ "$PRIVATE" = false ]; then
+            runner='"macos-15"'
+          fi
+          echo "runner=$runner" >> "$GITHUB_OUTPUT"
+          echo "iOS runner: $runner"
+      # Documentation-only changes skip the backend shards; the plan graph
+      # check above still validates docs/plans.
+      - name: Select backend tests
+        id: backend-scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          backend="$(python3 scripts/ci-ios-scope.py --target backend --event "$EVENT" --before "$BEFORE")"
+          echo "backend=$backend" >> "$GITHUB_OUTPUT"
+          echo "Backend tests: $backend"
+
+  ios-tests:
+    # Keep this name a plain literal. GitHub appends the matrix values only to
+    # a name without an expression, giving one distinct check per shard such
+    # as "iOS (full, 3)" or "iOS (smoke, 1)". A skipped job never expands its
+    # matrix and shows just "iOS".
+    name: iOS
+    needs: plans
+    # Standard hosted capacity for a public repository; no private macOS spend.
+    if: needs.plans.outputs.ios-runner != 'none' && needs.plans.outputs.ios-suite != 'skip'
+    runs-on: ${{ fromJSON(needs.plans.outputs.ios-runner) }}
+    # Smoke (one iPhone job: build plus unit tests) gates PRs within 30
+    # minutes. Full runs, the release check, add the UI suite, the device jobs and get headroom for slow hosted
+    # runners rather than room for more tests; a hang still stops.
+    timeout-minutes: ${{ needs.plans.outputs.ios-suite == 'full' && 40 || 30 }}
+    strategy:
+      fail-fast: false
+      # Each hosted shard gets its own disposable machine.
+      max-parallel: 9
+      matrix: ${{ fromJSON(needs.plans.outputs.ios-suite == 'full' && '{"suite":["full"],"shard":[1, 2, 3, 4, 5, 6, "station", "app-store-iphone", "app-store-ipad"]}' || '{"suite":["smoke"],"shard":[1]}') }}
+    env:
+      IOS_UI_SUITE: ${{ needs.plans.outputs.ios-suite }}
+      IOS_KEEP_RESULTS: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Select Xcode
+        shell: bash
+        run: |
+          echo "DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+      # Device-job test lists live in .github/ios-tests/; editing one, or
+      # ci.yml, runs the full release check on that PR.
+      - name: Install pinned XcodeGen
+        shell: bash
+        run: |
+          generator_dir="$(mktemp -d "$RUNNER_TEMP/xcodegen.XXXXXX")"
+          trap 'rm -rf "$generator_dir"' EXIT
+          # XcodeGen 2.45.3's immutable release asset; the browser download
+          # endpoint can return 504 while this official API remains available.
+          curl --fail --location --silent --show-error -H 'Accept: application/octet-stream' \
+            https://api.github.com/repos/yonaskolb/XcodeGen/releases/assets/370842625 \
+            -o "$generator_dir/xcodegen.zip"
+          echo "0c90f4d28ca57335f9fa78cf5bf6dabfe20a232036dabe36de2eef79cb7c0878  $generator_dir/xcodegen.zip" | shasum -a 256 -c -
+          unzip -q "$generator_dir/xcodegen.zip" -d "$generator_dir"
+          mkdir -p "$RUNNER_TEMP/tres-fort-tools"
+          cp -R "$generator_dir/xcodegen" "$RUNNER_TEMP/tres-fort-tools/"
+          echo "$RUNNER_TEMP/tres-fort-tools/xcodegen/bin" >> "$GITHUB_PATH"
+      # The pinned MediaPipe archives and model (checksummed on use by
+      # ios/Dependencies/setup_mediapipe.py) download once per lock file.
+      - name: Restore MediaPipe downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .artifacts/mediapipe-downloads
+          key: mediapipe-${{ hashFiles('ios/Dependencies/mediapipe.lock.json') }}
+      - name: Verify App Store packaging without downloads
+        if: matrix.shard == 'app-store-iphone'
+        run: python3 test/app-store-packaging.test.py
+      - name: Unsigned simulator build and tests
+        if: matrix.shard != 'station' && matrix.shard != 'app-store-iphone' && matrix.shard != 'app-store-ipad'
+        run: npm run ios:verify -- --runtime com.apple.CoreSimulator.SimRuntime.iOS-26-2 --device com.apple.CoreSimulator.SimDeviceType.iPhone-17 --ui-suite "$IOS_UI_SUITE" --ci-shard ${{ matrix.shard }}
+      - name: iPhone App Store build and tests
+        if: matrix.shard == 'app-store-iphone'
+        env:
+          APP_STORE_BUILD: '1'
+        run: npm run ios:verify -- --runtime com.apple.CoreSimulator.SimRuntime.iOS-26-2 --device com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro --only-testing-file .github/ios-tests/app-store-iphone.txt
+      - name: iPad App Store build and tests
+        if: matrix.shard == 'app-store-ipad'
+        env:
+          APP_STORE_BUILD: '1'
+        run: npm run ios:verify -- --runtime com.apple.CoreSimulator.SimRuntime.iOS-26-2 --device com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M4-8GB --only-testing-file .github/ios-tests/app-store-ipad.txt
+      - name: iPad Station build and tests
+        if: matrix.shard == 'station'
+        run: npm run ios:verify -- --runtime com.apple.CoreSimulator.SimRuntime.iOS-26-2 --device com.apple.CoreSimulator.SimDeviceType.iPad-A16 --only-testing-file .github/ios-tests/station.txt
+      # Keep results only from a job that failed or was cancelled, for three
+      # days: a passing full run uploaded about 1 GB, and the account's free
+      # Actions storage is 0.5 GB. An upload refused for storage (a $0
+      # Actions budget) must not turn the job red.
+      - name: Retain screenshots and test results of a failed job
+        if: failure() || cancelled()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ios-${{ needs.plans.outputs.ios-suite }}-${{ matrix.shard }}
+          path: .artifacts/ios
+          include-hidden-files: true
+          retention-days: 3
+      - name: Clean verification tools
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/tres-fort-tools"
+
+  ios:
+    name: iOS build + tests
+    needs: [plans, ios-tests]
+    # Missing runner capacity must not masquerade as passing iOS coverage.
+    if: always() && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every iOS shard
+        env:
+          RESULT: ${{ needs.ios-tests.result }}
+          SCOPE_RESULT: ${{ needs.plans.result }}
+          SUITE: ${{ needs.plans.outputs.ios-suite }}
+          RUNNER: ${{ needs.plans.outputs.ios-runner }}
+        run: |
+          test "$SCOPE_RESULT" = success
+          case "$SUITE" in
+            skip) test "$RESULT" = skipped ;;
+            smoke|full)
+              if [ "$RUNNER" = none ]; then
+                echo '::error::Required iOS coverage is unavailable while the repository is private. This workflow never uses self-hosted runners or starts private hosted macOS jobs.'
+                exit 1
+              fi
+              test "$RESULT" = success ;;
+            *) exit 1 ;;
+          esac
+
+  backend-tests:
+    # GitHub appends the shard: "backend tests (1)".
+    name: backend tests
+    needs: plans
+    if: needs.plans.outputs.backend == 'run'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verification command failure and cleanup checks
+        run: |
+          python3 test/verify-ios.test.py
+          python3 -B -O test/app-store-assets.test.py
+          python3 -B test/ci-ios-scope.test.py
+          node --test test/contributor-rights.test.mjs
+          python3 -B test/release-assets.test.py
+          python3 -B test/stop-ios-verification.test.py
+          python3 -B test/mediapipe-dependencies.test.py
+          ruby test/submit-for-review.test.rb
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # vitest-pool-workers runs the suite in-process against an ephemeral
+      # D1 in the workerd runtime — no deployed Worker, no real secrets
+      # (vitest.config.ts injects test values). Pure Linux runner.
+      - name: Test
+        run: npm test -- --shard=${{ matrix.shard }}/3
+
+  backend:
+    name: typecheck + tests
+    needs: [plans, backend-tests]
+    if: always() && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every backend shard
+        env:
+          RESULT: ${{ needs.backend-tests.result }}
+          SCOPE_RESULT: ${{ needs.plans.result }}
+          BACKEND: ${{ needs.plans.outputs.backend }}
+        run: |
+          test "$SCOPE_RESULT" = success
+          case "$BACKEND" in
+            skip) test "$RESULT" = skipped ;;
+            run) test "$RESULT" = success ;;
+            *) exit 1 ;;
+          esac

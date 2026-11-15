@@ -1,0 +1,844 @@
+import SwiftUI
+import HealthKit
+
+/// On-device Apple Health (HealthKit) reader + pusher.
+///
+/// HealthKit lives ONLY on the phone — the Cloudflare Worker can never read it
+/// (`docs/MULTISOURCE-INGESTION.md` §2.5). So unlike the intervals.icu PULL
+/// (server-side), this is a client PUSH: we read `HKWorkout`s and POST each to
+/// `POST /api/activities/healthkit`, where they land in the SAME
+/// `external_activities` cache the intervals sync writes (`source='healthkit'`).
+/// That means they ride `/api/state` and the personal calendar with zero new
+/// sync surface, and the backend's source-scoped reconcile (migration 0027)
+/// never tombstones them.
+///
+/// Design choices that matter:
+///   * **Anchored foreground sync is the source of truth.** An
+///     `HKAnchoredObjectQuery` does a full backfill on first connect (HealthKit
+///     retains years of history) and an incremental delta thereafter, keyed by a
+///     persisted anchor. An `HKObserverQuery` + background delivery is layered on
+///     for opportunistic near-real-time, but it is documented-as-flaky and does
+///     not fire when the app is force-quit — so we never rely on it alone.
+///   * **"Connected" is OUR flag, not a HealthKit truth.** Apple deliberately
+///     hides read-authorization status (you cannot tell if a read was denied),
+///     so we record the user's intent (`enabled`) when they tap Connect and the
+///     authorization sheet returns. Reads that come back empty degrade
+///     gracefully (no HR → the coach still gets duration).
+///   * **Idempotent push.** The id we send is `HKWorkout.uuid` — the server PK
+///     embeds it, so a re-push (a later anchored pass re-seeing the same
+///     workout, or a HealthKit revision of its totals) lands on ON CONFLICT and
+///     updates in place instead of duplicating.
+@MainActor
+final class HealthKitSyncModel: ObservableObject {
+    let weight: BodyWeightModel
+    /// False on iPad / unsupported hardware. Gate every HealthKit call on this.
+    let isAvailable: Bool = HKHealthStore.isHealthDataAvailable()
+
+    static let legacyEnabledKey = AccountLocalState.legacyHealthEnabledKey
+    static let legacyAnchorKey = AccountLocalState.legacyHealthAnchorKey
+
+    static func enabledKey(userID: String) -> String {
+        AccountLocalState.healthEnabledKey(userID: userID)
+    }
+
+    static func anchorKey(userID: String) -> String {
+        AccountLocalState.healthAnchorKey(userID: userID)
+    }
+
+    /// User intent — the only durable "is Apple Health connected" signal we
+    /// have (Apple hides read-auth status). Drives the Connections UI and gates
+    /// background sync. Persisted so it survives relaunch; reset on disconnect.
+    @Published var enabled: Bool
+    @Published private(set) var anchorResetPending: Bool
+    private(set) var syncGeneration: UInt64 = 0
+
+    @Published private(set) var isSyncing = false
+    @Published private(set) var lastSyncedAt: Date?
+    @Published var lastError: String?
+
+    /// Bridge to the personal calendar: after a sync persists rows, the owner
+    /// (MainTabView) refreshes SyncModel so the new HealthKit activities surface
+    /// on the calendar/agenda (they ride `/api/state` external_activities).
+    /// Mirrors `GroupModel.onActivityPersisted` — peers, no shared state.
+    var onActivitiesPersisted: (() async -> Void)?
+
+    private let store = HKHealthStore()
+    private let api = APIClient()
+    private unowned let auth: AuthModel
+    private let accountID: String?
+    private let defaults: LocalPersistence
+    private let storageGeneration: UInt64
+
+    /// Held so we can stop it on disconnect / sign-out.
+    private var observerQuery: HKObserverQuery?
+
+    init(auth: AuthModel, defaults: LocalPersistence = .standard,
+         weightReader: (any BodyWeightReading)? = nil, now: @escaping () -> Date = Date.init) {
+        self.weight = BodyWeightModel(auth: auth, defaults: defaults, reader: weightReader, now: now)
+        self.auth = auth
+        self.accountID = auth.userID
+        self.defaults = defaults
+        self.storageGeneration = defaults.recoveryGeneration
+        if let userID = auth.userID {
+            AccountLocalState.bindLegacyState(userID: userID, defaults: defaults)
+            self.enabled = defaults.bool(forKey: Self.enabledKey(userID: userID))
+            self.anchorResetPending = defaults.bool(forKey: AccountLocalState.healthResetPendingKey(userID: userID))
+        } else {
+            self.enabled = false
+            self.anchorResetPending = false
+        }
+    }
+
+    private var currentJWT: String? {
+        guard !auth.isReviewAccount else { return nil }
+        guard let accountID, auth.userID == accountID,
+              defaults.recoveryGeneration == storageGeneration else { return nil }
+        return auth.featureJWT
+    }
+
+    private func isCurrentAccount(using jwt: String) -> Bool {
+        currentJWT == jwt
+    }
+
+    private func isCurrentSync(using jwt: String, generation: UInt64) -> Bool {
+        enabled && !anchorResetPending && generation == syncGeneration && isCurrentAccount(using: jwt)
+    }
+
+    private var isCurrentBoundAccount: Bool {
+        guard let accountID, auth.userID == accountID else { return false }
+        return auth.featureJWT != nil
+    }
+
+    // MARK: - Read scope
+
+    /// Read-only scope. Workouts are the spine; HR/energy/distance enrich each
+    /// one (HR is NOT a workout property — it's queried separately by time
+    /// range), a run's or open-water swim's route draws its map
+    /// (run-recorder P6(b)), stroke counts fill a swim's lengths and the effort
+    /// score scores a workout with no measured load (sport-activities P4, P5).
+    /// We never request write access (`toShare: []`).
+    private var readTypes: Set<HKObjectType> {
+        var t: Set<HKObjectType> = [HKObjectType.workoutType(), HKSeriesType.workoutRoute()]
+        let ids: [HKQuantityTypeIdentifier] = [
+            .heartRate, .activeEnergyBurned,
+            .distanceWalkingRunning, .distanceCycling, .distanceSwimming,
+            .cyclingPower, .swimmingStrokeCount,
+        ]
+        for id in ids {
+            if let q = HKObjectType.quantityType(forIdentifier: id) { t.insert(q) }
+        }
+        // Apple Watch's workout effort score (sport-activities P5), iOS 18+.
+        for type in HealthEffortScore.readTypes { t.insert(type) }
+        return t
+    }
+
+    // MARK: - Connect / disconnect
+
+    /// Request HealthKit read access, mark connected, register the observer,
+    /// and kick the first (full-backfill) sync. Apple hides read denial, so a
+    /// returned-but-denied authorization still flips `enabled` — empty reads
+    /// just produce thin rows. Throwing here means the user dismissed or the
+    /// system errored before any prompt.
+    ///
+    /// The backfill sync is fired-and-forgotten on purpose: the FIRST sync reads
+    /// the user's whole workout history and pushes each one sequentially (an HR
+    /// query + a network POST per workout), which can take many seconds. We do
+    /// NOT `await` it here so `connect()` returns the instant authorization
+    /// completes — the UI flips to "Connected" immediately and surfaces the
+    /// ongoing import via `isSyncing` ("Syncing…"), instead of leaving the
+    /// connect spinner spinning through the whole backfill (which read as a
+    /// hang/failure).
+    func connect() async {
+        guard !anchorResetPending else {
+            lastError = "Finish resetting Apple Health before connecting again."
+            return
+        }
+        guard isAvailable else {
+            lastError = "Apple Health isn’t available on this device."
+            return
+        }
+        guard let jwt = currentJWT else { return }
+        let generation = syncGeneration
+        do {
+            try await store.requestAuthorization(toShare: [], read: readTypes)
+        } catch {
+            lastError = "Couldn’t access Apple Health. \(error.localizedDescription)"
+            return
+        }
+        guard generation == syncGeneration, isCurrentAccount(using: jwt) else { return }
+        enabled = true
+        if let accountID {
+            defaults.set(true, forKey: Self.enabledKey(userID: accountID))
+        }
+        lastError = nil
+        registerObserver()
+        Task { await sync() }
+    }
+
+    /// Stop syncing Apple Health. Clears intent + the anchor + the observer.
+    /// Does NOT delete already-pushed rows — that's a server-side purge concern
+    /// (and the coach keeps the history). A later reconnect re-backfills from a
+    /// fresh anchor; the idempotent push means re-seen workouts just no-op.
+    func disconnect() {
+        guard let accountID, auth.userID == accountID,
+              defaults.recoveryGeneration == storageGeneration else { return }
+        syncGeneration &+= 1
+        enabled = false
+        defaults.set(false, forKey: Self.enabledKey(userID: accountID))
+        anchorResetPending = true
+        defaults.set(true, forKey: AccountLocalState.healthResetPendingKey(userID: accountID))
+        if let q = observerQuery {
+            store.stop(q)
+            observerQuery = nil
+        }
+        if isAvailable {
+            store.disableAllBackgroundDelivery { _, _ in }
+        }
+        lastSyncedAt = nil
+        // Reconnecting looks for every run's route again, in case route
+        // access was granted in between.
+        defaults.removeObject(forKey: AccountLocalState.healthRoutesKey(userID: accountID))
+        if defaults.resetHealthAnchors(userID: accountID) {
+            anchorResetPending = false
+            defaults.removeObject(forKey: AccountLocalState.healthResetPendingKey(userID: accountID))
+            lastError = nil
+        } else {
+            lastError = "Apple Health is disconnected. Retry the reset after unlocking your iPhone and checking its storage."
+        }
+    }
+
+    // MARK: - Lifecycle hooks (called by MainTabView)
+
+    /// Called on launch + foreground. No-op unless connected; otherwise
+    /// (re)registers the observer and kicks an incremental sync.
+    func start() {
+        guard enabled, !anchorResetPending, isAvailable, currentJWT != nil else { return }
+        registerObserver()
+        Task {
+            await requestAddedReadTypes()
+            await sync()
+        }
+    }
+
+    /// A member connected before a read type was added (cycling power, for
+    /// training load; stroke counts and effort scores, for swims) is asked
+    /// once for the new type; HealthKit shows the
+    /// sheet only when something is still undecided.
+    private func requestAddedReadTypes() async {
+        guard let status = try? await store.statusForAuthorizationRequest(toShare: [], read: readTypes),
+              status == .shouldRequest else { return }
+        try? await store.requestAuthorization(toShare: [], read: readTypes)
+    }
+
+    /// Explicitly disconnect this account's HealthKit state. Ordinary sign-out
+    /// and same-user reauthentication retain the account-scoped values.
+    func reset() {
+        disconnect()
+    }
+
+    // MARK: - Sync
+
+    /// Page size for the anchored query. Bounds the first-connect backfill (which
+    /// can be years of mirrored history) into checkpointable chunks.
+    private static let pageLimit = 250
+
+    /// Pull new/changed workouts since the stored anchor and push each, paging
+    /// so a large backfill is checkpointable. The anchor advances ONLY after a
+    /// whole page has been pushed successfully — so an interrupted sync resumes
+    /// at the last fully-pushed page, not from zero, and a failed push mid-page
+    /// leaves that page's anchor put for a clean retry (the push is idempotent,
+    /// so re-sending already-saved rows is harmless).
+    func sync() async {
+        guard enabled, !anchorResetPending, isAvailable, let jwt = currentJWT, !isSyncing else { return }
+        let generation = syncGeneration
+        isSyncing = true
+        var persistedAny = false
+        defer {
+            isSyncing = false
+            // A push can commit just before the bearer/session changes. Do not
+            // mutate this retired model's anchor or UI, but still notify the
+            // replacement same-account calendar exactly once for the run.
+            if persistedAny && isCurrentBoundAccount {
+                let callback = onActivitiesPersisted
+                Task { await callback?() }
+            }
+        }
+        var anchor = loadAnchor()
+        guard !defaults.hasFailure(userID: accountID) else {
+            lastError = "Apple Health sync is paused until saved data can be read."
+            return
+        }
+        let hadStoredAnchor = anchor != nil
+        var pushedAny = false
+        // A workout whose detail read failed (streams, a swim's lengths, the
+        // effort score) went out without it; the one-time passes must then
+        // still run.
+        var missedStreams = false
+        do {
+            while true {
+                guard isCurrentSync(using: jwt, generation: generation) else { return }
+                let (workouts, newAnchor) =
+                    try await fetchNewWorkouts(anchor: anchor, limit: Self.pageLimit)
+                guard isCurrentSync(using: jwt, generation: generation) else { return }
+                if workouts.isEmpty {
+                    // Only checkpoint an empty result once we KNOW reads work —
+                    // i.e. we already had a stored anchor, or we've pushed a page
+                    // this run. On the very FIRST sync HealthKit reports a DENIED
+                    // workout read as an empty set (not an error), so persisting
+                    // that anchor would skip the historical backfill if the user
+                    // later grants permission in Settings. Leaving it unset means
+                    // the next sync retries from scratch and backfills.
+                    if (hadStoredAnchor || pushedAny), let newAnchor {
+                        guard saveAnchor(newAnchor, generation: generation) else { return }
+                        anchor = newAnchor
+                    }
+                    break
+                }
+                for w in workouts {
+                    let body = await buildPush(for: w)
+                    guard isCurrentSync(using: jwt, generation: generation) else { return }
+                    _ = try await api.pushHealthKitActivity(body, jwt: jwt)
+                    persistedAny = true
+                    if body.missedDetail { missedStreams = true }
+                }
+                // Whole page pushed — checkpoint the anchor before the next page.
+                guard isCurrentSync(using: jwt, generation: generation) else { return }
+                if let newAnchor {
+                    guard saveAnchor(newAnchor, generation: generation) else { return }
+                    anchor = newAnchor
+                }
+                pushedAny = true
+                if workouts.count < Self.pageLimit { break } // last page
+            }
+            guard isCurrentSync(using: jwt, generation: generation) else { return }
+            if try await backfillStreamsIfNeeded(jwt: jwt, generation: generation,
+                                                 fullImport: !hadStoredAnchor && !missedStreams) {
+                persistedAny = true
+            }
+            guard isCurrentSync(using: jwt, generation: generation) else { return }
+            if try await sendRunRoutes(jwt: jwt, generation: generation) {
+                persistedAny = true
+            }
+            guard isCurrentSync(using: jwt, generation: generation) else { return }
+            lastSyncedAt = Date()
+            lastError = nil
+        } catch let APIError.http(code, _) where code == 401 {
+            // Token died mid-sync — let AuthModel handle it. Anchor is already
+            // checkpointed at the last good page, so a re-auth resumes cleanly.
+            if isCurrentSync(using: jwt, generation: generation) {
+                auth.requireReauthentication()
+            }
+        } catch {
+            if isCurrentSync(using: jwt, generation: generation) {
+                lastError = "Apple Health sync didn’t finish. It’ll retry."
+            }
+        }
+    }
+
+    /// How far back the one-time detail pass reaches.
+    static let streamsBackfillDays = 365
+
+    /// Runs and rides imported before the app sent detail streams are pushed
+    /// again, once, with their heart-rate and power samples so they get a
+    /// stream-based load; a second pass does the same, once, for the other
+    /// sports scored from heart rate (sport-activities P1), and a third for
+    /// every workout, whose heart rate the server now keeps for its chart
+    /// (run-detail-charts P3); a fourth sends swims' detail (sport-activities
+    /// P4), another rides' power, which the server now keeps for their power
+    /// chart (run-detail-charts P7), and a last every workout's Apple Watch
+    /// effort score (P5), which
+    /// runs only on iOS 18 and later, so a member who upgrades still gets
+    /// it. A sync that started without an anchor has just pushed everything
+    /// with streams, so it only records the passes as done. A failed detail read leaves a pass
+    /// pending, so a later sync retries it; workouts the anchor already passed
+    /// would otherwise never be read again. Returns whether anything was pushed.
+    private func backfillStreamsIfNeeded(jwt: String, generation: UInt64,
+                                         fullImport: Bool) async throws -> Bool {
+        guard let accountID else { return false }
+        let enduranceKinds: Set<String> = ["run", "ride"]
+        var passes: [(key: String, includes: (HKWorkout) -> Bool)] = [
+            (AccountLocalState.healthStreamsBackfillKey(userID: accountID), { w in
+                enduranceKinds.contains(Self.kind(for: w.workoutActivityType))
+            }),
+            (AccountLocalState.healthSportStreamsBackfillKey(userID: accountID), { w in
+                !enduranceKinds.contains(Self.kind(for: w.workoutActivityType))
+                    && Sports.scoresHeartRate(Sports.sport(for: w.workoutActivityType))
+            }),
+            (AccountLocalState.healthHeartRateBackfillKey(userID: accountID), { _ in true }),
+            // Swims' pool, lengths and strokes (sport-activities P4).
+            (AccountLocalState.healthSwimBackfillKey(userID: accountID), { w in
+                Self.kind(for: w.workoutActivityType) == "swim"
+            }),
+            // Rides' power, which the server now keeps (run-detail-charts P7).
+            (AccountLocalState.healthPowerBackfillKey(userID: accountID), { w in
+                Self.kind(for: w.workoutActivityType) == "ride"
+            }),
+        ]
+        // Every workout's Apple Watch effort score (P5), only where iOS has
+        // it: before iOS 18 the pass stays pending for after an upgrade.
+        if HealthEffortScore.isAvailable {
+            passes.append((key: AccountLocalState.healthEffortBackfillKey(userID: accountID), includes: { _ in true }))
+        }
+        var pushed = false
+        var recent: [HKWorkout]?
+        for pass in passes where !defaults.bool(forKey: pass.key) {
+            var complete = true
+            if !fullImport {
+                if recent == nil {
+                    let since = Calendar.current.date(
+                        byAdding: .day, value: -Self.streamsBackfillDays, to: Date()) ?? Date()
+                    recent = try await fetchWorkouts(since: since)
+                }
+                for w in recent ?? [] where pass.includes(w) {
+                    guard isCurrentSync(using: jwt, generation: generation) else { return pushed }
+                    let body = await buildPush(for: w)
+                    guard isCurrentSync(using: jwt, generation: generation) else { return pushed }
+                    _ = try await api.pushHealthKitActivity(body, jwt: jwt)
+                    pushed = true
+                    if body.missedDetail { complete = false }
+                }
+            }
+            guard complete, isCurrentSync(using: jwt, generation: generation) else { continue }
+            defaults.set(true, forKey: pass.key)
+        }
+        return pushed
+    }
+
+    /// How far back runs' routes are looked for.
+    static let routesLookbackDays = 365
+    /// A run with no route yet is looked at again until it is this old, in
+    /// case the app that recorded it saves the route a little later.
+    static let routeGraceSeconds: TimeInterval = 24 * 3600
+
+    /// Sends the route Apple Health saved with each run another app recorded
+    /// in the last year (run-recorder P6(b)), once: the server keeps it for
+    /// the run's map in the app and on the web. Runs the Tres Fort recorder
+    /// saved are skipped; their recording carries the route. A run whose
+    /// route was sent, or that still has none a day after it ended, is
+    /// remembered and not read again. A failed read, or a run the server
+    /// hasn't stored, is tried on a later sync. Returns whether a route was
+    /// sent.
+    private func sendRunRoutes(jwt: String, generation: UInt64) async throws -> Bool {
+        guard let accountID else { return false }
+        let key = AccountLocalState.healthRoutesKey(userID: accountID)
+        var ledger = HealthRouteLedger(stored: defaults.object(forKey: key))
+        let now = Date()
+        let since = Calendar.current.date(byAdding: .day, value: -Self.routesLookbackDays, to: now) ?? now
+        ledger.prune(before: since)
+        // Open-water swims draw their track too (sport-activities P4); a pool
+        // swim has none.
+        let runs = try await fetchWorkouts(since: since).filter { w in
+            switch Self.kind(for: w.workoutActivityType) {
+            case "run": return !HealthWorkoutRoute.isFromRecorder(w)
+            case "swim": return HealthSwimDetail.location(of: w) != "pool"
+            default: return false
+            }
+        }
+        // Saved after each run, so a sync cut short (the app suspended in
+        // the background) doesn't send the same routes again.
+        func remember(_ w: HKWorkout?) {
+            if let w { ledger.record(w.uuid, start: w.startDate) }
+            if isCurrentSync(using: jwt, generation: generation) { defaults.set(ledger.stored, forKey: key) }
+        }
+        remember(nil)
+        var sent = false
+        for w in runs where !ledger.contains(w.uuid) {
+            guard isCurrentSync(using: jwt, generation: generation) else { return sent }
+            guard let routes = await HealthWorkoutRoute.read(for: w, store: store) else { continue }
+            guard let route = HealthWorkoutRoute.encode(routes) else {
+                if now.timeIntervalSince(w.endDate) > Self.routeGraceSeconds { remember(w) }
+                continue
+            }
+            guard isCurrentSync(using: jwt, generation: generation) else { return sent }
+            do {
+                try await api.putHealthKitRoute(workoutID: w.uuid, route: route, jwt: jwt)
+                sent = true
+                remember(w)
+            } catch let APIError.http(code, _) where code == 404 {
+                continue // The run itself isn't stored yet.
+            } catch let APIError.http(code, _) where code == 400 || code == 422 {
+                // Not a run there, or a route the server can't use: sending
+                // it again won't change that.
+                remember(w)
+            }
+        }
+        return sent
+    }
+
+    // MARK: - HealthKit queries
+
+    /// Every workout that started on or after `since`.
+    private func fetchWorkouts(since: Date) async throws -> [HKWorkout] {
+        try await withCheckedThrowingContinuation { cont in
+            let q = HKSampleQuery(
+                sampleType: HKObjectType.workoutType(),
+                predicate: HKQuery.predicateForSamples(withStart: since, end: nil, options: .strictStartDate),
+                limit: HKObjectQueryNoLimit,
+                sortDescriptors: nil
+            ) { _, samples, error in
+                if let error { cont.resume(throwing: error); return }
+                cont.resume(returning: (samples as? [HKWorkout]) ?? [])
+            }
+            store.execute(q)
+        }
+    }
+
+    /// Every workout sends its heart rate: the Worker scores runs, rides and
+    /// the sports it scores from heart rate (soccer, tennis, hikes, …;
+    /// `Sports.heartRateScored`) from it, and keeps every workout's readings
+    /// for its heart-rate chart (run-detail-charts P3). Other sports get no
+    /// load from it.
+    nonisolated static func hasDetailStreams(kind: String, sport: String? = nil) -> Bool {
+        true
+    }
+
+    /// Heart rate for every workout, plus cycling power for rides. Nil when
+    /// HealthKit fails, so the push omits `streams` and the Worker keeps what
+    /// it stored; an empty result tells it the workout has none.
+    private func detailStreams(for w: HKWorkout, kind: String, sport: String) async -> [String: HealthStream]? {
+        guard Self.hasDetailStreams(kind: kind, sport: sport) else { return nil }
+        let source = w.sourceRevision.source.bundleIdentifier
+        // Readings taken while the workout was paused are not training: its
+        // moving time excludes them, so the streams must too.
+        let paused = HealthWorkoutStreams.pausedRanges(
+            HealthWorkoutStreams.pauseMarks(for: w),
+            duration: w.endDate.timeIntervalSince(w.startDate))
+        var streams: [String: HealthStream] = [:]
+        guard let heartRate = await HealthWorkoutStreams.read(
+            .heartRate, unit: HKUnit.count().unitDivided(by: .minute()),
+            from: w.startDate, to: w.endDate, store: store) else { return nil }
+        streams["heart_rate"] = HealthWorkoutStreams.compact(
+            HealthWorkoutStreams.removing(paused, from: heartRate), preferredSource: source)
+        if kind == "ride" {
+            guard let power = await HealthWorkoutStreams.read(
+                .cyclingPower, unit: .watt(),
+                from: w.startDate, to: w.endDate, store: store) else { return nil }
+            streams["power"] = HealthWorkoutStreams.compact(
+                HealthWorkoutStreams.removing(paused, from: power), preferredSource: source)
+        }
+        return streams
+    }
+
+    /// One-shot anchored fetch over the workout type, up to `limit` samples.
+    /// With no update handler the results handler fires exactly once with the
+    /// next page since `anchor`; re-run with the returned anchor for the next.
+    private func fetchNewWorkouts(
+        anchor: HKQueryAnchor?,
+        limit: Int
+    ) async throws -> ([HKWorkout], HKQueryAnchor?) {
+        try await withCheckedThrowingContinuation { cont in
+            let q = HKAnchoredObjectQuery(
+                type: HKObjectType.workoutType(),
+                predicate: nil,
+                anchor: anchor,
+                limit: limit
+            ) { _, samples, _, newAnchor, error in
+                if let error { cont.resume(throwing: error); return }
+                let workouts = (samples as? [HKWorkout]) ?? []
+                cont.resume(returning: (workouts, newAnchor))
+            }
+            store.execute(q)
+        }
+    }
+
+    /// Average + max heart rate over a workout's time range. HR is a separate
+    /// sample stream, not a workout property. Read denial / no samples → (nil,
+    /// nil): non-fatal, the coach reads duration instead.
+    private func heartRate(during w: HKWorkout) async -> (Double?, Int?) {
+        guard let hrType = HKObjectType.quantityType(forIdentifier: .heartRate) else {
+            return (nil, nil)
+        }
+        let pred = HKQuery.predicateForSamples(
+            withStart: w.startDate, end: w.endDate, options: .strictStartDate)
+        return await withCheckedContinuation { cont in
+            let q = HKStatisticsQuery(
+                quantityType: hrType,
+                quantitySamplePredicate: pred,
+                options: [.discreteAverage, .discreteMax]
+            ) { _, stats, _ in
+                let unit = HKUnit.count().unitDivided(by: .minute())
+                let avg = stats?.averageQuantity()?.doubleValue(for: unit)
+                let mx = stats?.maximumQuantity()?.doubleValue(for: unit)
+                cont.resume(returning: (avg, mx.map { Int($0.rounded()) }))
+            }
+            store.execute(q)
+        }
+    }
+
+    /// Normalize one `HKWorkout` into the push body. `statistics(for:)` is the
+    /// iOS-18-blessed replacement for the deprecated `totalEnergyBurned` /
+    /// `totalDistance` initializer properties.
+    private func buildPush(for w: HKWorkout) async -> HealthKitActivityPush {
+        let kind = Self.kind(for: w.workoutActivityType)
+        let sourceZone = (w.metadata?[HKMetadataKeyTimeZone] as? String).flatMap(TimeZone.init(identifier:))
+        let (date, startLocalMs) = Self.civilDateAndLocalMs(w.startDate, timeZone: sourceZone ?? .current)
+
+        // duration excludes paused time → "moving"; wall-clock span → "elapsed".
+        let movingSec = Int(w.duration.rounded())
+        let elapsedSec = Int(w.endDate.timeIntervalSince(w.startDate).rounded())
+
+        var calories: Int?
+        if let energyType = HKObjectType.quantityType(forIdentifier: .activeEnergyBurned),
+           let kcal = w.statistics(for: energyType)?.sumQuantity()?.doubleValue(for: .kilocalorie()) {
+            calories = Int(kcal.rounded())
+        }
+
+        var distanceM: Double?
+        if let distId = Self.distanceIdentifier(for: w.workoutActivityType),
+           let distType = HKObjectType.quantityType(forIdentifier: distId),
+           let m = w.statistics(for: distType)?.sumQuantity()?.doubleValue(for: .meter()) {
+            distanceM = m
+        }
+
+        let (avgHR, maxHR) = await heartRate(during: w)
+        let sport = Sports.sport(for: w.workoutActivityType)
+        let streams = await detailStreams(for: w, kind: kind, sport: sport)
+
+        let elevationM = (w.metadata?[HKMetadataKeyElevationAscended] as? HKQuantity)?
+            .doubleValue(for: .meter())
+        // A swim's pool, lengths and strokes, and any workout's Apple Watch
+        // effort score (sport-activities P4, P5).
+        var swim: HealthSwimDetail?? = .none
+        if kind == "swim" { swim = await HealthSwimDetail.read(for: w, store: store) }
+        let providerEffort = await HealthEffortScore.read(for: w, store: store)
+
+        // Lightweight provenance so the coach/UI can later say "from Garmin
+        // Connect / Apple Watch". Best-effort — never blocks the push.
+        let sourceName = w.sourceRevision.source.name
+        let raw = Self.encodeRaw([
+            "hk_activity_type": w.workoutActivityType.rawValue,
+            "source": sourceName,
+        ])
+
+        return HealthKitActivityPush(
+            id: w.uuid.uuidString,
+            date: date,
+            start_date_local_ms: startLocalMs,
+            start_date_utc_ms: Int((w.startDate.timeIntervalSince1970 * 1000).rounded()),
+            source_timezone: sourceZone?.identifier,
+            kind: kind,
+            name: Self.displayName(for: w.workoutActivityType, source: sourceName),
+            moving_time_sec: movingSec,
+            elapsed_time_sec: elapsedSec,
+            distance_m: distanceM,
+            average_hr: avgHR,
+            max_hr: maxHR,
+            calories: calories,
+            elevation_gain_m: elevationM,
+            raw: raw,
+            streams: streams,
+            sport: sport,
+            swim: swim,
+            providerEffort: providerEffort)
+    }
+
+    // MARK: - Observer / background delivery
+
+    /// Register the observer once. The handler hops to the main actor, runs an
+    /// incremental sync, then calls `completion()` (required, or iOS throttles
+    /// future deliveries). Background delivery is requested at `.immediate`, but
+    /// true force-quit wakeups would need an AppDelegate registration — out of
+    /// scope; anchored foreground sync is the source of truth.
+    private func registerObserver() {
+        guard isAvailable, observerQuery == nil else { return }
+        let q = HKObserverQuery(
+            sampleType: HKObjectType.workoutType(), predicate: nil
+        ) { [weak self] _, completion, error in
+            guard error == nil else { completion(); return }
+            Task { @MainActor in
+                await self?.sync()
+                completion()
+            }
+        }
+        observerQuery = q
+        store.execute(q)
+        store.enableBackgroundDelivery(
+            for: HKObjectType.workoutType(), frequency: .immediate) { _, _ in }
+    }
+
+    // MARK: - Anchor persistence
+
+    func loadAnchor() -> HKQueryAnchor? {
+        guard let accountID,
+              let data = defaults.data(forKey: Self.anchorKey(userID: accountID))
+        else { return nil }
+        if let anchor = try? NSKeyedUnarchiver.unarchivedObject(ofClass: HKQueryAnchor.self, from: data) {
+            return anchor
+        }
+        defaults.recordInvalidData(data, forKey: Self.anchorKey(userID: accountID))
+        return nil
+    }
+
+    func saveAnchor(_ anchor: HKQueryAnchor, generation: UInt64) -> Bool {
+        guard let accountID,
+              auth.userID == accountID,
+              let jwt = auth.featureJWT,
+              isCurrentSync(using: jwt, generation: generation) else { return false }
+        guard let data = try? NSKeyedArchiver.archivedData(
+            withRootObject: anchor, requiringSecureCoding: true) else {
+            defaults.recordWriteFailure(forKey: Self.anchorKey(userID: accountID))
+            return false
+        }
+        let saved = defaults.set(data, forKey: Self.anchorKey(userID: accountID))
+        if !saved { lastError = "Apple Health sync is paused until saved data can be written." }
+        return saved
+    }
+
+    // MARK: - Mapping (keep the kind vocab in sync with backend kindOf)
+
+    /// Map an `HKWorkoutActivityType` to our coarse kind. CRITICAL: these must
+    /// match the strings `kindOf` emits in `src/intervals.ts` (ride/run/swim/
+    /// walk/hike/row/ski/yoga/elliptical/strength/other) — the backend's
+    /// cross-source dedup (`dedupeHealthKitAgainstIntervals`) matches a
+    /// HealthKit row to an intervals row on `kind` + start-within-2-min, so a
+    /// mismatch (e.g. "cycling" vs "ride") would double-count the same ride.
+    static func kind(for t: HKWorkoutActivityType) -> String {
+        switch t {
+        case .cycling: return "ride"
+        case .running: return "run"
+        case .swimming: return "swim"
+        case .walking: return "walk"
+        case .hiking: return "hike"
+        case .rowing: return "row"
+        case .downhillSkiing, .crossCountrySkiing, .snowSports: return "ski"
+        case .yoga: return "yoga"
+        case .elliptical: return "elliptical"
+        case .traditionalStrengthTraining, .functionalStrengthTraining: return "strength"
+        default: return "other"
+        }
+    }
+
+    /// Which distance series to sum for a workout type (nil → no distance).
+    private static func distanceIdentifier(
+        for t: HKWorkoutActivityType
+    ) -> HKQuantityTypeIdentifier? {
+        switch t {
+        case .cycling: return .distanceCycling
+        case .swimming: return .distanceSwimming
+        case .running, .walking, .hiking: return .distanceWalkingRunning
+        default: return nil
+        }
+    }
+
+    /// A friendly default title (the backend keeps it verbatim; nil → it falls
+    /// back to the capitalized kind).
+    private static func displayName(for t: HKWorkoutActivityType, source: String) -> String {
+        if let sport = Sports.named(Sports.sport(for: t)) { return sport.label }
+        switch kind(for: t) {
+        case "ride": return "Ride"
+        case "run": return "Run"
+        case "swim": return "Swim"
+        case "walk": return "Walk"
+        case "hike": return "Hike"
+        case "row": return "Row"
+        case "ski": return "Ski"
+        case "yoga": return "Yoga"
+        case "elliptical": return "Elliptical"
+        case "strength": return "Strength"
+        default: return "Workout"
+        }
+    }
+
+    /// Civil date (`YYYY-MM-DD`, device-local) + start time as a UTC epoch-ms of
+    /// the LOCAL wall clock. The ms representation deliberately matches
+    /// intervals.icu's `start_date_local` (which the backend parses as if UTC),
+    /// so the cross-source dedup lines the same ride up across sources. Using a
+    /// raw `timeIntervalSince1970` instead would be off by the tz offset and the
+    /// 2-minute dedup window would miss the match.
+    /// Prefer the workout's recorded timezone. Without it the first ingest uses
+    /// the current zone; the server retains that first civil date on retries.
+    static func civilDateAndLocalMs(_ start: Date, timeZone: TimeZone = .current) -> (String, Int) {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = timeZone
+        f.dateFormat = "yyyy-MM-dd"
+        let date = f.string(from: start)
+        let offset = timeZone.secondsFromGMT(for: start)
+        let localMs = Int((start.timeIntervalSince1970 * 1000).rounded()) + offset * 1000
+        return (date, localMs)
+    }
+
+    private static func encodeRaw(_ dict: [String: Any]) -> String? {
+        guard let data = try? JSONSerialization.data(withJSONObject: dict),
+              let s = String(data: data, encoding: .utf8) else { return nil }
+        return s
+    }
+}
+
+/// Push body for `POST /api/activities/healthkit`. Field names match the
+/// backend `HealthKitActivityInput` 1:1. `id` (= HKWorkout.uuid) is the
+/// idempotency key; nil numeric fields are omitted (server treats absent as
+/// null). `training_load` / `intensity` are intentionally absent — HealthKit
+/// has no native TSS and the backend leaves them NULL (no fabricated load).
+struct HealthKitActivityPush {
+    let id: String
+    let date: String
+    let start_date_local_ms: Int?
+    let start_date_utc_ms: Int?
+    let source_timezone: String?
+    let kind: String
+    let name: String?
+    let moving_time_sec: Int?
+    let elapsed_time_sec: Int?
+    let distance_m: Double?
+    let average_hr: Double?
+    let max_hr: Int?
+    let calories: Int?
+    let elevation_gain_m: Double?
+    let raw: String?
+    /// Heart-rate and power samples for a run, ride or heart-rate-scored sport
+    /// (`heart_rate`, `power`). Nil omits the key, so the Worker keeps what it
+    /// stored; empty says the workout has none.
+    var streams: [String: HealthStream]? = nil
+    /// The workout's sport (`Sports`). Not sent: the Worker reads it from
+    /// `raw`. It decides whether streams were expected.
+    var sport: String? = nil
+    /// A swim's detail (sport-activities P4). `.none` omits the key, so the
+    /// Worker keeps what it stored; `.some(nil)` says the swim saved none.
+    var swim: HealthSwimDetail?? = .none
+    /// Apple Watch's effort score (P5), the same way.
+    var providerEffort: Double?? = .none
+
+    /// A workout scored from streams whose detail read failed, so it carries none.
+    var missedStreams: Bool {
+        streams == nil && HealthKitSyncModel.hasDetailStreams(kind: kind, sport: sport)
+    }
+
+    /// A swim whose detail read failed, so it carries none.
+    var missedSwim: Bool {
+        kind == "swim" && swim == nil
+    }
+
+    /// An effort score read that failed on an iOS that has the score.
+    var missedEffort: Bool {
+        providerEffort == nil && HealthEffortScore.isAvailable
+    }
+
+    /// Any detail read failed, so the one-time passes must still send it.
+    var missedDetail: Bool {
+        missedStreams || missedSwim || missedEffort
+    }
+
+    /// JSON body for `APIClient.post`. Required keys always present; optionals
+    /// omitted when nil (the endpoint maps absent → null identically).
+    var jsonBody: [String: Any] {
+        var b: [String: Any] = ["id": id, "date": date, "kind": kind]
+        if let v = start_date_local_ms { b["start_date_local_ms"] = v }
+        if let v = start_date_utc_ms { b["start_date_utc_ms"] = v }
+        if let v = source_timezone { b["source_timezone"] = v }
+        if let v = name { b["name"] = v }
+        if let v = moving_time_sec { b["moving_time_sec"] = v }
+        if let v = elapsed_time_sec { b["elapsed_time_sec"] = v }
+        if let v = distance_m { b["distance_m"] = v }
+        if let v = average_hr { b["average_hr"] = v }
+        if let v = max_hr { b["max_hr"] = v }
+        if let v = calories { b["calories"] = v }
+        if let v = elevation_gain_m { b["elevation_gain_m"] = v }
+        if let v = raw { b["raw"] = v }
+        if let v = streams { b["streams"] = HealthWorkoutStreams.jsonBody(v) }
+        if case .some(let detail) = swim { b["swim"] = detail.map { $0.jsonBody as Any } ?? NSNull() }
+        if case .some(let score) = providerEffort { b["provider_effort"] = score.map { $0 as Any } ?? NSNull() }
+        return b
+    }
+}

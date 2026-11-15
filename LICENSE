@@ -1,0 +1,99 @@
+# Très Fort Source-Available License
+
+Version 1.0 · 2026-11-15
+
+## Covered material and licensor
+
+Copyright © 2026 Nicholas Marks and the respective copyright holders.
+Nicholas Marks personally is the “Licensor”; an authorized successor may take
+that role under the transfer provision below. All other rights are reserved.
+
+“Project” means all original code, documentation, configuration, tests, fixtures
+and assets in the official repository, https://github.com/namarks/tres-fort-training,
+and copies and modifications of that material, except material expressly
+identified as excluded or separately licensed. No separate coverage notice is
+required for original repository material. This grant covers only rights the
+Licensor owns or is authorized to sublicense.
+Separately licensed third-party components remain under their own terms; this
+license neither replaces those terms nor grants rights their owners have withheld.
+The materials identified in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md),
+including the CC BY-SA exercise drawings and the OFL fonts, are excluded from
+this license's restrictions and remain subject to their respective terms.
+
+## Permitted evaluation and contribution
+
+Subject to compliance with every condition of this license, the Licensor grants
+a worldwide, non-exclusive, royalty-free copyright license to inspect, reproduce,
+modify, build, run and test the Project solely for technical evaluation, bug
+reproduction, or preparing and reviewing contributions to the official Project.
+Technical evaluation means examining or testing software behavior and suitability,
+not relying on a self-built installation for ordinary personal or business use.
+
+These activities may use local computers or hosted development and CI systems
+under your control or acting on your behalf. You may create source forks,
+branches, patches and pull requests on GitHub for proposed contributions, and
+share synthetic screenshots and necessary build/test artifacts through those
+contribution workflows. Artifact sharing is for verification, not app releases
+or distribution to end users. Preserve copyright, license and attribution notices.
+Use only data and services you are authorized to use; contribution examples and
+shared evidence must use synthetic data and contain no private support records.
+
+Except for the permissions above, incorporating Project material into another
+product, distributing app binaries or derivative products, or operating a service
+based on the Project requires separate written permission. Routine personal
+training with a self-built or self-hosted installation is production use even
+if free and used by only one person; it also requires separate written permission.
+Use of the official distributed app is governed by its applicable app/service
+terms, not this source license. Permission for one use does not authorize others.
+
+This is a restricted source-available license, not an open-source license.
+It grants no access to official infrastructure, customer data, developer accounts,
+signing credentials or production services, and no authority to release the app.
+Nothing here limits rights independently granted under applicable GitHub terms
+or rights that cannot be restricted under applicable law.
+
+## Limited patent permission and branding
+
+For the same permitted purposes only, the Licensor also grants a non-exclusive,
+worldwide, royalty-free patent license to make, have made and use the Project
+under claims the Licensor owns or may sublicense that are necessarily infringed
+by the Project version as supplied. Modifying or combining it does not extend
+this grant to additional patent claims. This grants no patent permission for
+production operation, sale or end-user distribution.
+
+Copyright permission to reproduce original assets for the permitted workflow
+does not confer general trademark rights. The Tres Fort name, logos and app
+identity may appear in authorized testing, synthetic screenshots and contributions
+to identify the Project. No right is granted to market another app or service
+under that identity or imply official endorsement.
+
+## Contributions, compliance and duration
+
+Contributions require the [contributor terms](CONTRIBUTOR-TERMS.md) and their
+[recorded acceptance process](docs/CONTRIBUTOR-ACCEPTANCE.md). Contributors
+retain copyright; acceptance does not transfer their ownership unless a separate
+written assignment expressly does so.
+
+Every restriction and notice requirement above is a condition of these grants.
+If you breach a condition, permissions under this license terminate and you must
+stop activities that rely on them. For a first breach, permissions automatically
+resume when you remedy it before written notice, or within 30 days after receiving
+written notice from the Licensor. Reinstatement does not erase responsibility
+for the earlier breach. A later breach requires express written reinstatement.
+Termination does not affect independent GitHub rights or rights protected by law.
+
+A later license version does not retroactively change permission for copies
+received under this version. Compliant recipients may continue under this version;
+they receive no entitlement to future versions, services or support.
+
+The Licensor may transfer his rights and obligations as licensor, including the
+right to grant permissions within his authority, to a future company, successor
+or acquirer. Such a transfer must preserve existing compliant grants and does
+not expand recipients' rights or transfer contributors' retained copyright.
+
+## Warranty and contact
+
+To the extent permitted by applicable law, the Project is provided “as is”,
+without warranties of any kind. The copyright holders are not liable for claims
+or damages arising from its use. No maintenance or support obligation is created.
+Requests for other permission go to **nick@tresfort.app**.

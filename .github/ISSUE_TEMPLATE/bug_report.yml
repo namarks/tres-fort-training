@@ -1,0 +1,29 @@
+name: Bug report with test data
+description: Report a reproducible problem without private account information.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This report may be public. For account-specific help, raw TestFlight feedback,
+        crash logs, or security problems, use the private channels in SECURITY.md.
+        Reproduce with a local test account before attaching a screenshot.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Publication check
+      options:
+        - label: This report uses synthetic data and contains no personal information, credentials, raw feedback, or private attachment links.
+          required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include the app version or source commit and the relevant device or simulator version.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true

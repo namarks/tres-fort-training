@@ -1,0 +1,137 @@
+# iPhone + iPad TestFlight spec. Regenerate: cd ios && xcodegen generate
+# Public SDK-free iPhone + iPad candidate: xcodegen generate --spec project-app-store.yml
+name: TresFort
+options:
+  preGenCommand: python3 Dependencies/setup_mediapipe.py
+  bundleIdPrefix: com.nmarkspdx
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.2"
+    CURRENT_PROJECT_VERSION: "75"
+    GENERATE_INFOPLIST_FILE: NO
+    DEVELOPMENT_TEAM: "8BA2RY6RCA"   # Nicholas Marks (Apple Developer Program)
+    CODE_SIGN_STYLE: Automatic
+targets:
+  TresFort:
+    type: application
+    platform: iOS
+    sources:
+      - TresFort
+      - Shared            # RestActivityAttributes — shared with the widget
+      - path: .dependencies/mediapipe/pose_landmarker_full.task
+        buildPhase: resources
+      - path: .dependencies/mediapipe/Notices
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - target: TresFortWidgets
+        embed: true        # bundles the Live Activity extension into the app
+      - framework: .dependencies/mediapipe/MediaPipeTasksVision/frameworks/MediaPipeTasksVision.xcframework
+        embed: false
+      - framework: .dependencies/mediapipe/MediaPipeTasksCommon/frameworks/MediaPipeTasksCommon.xcframework
+        embed: false
+      - sdk: libc++.tbd
+      - sdk: Accelerate.framework
+      - sdk: CoreMedia.framework
+      - sdk: AssetsLibrary.framework
+      - sdk: CoreFoundation.framework
+      - sdk: CoreGraphics.framework
+      - sdk: CoreImage.framework
+      - sdk: QuartzCore.framework
+      - sdk: AVFoundation.framework
+      - sdk: CoreVideo.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nmarkspdx.tresfort
+        INFOPLIST_FILE: TresFort/Info.plist
+        CAMERA_USAGE_DESCRIPTION: "Scan an iPad invitation code to join a workout. Track exercise movements on this device. Record test saves an optional silent clip locally for comparison; share or delete it from Saved tests."
+        HEALTH_UPDATE_USAGE_DESCRIPTION: "Très Fort saves runs you record in the app to Apple Health as workouts with their route."
+        CODE_SIGN_ENTITLEMENTS: TresFort/TresFort.entitlements
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ENABLE_PREVIEWS: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        OTHER_LDFLAGS[sdk=iphonesimulator*]: '$(inherited) -ObjC -force_load "$(PROJECT_DIR)/.dependencies/mediapipe/MediaPipeTasksCommon/frameworks/graph_libraries/libMediaPipeTasksCommon_simulator_graph.a"'
+        OTHER_LDFLAGS[sdk=iphoneos*]: '$(inherited) -ObjC -force_load "$(PROJECT_DIR)/.dependencies/mediapipe/MediaPipeTasksCommon/frameworks/graph_libraries/libMediaPipeTasksCommon_device_graph.a"'
+      configs:
+        Debug:
+          INFOPLIST_FILE[sdk=iphonesimulator*]: $(DERIVED_FILE_DIR)/TresFort-Simulator-Info.plist
+      # Automatic signing + the team above provisions Sign in with Apple.
+    preBuildScripts:
+      - name: Prepare simulator network configuration
+        inputFiles:
+          - $(SRCROOT)/TresFort/Info.plist
+          - $(SRCROOT)/Dependencies/prepare_simulator_plist.py
+        outputFiles:
+          - $(DERIVED_FILE_DIR)/TresFort-Simulator-Info.plist
+        script: |
+          python3 "${SRCROOT}/Dependencies/prepare_simulator_plist.py" "${SRCROOT}/TresFort/Info.plist" "${DERIVED_FILE_DIR}/TresFort-Simulator-Info.plist"
+
+  TresFortWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - TresFortWidgets
+      - Shared            # same attributes type, compiled into the extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nmarkspdx.tresfort.widgets
+        INFOPLIST_FILE: TresFortWidgets/Info.plist
+        # App Group shared with the app for the Today widget snapshot.
+        CODE_SIGN_ENTITLEMENTS: TresFortWidgets/TresFortWidgets.entitlements
+        TARGETED_DEVICE_FAMILY: "1,2"
+
+  TresFortTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - TresFortTests
+    dependencies:
+      - target: TresFort
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nmarkspdx.tresfort.tests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGNING_ALLOWED: NO
+
+  TresFortUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - TresFortUITests
+      - path: TresFortTests/Fixtures/ExerciseGroups.json
+        buildPhase: resources
+      - path: TresFortTests/Fixtures/WorkoutSummaryPresentation.json
+        buildPhase: resources
+      - path: TresFortTests/Fixtures/WorkoutFeedback.json
+        buildPhase: resources
+      - path: TresFortTests/Fixtures/CoachingContext.json
+        buildPhase: resources
+    dependencies:
+      - target: TresFort
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nmarkspdx.tresfort.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGNING_ALLOWED: NO
+
+# Only the app gets a run scheme. The widget extension is built+embedded
+# via the dependency above — never run it directly (doing so triggers the
+# "Failed to show Widget / get descriptors" SpringBoard error).
+schemes:
+  TresFort:
+    build:
+      targets:
+        TresFort: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - TresFortTests
+        - TresFortUITests
+    archive:
+      config: Release

@@ -1,0 +1,50 @@
+# Public 1.0 supports iPhone and iPad with manual Station and partner training.
+# Generate this variant explicitly; a build-setting
+# override alone would leave the Station SDK, graph and model in the app.
+# XcodeGen's documented :REPLACE merge keeps inherited application settings
+# while replacing these arrays instead of appending to their beta contents.
+include: project.yml
+options:
+  preGenCommand: ""
+settings:
+  base:
+    SWIFT_ACTIVE_COMPILATION_CONDITIONS: '$(inherited) APP_STORE_BUILD'
+  configs:
+    Debug:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: '$(inherited) DEBUG APP_STORE_BUILD'
+targets:
+  TresFort:
+    sources:REPLACE:
+      - TresFort
+      - Shared
+    dependencies:REPLACE:
+      - target: TresFortWidgets
+        embed: true
+    settings:
+      base:
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CAMERA_USAGE_DESCRIPTION: "Scan your partner's iPad invitation code to join a workout."
+        HEALTH_UPDATE_USAGE_DESCRIPTION: "Très Fort only reads Apple Health data for workout coaching and your private weight trend. It does not write to Apple Health."
+        # The location-key phase below edits the processed Info.plist.
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        OTHER_LDFLAGS[sdk=iphonesimulator*]: '$(inherited)'
+        OTHER_LDFLAGS[sdk=iphoneos*]: '$(inherited)'
+    # The run recorder stays out of the public build until its device checks
+    # pass (docs/plans/run-recorder), so its location, Bluetooth and motion
+    # (barometer) keys and the background modes (location, audio for spoken
+    # splits, and bluetooth-central for a heart rate strap) do too. Code
+    # signing runs after every build phase, so the signed plist lacks them.
+    postBuildScripts:
+      - name: Remove run recorder location keys
+        basedOnDependencyAnalysis: false
+        inputFiles:
+          - $(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)
+        script: |
+          plist="${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
+          for key in UIBackgroundModes NSLocationWhenInUseUsageDescription NSBluetoothAlwaysUsageDescription NSMotionUsageDescription; do
+            /usr/libexec/PlistBuddy -c "Delete :${key}" "$plist" 2>/dev/null || true
+          done
+  TresFortWidgets:
+    settings:
+      base:
+        TARGETED_DEVICE_FAMILY: "1,2"

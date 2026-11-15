@@ -1,0 +1,459 @@
+import XCTest
+
+final class TrainingJourneyTests: XCTestCase {
+    override func setUpWithError() throws { continueAfterFailure = false }
+
+    override func tearDownWithError() throws {
+        if (testRun?.failureCount ?? 0) > 0 { print(XCUIApplication().debugDescription) }
+    }
+
+    @discardableResult
+    private func launch(_ fixture: String, largeText: Bool = false) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchEnvironment["TRESFORT_UI_FIXTURE"] = fixture
+        if largeText { app.launchEnvironment["TRESFORT_UI_LARGE_TEXT"] = "1" }
+        // The fixture clears its preference suite before launch. A command-line
+        // weight override would mask unit changes made through the UI.
+        app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["fixture.scenario"].waitForExistence(timeout: UITestWait.screen))
+        return app
+    }
+
+    private func screenshot(_ name: String) {
+        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    func testFreshSignInShowsExplicitAppleEntry() {
+        checkSignedOutEntry(largeText: false)
+    }
+
+    func testFreshSignInKeepsBothActionsReachableAtLargestText() {
+        checkSignedOutEntry(largeText: true)
+    }
+
+    private func checkSignedOutEntry(largeText: Bool) {
+        let app = launch("sign-in", largeText: largeText)
+        // Fixture mode substitutes only the provider button: exercise sign-in
+        // intent without launching AuthenticationServices or sending credentials.
+        let signIn = app.buttons["Sign in with Apple"]
+        let coach = app.buttons["Set up my coach"]
+        XCTAssertTrue(signIn.waitForExistence(timeout: UITestWait.screen))
+        XCTAssertFalse(app.buttons["Create a workout"].exists)
+        XCTAssertFalse(app.buttons["Reviewer sign-in"].exists)
+        XCTAssertFalse(app.secureTextFields["review.password"].exists)
+        XCTAssertTrue(app.scroll(toReveal: coach))
+        XCTAssertLessThanOrEqual(signIn.frame.maxY, coach.frame.minY, "Apple sign-in leads the optional coach choice")
+        XCTAssertGreaterThanOrEqual(coach.frame.minX, app.frame.minX)
+        XCTAssertLessThanOrEqual(coach.frame.maxX, app.frame.maxX)
+        screenshot(largeText ? "fresh-sign-in-large-text" : "fresh-sign-in")
+        coach.tap()
+        XCTAssertTrue(app.staticTexts["Sign in to continue setting up your coach."].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertFalse(coach.exists, "A queued coach choice is acknowledged rather than offered again")
+        XCTAssertTrue(app.scroll(toReveal: signIn, searchingUp: true))
+        signIn.tap()
+        XCTAssertTrue(app.staticTexts["Sign-in requested (synthetic)"].waitForExistence(timeout: UITestWait.screen))
+    }
+
+    func testVerifiedEmptyPlanCanCreateRoutineAndFirstWorkout() {
+        let app = launch("empty")
+        XCTAssertTrue(app.buttons["Create a workout"].waitForExistence(timeout: UITestWait.screen))
+        screenshot("verified-empty-plan")
+        app.buttons["Create a workout"].tap()
+        XCTAssertTrue(app.navigationBars["Add exercises"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertFalse(app.textFields["createWorkout.name"].exists)
+        let selection = app.buttons["exercisePicker.exercise.synthetic-exercise"]
+        reveal(selection, in: app)
+        selection.tap()
+        // Review starts disabled. Observe the selection taking effect before
+        // sending a tap to that control, and fail at this boundary if the
+        // single exercise tap was not accepted.
+        expectation(for: NSPredicate(format: "selected == true"), evaluatedWith: selection)
+        waitForExpectations(timeout: UITestWait.screen)
+        let review = app.buttons["createWorkout.review"]
+        expectation(for: NSPredicate(format: "enabled == true AND label == %@", "Review workout (1)"),
+                    evaluatedWith: review)
+        waitForExpectations(timeout: UITestWait.screen)
+        review.tap()
+        XCTAssertTrue(app.navigationBars["Review workout"].waitForExistence(timeout: UITestWait.screen))
+        let name = app.textFields["createWorkout.name"]
+        XCTAssertTrue(name.waitForExistence(timeout: UITestWait.screen)); name.tap(); name.typeText("Workout A")
+        reveal(app.buttons["createWorkout.create"], in: app)
+        app.buttons["createWorkout.create"].tap()
+        XCTAssertTrue(app.navigationBars["Workout A"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertFalse(app.buttons["Create workout"].exists)
+        screenshot("created-first-workout")
+    }
+
+    func testOrdinarySetLogsAndCompletesThroughAcknowledgement() {
+        let app = launch("ordinary")
+        XCTAssertTrue(app.buttons["LOG SET 1"].waitForExistence(timeout: UITestWait.screen))
+        screenshot("ordinary-workout")
+        app.buttons["LOG SET 1"].tap()
+        XCTAssertTrue(app.staticTexts["Ready to finish"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertFalse(app.buttons["rest.done"].exists)
+        // Finishing stays explicit, and its pinned action is a full-size
+        // target that needs no scrolling.
+        let finish = app.buttons["FINISH"]
+        XCTAssertTrue(finish.isEnabled)
+        XCTAssertTrue(app.frame.contains(finish.frame))
+        XCTAssertGreaterThanOrEqual(finish.frame.height, 44)
+        XCTAssertFalse(app.staticTexts["WORKOUT COMPLETE"].exists)
+        screenshot("logged-ready-to-finish")
+        finish.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(app.staticTexts["WORKOUT COMPLETE"].waitForExistence(timeout: UITestWait.screen))
+        screenshot("acknowledged-completion")
+    }
+
+
+    func testUnilateralExercisesShowPerSideTargetsAndLogOneSetForBothSides() {
+        for (fixture, name) in [("unilateral-row", "Renegade Row"),
+                                ("unilateral-press", "Single-Arm Dumbbell Shoulder Press")] {
+            let app = launch(fixture)
+            XCTAssertTrue(app.buttons["LOG SET 1"].waitForExistence(timeout: UITestWait.screen))
+            XCTAssertEqual(app.buttons["runner.reps"].value as? String, "10")
+            XCTAssertTrue(app.buttons["runner.reps"].label.contains("per side"))
+            XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "3×10 per side")).firstMatch.exists)
+            let edit = app.buttons["Edit next set for " + name]
+            reveal(edit, in: app); edit.tap()
+            let reps = app.textFields["Reps"]
+            XCTAssertTrue(reps.waitForExistence(timeout: UITestWait.screen))
+            XCTAssertTrue(reps.label.contains("Reps per side"))
+            XCTAssertEqual(reps.value as? String, "10")
+            app.buttons["Save"].tap()
+            let increase = app.buttons["Increase reps per side by 1"]
+            reveal(increase, in: app)
+            XCTAssertTrue(app.staticTexts["Reps per side"].exists)
+            screenshot(fixture + "-per-side")
+            app.buttons["LOG SET 1"].tap()
+            // This fixture prescribes zero rest, so advance directly to the
+            // next physical set without inventing a timer to dismiss.
+            XCTAssertTrue(app.buttons["LOG SET 2"].waitForExistence(timeout: UITestWait.screen))
+            XCTAssertFalse(app.buttons["rest.done"].exists)
+            XCTAssertEqual(app.staticTexts["fixture.scenario"].value as? String,
+                           "sets:1;reps:10;total:20")
+            reveal(app.buttons["runner.outline"], in: app)
+            app.buttons["runner.outline"].tap()
+            let correct = app.buttons["Edit set 1 of " + name]
+            reveal(correct, in: app); correct.tap()
+            XCTAssertTrue(reps.waitForExistence(timeout: UITestWait.screen))
+            XCTAssertTrue(reps.label.contains("Reps per side"))
+            XCTAssertEqual(reps.value as? String, "10")
+            app.buttons["Cancel"].tap()
+            app.terminate()
+        }
+    }
+
+    func testSwapExerciseMidWorkoutPreservesCompletedSetAndRoutine() {
+        let app = launch("workout-swap")
+        reveal(app.buttons["runner.outline"], in: app)
+        app.buttons["runner.outline"].tap()
+        app.buttons["Current exercise options"].tap()
+        let swap = app.buttons["runner.swap-exercise"]
+        reveal(swap, in: app)
+        swap.tap()
+        XCTAssertTrue(app.navigationBars["Swap exercise"].waitForExistence(timeout: UITestWait.screen))
+        screenshot("workout-swap-picker")
+        app.buttons.containing(.staticText, identifier: "Dumbbell Goblet Squat").firstMatch.tap()
+        app.buttons["runner.confirm-swap"].tap()
+        app.buttons["runner.outline.done"].tap()
+        XCTAssertTrue(app.staticTexts["DUMBBELL GOBLET SQUAT"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertTrue(app.buttons["LOG SET 2"].exists)
+        XCTAssertEqual(app.buttons["runner.reps"].value as? String, "5")
+        XCTAssertTrue(app.buttons["runner.chooseWeight"].exists)
+        XCTAssertFalse(app.buttons["LOG SET 2"].isEnabled)
+        app.buttons["runner.chooseWeight"].tap()
+        let weight = app.textFields["weight.entry"]
+        XCTAssertTrue(weight.waitForExistence(timeout: UITestWait.screen))
+        weight.tap(); weight.typeText("25")
+        app.buttons["Save"].tap()
+        screenshot("workout-swapped-exercise")
+        reveal(app.buttons["LOG SET 2"], in: app)
+        app.buttons["LOG SET 2"].tap()
+        let evidence = NSPredicate(format: "value == %@", "original:1;replacement:1;plan:1")
+        expectation(for: evidence, evaluatedWith: app.staticTexts["fixture.scenario"])
+        waitForExpectations(timeout: UITestWait.screen)
+    }
+
+    func testBodyweightAndTimedRunnerFixtures() {
+        let bodyweight = launch("bodyweight")
+        XCTAssertTrue(bodyweight.buttons["LOG SET 1"].waitForExistence(timeout: UITestWait.screen))
+        screenshot("bodyweight-workout")
+        bodyweight.terminate()
+        let timed = launch("timed")
+        XCTAssertTrue(timed.staticTexts["PLANK"].waitForExistence(timeout: UITestWait.screen))
+        screenshot("timed-workout")
+    }
+
+    func testTimedSetSurvivesWorkoutOutlineBrowsing() {
+        let app = launch("timed-navigation")
+        let start = app.buttons["START SET 1"]
+        reveal(start, in: app)
+        start.tap()
+        let remaining = app.staticTexts["runner.timer.remaining"]
+        XCTAssertTrue(remaining.waitForExistence(timeout: UITestWait.screen))
+        let initial = Int(remaining.label.dropLast())!
+
+        for name in ["Stationary Bike", "Push-Up", "Goblet Squat"] {
+            reveal(app.buttons["runner.outline"], in: app)
+            app.buttons["runner.outline"].tap()
+            XCTAssertTrue(app.navigationBars["Workout outline"].waitForExistence(timeout: UITestWait.screen))
+            let exercise = app.buttons[name]
+            reveal(exercise, in: app)
+            XCTAssertFalse(exercise.isEnabled, "Browsing cannot replace the executing timed slot")
+            XCTAssertTrue(app.staticTexts["2×8 · 25 lb"].exists)
+            XCTAssertTrue(app.staticTexts["runner.preview.timer"].exists)
+            XCTAssertFalse(app.buttons["LOG SET 1"].exists)
+            screenshot("timer-outline-\(name)")
+            app.buttons["Return to timer"].tap()
+            XCTAssertTrue(remaining.waitForExistence(timeout: UITestWait.screen))
+            XCTAssertLessThan(Int(remaining.label.dropLast())!, initial)
+            XCTAssertFalse(start.exists)
+        }
+        let stop = app.buttons["STOP & LOG"]
+        reveal(stop, in: app)
+        stop.tap()
+        let restDone = app.buttons["rest.done"]
+        if restDone.waitForExistence(timeout: 3) { restDone.tap() }
+        XCTAssertFalse(remaining.exists)
+        // Only the bike was logged; the following exercise still has set 1.
+        XCTAssertTrue(app.buttons["LOG SET 1"].waitForExistence(timeout: UITestWait.screen))
+        let evidence = app.staticTexts["fixture.scenario"].value as? String ?? ""
+        XCTAssertTrue(evidence.hasPrefix("bike:1;other:0;seconds:"))
+        XCTAssertTrue(evidence.hasSuffix(";warmup:1"))
+    }
+
+    func testTimedSetCompletesWhileExercisePreviewIsOpen() {
+        let app = launch("timed-preview-completion")
+        let start = app.buttons["START SET 1"]
+        reveal(start, in: app)
+        start.tap()
+        reveal(app.buttons["runner.outline"], in: app)
+        app.buttons["runner.outline"].tap()
+        XCTAssertTrue(app.navigationBars["Workout outline"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertTrue(app.staticTexts["runner.preview.timer"].exists)
+        let closed = NSPredicate(format: "exists == false")
+        expectation(for: closed, evaluatedWith: app.navigationBars["Workout outline"])
+        waitForExpectations(timeout: 25)
+        let restDone = app.buttons["rest.done"]
+        if restDone.waitForExistence(timeout: 3) { restDone.tap() }
+        XCTAssertTrue(app.buttons["LOG SET 1"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertFalse(app.buttons["STOP & LOG"].exists)
+        XCTAssertEqual(app.staticTexts["fixture.scenario"].value as? String,
+                       "bike:1;other:0;seconds:15;warmup:1")
+        screenshot("timer-completed-during-preview")
+    }
+
+    func testPendingSetRemainsVisibleUntilAcknowledged() {
+        let app = launch("pending")
+        XCTAssertTrue(app.staticTexts["Set queued on this device"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertTrue(app.staticTexts["Sets queued on this device"].exists)
+        XCTAssertFalse(app.staticTexts["WORKOUT COMPLETE"].exists)
+        screenshot("pending-write")
+    }
+
+    private func reveal(_ element: XCUIElement, in app: XCUIApplication,
+                        file: StaticString = #filePath, line: UInt = #line) {
+        _ = element.waitForExistence(timeout: 3)
+        for _ in 0..<20 {
+            let keyboard = app.keyboards.firstMatch
+            let visibleBottom = keyboard.exists ? keyboard.frame.minY : app.frame.maxY - 20
+            if element.exists && element.isHittable,
+               element.frame.minY >= app.frame.minY + 20,
+               element.frame.maxY <= visibleBottom { return }
+            if keyboard.exists {
+                // Scroll the form above the keyboard, rather than sending a
+                // swipe into keyboard keys at the bottom of the screen.
+                let top = app.navigationBars.allElementsBoundByIndex
+                    .filter { $0.isHittable }.map { $0.frame.maxY }.max() ?? app.frame.minY
+                let bottom = keyboard.frame.minY
+                let origin = app.coordinate(withNormalizedOffset: .zero)
+                let start = origin.withOffset(CGVector(dx: app.frame.midX, dy: bottom - 20))
+                let end = origin.withOffset(CGVector(dx: app.frame.midX, dy: top + 20))
+                start.press(forDuration: 0.1, thenDragTo: end)
+            } else {
+                app.swipeUp()
+            }
+        }
+        XCTFail("Control did not become reachable after scrolling", file: file, line: line)
+    }
+
+    func testOnboardingWelcomeLeadsStraightIntoTheApp() {
+        let app = launch("onboarding")
+        let start = app.buttons["Get started"]
+        reveal(start, in: app)
+        screenshot("journey-onboarding-welcome")
+        // No questionnaire, group code or integration step before the app.
+        XCTAssertFalse(app.buttons["trainingSetup.next"].exists)
+        XCTAssertFalse(app.buttons["I don't have a code"].exists)
+        start.tap()
+        XCTAssertTrue(app.buttons["Create a workout"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertTrue(app.buttons["today.planWeek"].exists)
+    }
+
+    func testWeightEntryAndKeyboardCanSaveExactLoad() {
+        let app = launch("ordinary")
+        let weight = app.buttons["runner.weight"]
+        reveal(weight, in: app)
+        screenshot("journey-load-controls")
+        weight.tap()
+        let entry = app.textFields["weight.entry"]
+        XCTAssertTrue(entry.waitForExistence(timeout: UITestWait.screen))
+        entry.doubleTap()
+        entry.typeText("47.5")
+        XCTAssertEqual(entry.value as? String, "47.5")
+        screenshot("journey-weight-keyboard")
+        XCTAssertTrue(app.buttons["Save"].isHittable)
+        app.buttons["Save"].tap()
+        XCTAssertEqual(weight.value as? String, "47.5")
+    }
+
+    func testKilogramEntryCanSwitchUnitsWithoutChangingTheLoad() {
+        let app = launch("ordinary")
+        let weight = app.buttons["runner.weight"]
+        reveal(weight, in: app)
+        weight.tap()
+        app.segmentedControls["weight.unit"].buttons["kg"].tap()
+        let entry = app.textFields["weight.entry"]
+        let previous = entry.value as? String ?? ""
+        entry.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        entry.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: previous.count) + "20")
+        screenshot("kilogram-editor-before-save")
+        XCTAssertEqual(entry.value as? String, "20")
+        app.buttons["Save"].tap()
+        XCTAssertEqual(weight.value as? String, "20")
+        screenshot("kilogram-weight-entry")
+        let options = app.buttons["runner.outline"]
+        reveal(options, in: app); options.tap()
+        app.buttons["Current exercise options"].tap()
+        reveal(app.segmentedControls["runner.weight.unit"], in: app)
+        app.segmentedControls["runner.weight.unit"].buttons["lb"].tap()
+        app.buttons["runner.outline.done"].tap()
+        XCTAssertEqual(weight.value as? String, "44.092")
+        options.tap()
+        app.buttons["Current exercise options"].tap()
+        reveal(app.segmentedControls["runner.weight.unit"], in: app)
+        app.segmentedControls["runner.weight.unit"].buttons["kg"].tap()
+        app.buttons["runner.outline.done"].tap()
+        XCTAssertEqual(weight.value as? String, "20")
+        for _ in 0..<6 where !weight.isHittable { app.swipeDown() }
+        weight.tap()
+        app.buttons["Save"].tap()
+        XCTAssertEqual(weight.value as? String, "20")
+    }
+
+    func testCorrectionRecoveryRemainsReachable() {
+        let app = launch("correction-failure")
+        let edit = app.buttons["edit-set-synthetic-set"]
+        reveal(edit, in: app)
+        XCTAssertEqual(edit.label, "Edit set 1 of Barbell Squat")
+        edit.tap()
+        let reps = app.textFields["Reps"]
+        reveal(reps, in: app)
+        reps.tap()
+        reps.doubleTap()
+        reps.typeText("6")
+        XCTAssertEqual(reps.value as? String, "6")
+        screenshot("journey-correction-keyboard")
+        reveal(app.buttons["Delete set 1 of Barbell Squat"], in: app)
+        app.buttons["Save"].tap()
+        let reload = app.buttons["reload-correction-synthetic-set"]
+        reveal(reload, in: app)
+        screenshot("journey-correction-recovery")
+        XCTAssertTrue(app.staticTexts["45 × 5"].exists)
+        XCTAssertTrue(app.staticTexts["Edit rejected (HTTP 422)."].exists)
+        reload.tap()
+        XCTAssertTrue(edit.waitForExistence(timeout: UITestWait.screen))
+        XCTAssertTrue(edit.isEnabled)
+    }
+
+    @discardableResult
+    private func audit(_ fixture: String) throws -> XCUIApplication {
+        let app = launch(fixture)
+        let ready = fixture == "empty" ? app.buttons["Create a workout"]
+            : fixture == "load-failure" ? app.buttons["Try again"]
+            : fixture == "ordinary" ? app.buttons["LOG SET 1"]
+            : app.staticTexts["Ready to finish"]
+        XCTAssertTrue(ready.waitForExistence(timeout: UITestWait.screen))
+        // iOS 26.2's contrast heuristic flags even opaque #F4F4F5 over this
+        // dark gradient. Palette policy tests and measured screenshot evidence
+        // cover contrast; these runtime audits enforce targets/text semantics.
+        // See docs/plans/app-quality-and-maintainability/evidence/p1/README.md.
+        try app.performAccessibilityAudit(for: [.hitRegion, .sufficientElementDescription]) { issue in
+            print("Accessibility audit: \(issue.compactDescription): \(issue.detailedDescription)")
+            print(issue.element?.debugDescription ?? "No associated element")
+            return false
+        }
+        return app
+    }
+
+    func testAccessibilityAuditEmpty() throws { try audit("empty") }
+    func testAccessibilityAuditLoadFailure() throws { try audit("load-failure") }
+    func testAccessibilityAuditOrdinary() throws { try audit("ordinary") }
+    func testAccessibilityAuditReadyToFinish() throws {
+        // A restored ready state still waits for an explicit finish.
+        let app = try audit("ready-to-finish")
+        XCTAssertTrue(app.buttons["FINISH"].exists)
+        XCTAssertFalse(app.staticTexts["WORKOUT COMPLETE"].exists)
+    }
+    func testTwoWorkoutsStaySeparateOnOneDay() {
+        let app = launch("ordinary")
+        XCTAssertTrue(app.buttons["LOG SET 1"].waitForExistence(timeout: UITestWait.screen))
+        app.buttons["LOG SET 1"].tap()
+        XCTAssertTrue(app.buttons["FINISH"].waitForExistence(timeout: UITestWait.screen))
+        app.buttons["FINISH"].tap()
+        XCTAssertTrue(app.staticTexts["WORKOUT COMPLETE"].waitForExistence(timeout: UITestWait.screen))
+        let add = app.buttons["today.addAnotherWorkout"]
+        XCTAssertTrue(add.waitForExistence(timeout: UITestWait.screen)); add.tap()
+        let saved = app.buttons["additional.workout.synthetic-day"]
+        XCTAssertTrue(saved.waitForExistence(timeout: UITestWait.screen)); saved.tap()
+        // The initial fixture starts its runner directly. This explicit start
+        // is therefore the first notification-permission request on a fresh
+        // simulator. A passive existence wait does not run XCTest's default
+        // interruption handler; answer the real prompt before awaiting the runner.
+        let allow = XCUIApplication(bundleIdentifier: "com.apple.springboard").alerts.buttons["Allow"]
+        if allow.waitForExistence(timeout: 5) { allow.tap() }
+        XCTAssertTrue(app.buttons["LOG SET 1"].waitForExistence(timeout: UITestWait.screen),
+                      "The second workout starts with its own first set: \(app.staticTexts["fixture.scenario"].value ?? "missing evidence")")
+        let weight = app.buttons["runner.weight"]
+        reveal(weight, in: app)
+        weight.tap()
+        let entry = app.textFields["weight.entry"]
+        XCTAssertTrue(entry.waitForExistence(timeout: UITestWait.screen))
+        entry.doubleTap()
+        entry.typeText("47.5")
+        XCTAssertEqual(entry.value as? String, "47.5")
+        app.buttons["Save"].tap()
+        XCTAssertEqual(weight.value as? String, "47.5")
+        XCTAssertTrue((app.staticTexts["fixture.scenario"].value as? String)?.contains("running:true") == true,
+                      "Saving the second workout draft keeps its runner: \(app.staticTexts["fixture.scenario"].value ?? "missing evidence")")
+        app.buttons["runner.minimize"].tap()
+        let calendar = app.buttons["today.calendar"]
+        reveal(calendar, in: app)
+        calendar.tap()
+        let today = app.buttons["calendar.date.2026-09-08"]
+        reveal(today, in: app)
+        today.tap()
+        // The completed primary has no start button; this is the additional
+        // workout's action, before its first logged set.
+        let continueWorkout = app.buttons["Start workout"]
+        XCTAssertTrue(continueWorkout.waitForExistence(timeout: UITestWait.screen), app.debugDescription)
+        reveal(continueWorkout, in: app)
+        continueWorkout.tap()
+        XCTAssertTrue(app.buttons["LOG SET 1"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertEqual(weight.value as? String, "47.5", "The agenda continues the mounted runner without resetting its draft")
+        app.buttons["LOG SET 1"].tap()
+        XCTAssertTrue(app.buttons["FINISH"].waitForExistence(timeout: UITestWait.screen))
+        app.buttons["FINISH"].tap()
+        XCTAssertTrue(app.buttons["today.session.1"].waitForExistence(timeout: UITestWait.screen))
+        app.buttons["today.session.0"].tap()
+        XCTAssertTrue(app.staticTexts["WORKOUT COMPLETE"].exists)
+        app.buttons["today.session.1"].tap()
+        XCTAssertTrue(app.staticTexts["WORKOUT COMPLETE"].exists)
+        screenshot("two-independent-workouts-completed")
+    }
+
+}

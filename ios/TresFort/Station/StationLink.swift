@@ -1,0 +1,482 @@
+import CryptoKit
+import Foundation
+
+/// The iPhone runner is the only workout controller. A linked iPad Station is a
+/// display, sensor and remote: it shows the runner independently of camera
+/// eligibility, counts the set the iPhone arms, reports a finished count and
+/// sends the controls the member taps. The iPad never receives a SyncModel,
+/// outbox or API client; only the iPhone logs.
+enum StationLink {
+    /// Bonjour service type (at most 15 characters). Info.plist lists the
+    /// matching `_tresfort-stn._tcp` / `_udp` entries for local network access.
+    static let serviceType = "tresfort-stn"
+    static let protocolVersion = 1
+    /// Matches the server's `STATION_LINK_KEY_VERSION`.
+    static let keyVersion = 1
+    /// Seconds the count must hold steady, outside a rep, before the iPad
+    /// reports the set finished. Target reps never end a set on their own.
+    static let settleSeconds: TimeInterval = 4
+    /// The account that turned the link on. The opt-in belongs to that member
+    /// only, so a shared phone never browses for another member's iPad.
+    static let enabledAccountDefaultsKey = "stationLinkEnabledAccount"
+    static let stationEnabledAccountDefaultsKey = "stationDisplayEnabledAccount"
+    /// Whether a linked iPad shows the workout outline beside the set.
+    static let outlineShownDefaultsKey = "ipadWorkoutOutlineShown"
+
+    /// A navigation shortcut only. It carries no account, pairing secret or
+    /// permission; the phone still asks its signed-in member to connect.
+    static let setupURL = URL(string: "tresfort://ipad-display")!
+
+    static func isSetupURL(_ url: URL) -> Bool {
+        guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
+        return parts.scheme == "tresfort" && parts.host == "ipad-display"
+            && parts.path.isEmpty && parts.user == nil && parts.password == nil
+            && parts.port == nil && parts.query == nil && parts.fragment == nil
+    }
+
+    /// Manual partner coordination is available in both distributions. The
+    /// experimental movement counter stays in the TestFlight build only.
+    static let isAvailable = true
+    static var cameraCountingAvailable: Bool {
+        #if APP_STORE_BUILD
+        return false
+        #else
+        return true
+        #endif
+    }
+
+    static func isEnabled(storedAccount: String, accountID: String?) -> Bool {
+        guard isAvailable, let accountID, !accountID.isEmpty else { return false }
+        return storedAccount == accountID
+    }
+
+    /// Discovery filters peers by a tag derived from the account's link key.
+    /// The tag is public, so it is only a filter: a peer must still prove it
+    /// holds the key before any count or arm crosses the link.
+    static func discoveryTag(key: Data) -> String {
+        let mac = HMAC<SHA256>.authenticationCode(for: Data("tres-fort:station-link:discovery".utf8),
+                                                  using: SymmetricKey(data: key))
+        return Data(mac).prefix(12).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func newNonce() -> Data {
+        SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
+    }
+
+    /// Mutual challenge-response: the responder's role and both nonces are
+    /// bound, so a proof can be neither replayed nor reflected back.
+    static func proof(key: Data, responderRole: String, challengerNonce: Data, responderNonce: Data) -> Data {
+        Data(HMAC<SHA256>.authenticationCode(
+            for: proofMessage(responderRole, challengerNonce, responderNonce), using: SymmetricKey(data: key)))
+    }
+
+    static func verify(_ proof: Data, key: Data, responderRole: String,
+                       challengerNonce: Data, responderNonce: Data) -> Bool {
+        guard challengerNonce.count == 32, responderNonce.count == 32 else { return false }
+        return HMAC<SHA256>.isValidAuthenticationCode(
+            proof, authenticating: proofMessage(responderRole, challengerNonce, responderNonce),
+            using: SymmetricKey(data: key))
+    }
+
+    private static func proofMessage(_ role: String, _ challenger: Data, _ responder: Data) -> Data {
+        Data("tres-fort:station-link:proof:\(role):".utf8) + challenger + responder
+    }
+
+    /// A key for one authenticated connection, bound to both of its nonces.
+    /// A relay can pass the challenge along, but without the account key it
+    /// cannot derive this, so it can forward sealed messages and nothing more.
+    static func sessionKey(key: Data, controllerNonce: Data, stationNonce: Data) -> Data {
+        Data(HMAC<SHA256>.authenticationCode(
+            for: Data("tres-fort:station-link:session:".utf8) + controllerNonce + stationNonce,
+            using: SymmetricKey(data: key)))
+    }
+
+    /// Encrypts an app message for the authenticated peer (ChaCha20-Poly1305
+    /// under the session key). The sender's role and a per-direction counter
+    /// that starts at 1 are authenticated and fix the nonce, so a relay can
+    /// neither read, forge, reflect nor replay a message.
+    static func seal(_ message: StationLinkMessage, sessionKey: Data, senderRole: String,
+                     counter: UInt64) -> Data? {
+        guard let body = try? message.encoded() else { return nil }
+        return seal(body: body, sessionKey: sessionKey, senderRole: senderRole, counter: counter)
+    }
+
+    /// The arm a heartbeat names. No set is ever armed with it.
+    static let heartbeatArmID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+
+    /// Proof of life on a quiet connection. A peer from before heartbeats
+    /// reads one as the disarm of a set that was never armed, and ignores it.
+    static func sealHeartbeat(sessionKey: Data, senderRole: String, counter: UInt64) -> Data? {
+        guard let body = try? JSONEncoder().encode(StationLinkEnvelope(
+            version: protocolVersion, message: .disarm(armID: heartbeatArmID), heartbeat: true)) else { return nil }
+        return seal(body: body, sessionKey: sessionKey, senderRole: senderRole, counter: counter)
+    }
+
+    static func seal(body: Data, sessionKey: Data, senderRole: String, counter: UInt64) -> Data? {
+        guard let nonce = try? ChaChaPoly.Nonce(data: sealNonce(senderRole, counter)),
+              let box = try? ChaChaPoly.seal(body, using: SymmetricKey(data: sessionKey), nonce: nonce,
+                                             authenticating: sealedContext(senderRole, counter)) else { return nil }
+        return try? JSONEncoder().encode(StationLinkSealedFrame(counter: counter, sealed: box.combined))
+    }
+
+    /// Opens a sealed message only when it authenticates for the expected
+    /// sender and its counter is newer than the last one accepted.
+    static func open(_ data: Data, sessionKey: Data, senderRole: String,
+                     after lastCounter: UInt64) -> (message: StationLinkMessage, counter: UInt64)? {
+        guard let frame = openFrame(data, sessionKey: sessionKey, senderRole: senderRole, after: lastCounter),
+              let message = StationLinkMessage.decode(frame.body) else { return nil }
+        return (message, frame.counter)
+    }
+
+    /// Authenticates a sealed frame without reading its content, so a sound
+    /// frame from a newer version is told apart from a forged one.
+    static func openFrame(_ data: Data, sessionKey: Data, senderRole: String,
+                          after lastCounter: UInt64) -> (body: Data, counter: UInt64)? {
+        guard let frame = try? JSONDecoder().decode(StationLinkSealedFrame.self, from: data),
+              frame.counter > lastCounter,
+              let box = try? ChaChaPoly.SealedBox(combined: frame.sealed),
+              box.nonce.withUnsafeBytes({ Data($0) }) == sealNonce(senderRole, frame.counter),
+              let body = try? ChaChaPoly.open(box, using: SymmetricKey(data: sessionKey),
+                                              authenticating: sealedContext(senderRole, frame.counter)) else {
+            return nil
+        }
+        return (body, frame.counter)
+    }
+
+    private static func counterBytes(_ counter: UInt64) -> Data {
+        withUnsafeBytes(of: counter.bigEndian) { Data($0) }
+    }
+
+    /// Unique per direction and counter under a key used for one connection.
+    private static func sealNonce(_ role: String, _ counter: UInt64) -> Data {
+        Data(SHA256.hash(data: Data("tres-fort:station-link:nonce:\(role)".utf8)).prefix(4))
+            + counterBytes(counter)
+    }
+
+    private static func sealedContext(_ role: String, _ counter: UInt64) -> Data {
+        Data("tres-fort:station-link:message:\(role):".utf8) + counterBytes(counter)
+    }
+}
+
+private struct StationLinkSealedFrame: Codable {
+    let counter: UInt64
+    let sealed: Data
+}
+
+extension StationExercise: Codable {
+    /// Maps a workout slot to a movement the Station can count. Anything else
+    /// stays a manual set: a lookalike name must not borrow another counter.
+    /// One-side movements prescribe reps per side, which one count can't
+    /// cover, so they stay manual too.
+    static func match(exerciseName: String, modality: String? = nil,
+                      unilateral: Bool = false) -> StationExercise? {
+        let name = exerciseName.lowercased()
+        if unilateral || modality == "timed" || modality == "cardio" { return nil }
+        let excluded = ["split", "jump", "pistol", "hack", "leg press", "leg curl", "hamstring",
+                        "nordic", "wrist", "single", "one-arm", "one arm", "one-leg", "one leg",
+                        "skater", "cossack", "lateral", "alternating", "jefferson", "concentration",
+                        "shrimp", "sissy"]
+        if excluded.contains(where: { name.contains($0) }) { return nil }
+        if name.contains("bench press") { return .benchPress }
+        if name.contains("squat") { return .squat }
+        if name.contains("curl") { return .curl }
+        return nil
+    }
+}
+
+/// One armed set. A new ID is minted for every distinct slot and set number,
+/// so a late count from an earlier set can never complete the current one.
+struct StationLinkArm: Codable, Equatable {
+    let armID: UUID
+    let slotID: String
+    let setNumber: Int
+    let exercise: StationExercise
+    let exerciseName: String
+    let targetReps: Int
+}
+
+struct StationLinkProgress: Codable, Equatable {
+    let armID: UUID
+    let count: Int
+    let leftCount: Int?
+    let rightCount: Int?
+    let status: String
+}
+
+struct StationLinkCompletion: Codable, Equatable {
+    let armID: UUID
+    /// Stable identity for this observation; the iPhone acts on it once.
+    let eventID: UUID
+    let reps: Int
+    let leftCount: Int?
+    let rightCount: Int?
+    /// Tracking was interrupted, so the count covers only what was seen.
+    let partial: Bool
+}
+
+enum StationLinkStationState: String, Codable, Equatable {
+    /// `manual`: the member took the armed set over on the iPad by hand.
+    case ready, cameraOff, counting, stopped, manual
+}
+
+/// A control the member tapped on a linked iPad. The iPhone stays the only
+/// writer: it applies a command through the runner's own guarded action, for
+/// the step the iPad showed, at most once.
+struct StationLinkCommand: Codable, Equatable {
+    enum Action: Codable, Equatable {
+        /// Log the shown set with the values shown.
+        case logSet
+        case endRest
+        case startTimer
+        case stopTimer
+        /// The values the shown set will log, with the weight in `unit`.
+        case setValues(SetCorrectionValues, unit: WeightUnit)
+        /// Move the workout to another exercise.
+        case select(slotID: String)
+    }
+
+    let id: UUID
+    let action: Action
+    /// The step the iPad showed when tapped, nil when it showed none (an
+    /// exercise complete, or final review).
+    let step: WorkoutDisplayState.Step?
+    /// The phase and exercise the iPad showed, which tell one place between
+    /// sets from another.
+    let phase: WorkoutDisplayState.Phase?
+    let currentSlotID: String?
+
+    init(_ action: Action, step: WorkoutDisplayState.Step? = nil, phase: WorkoutDisplayState.Phase? = nil,
+         currentSlotID: String? = nil, id: UUID = UUID()) {
+        self.id = id
+        self.action = action
+        self.step = step
+        self.phase = phase
+        self.currentSlotID = currentSlotID
+    }
+
+    /// A command applies only while the iPhone still shows what the iPad
+    /// showed: the same step or, between sets, the same phase and exercise.
+    /// A late or repeated tap so never acts on another set, on values the
+    /// member didn't see, or on a rest or choice made since on the iPhone.
+    func matches(_ display: WorkoutDisplayState?) -> Bool {
+        guard let display else { return false }
+        if let step { return step == display.current }
+        return display.current == nil && phase == display.phase && currentSlotID == display.currentSlotID
+    }
+
+    /// Commands that act on the shown set, as opposed to rest or navigation,
+    /// and so need a shown step.
+    var actsOnShownSet: Bool {
+        switch action {
+        case .logSet, .startTimer, .stopTimer, .setValues: return true
+        case .endRest, .select: return false
+        }
+    }
+
+    var choosesExercise: Bool {
+        if case .select = action { return true }
+        return false
+    }
+}
+
+/// The iPhone's answer to a command: applied, or why not.
+struct StationLinkCommandReceipt: Codable, Equatable {
+    let id: UUID
+    let accepted: Bool
+    let message: String?
+
+    static func accepted(_ command: StationLinkCommand) -> Self {
+        Self(id: command.id, accepted: true, message: nil)
+    }
+
+    static func refused(_ command: StationLinkCommand, _ message: String) -> Self {
+        Self(id: command.id, accepted: false, message: message)
+    }
+
+    // Reasons shared by the iPhone's checks.
+    static let openWorkout = "Open the workout on your iPhone, then try again."
+    static let movedOn = "Your iPhone has moved on. Check the set shown now."
+}
+
+enum StationLinkMessage: Codable, Equatable {
+    case partner(PartnerPacket)
+    /// Read-only runner guidance, independent of camera arming. Nil withdraws
+    /// the display when the controller closes or changes workouts/accounts.
+    case display(WorkoutDisplayState?)
+    case arm(StationLinkArm)
+    case disarm(armID: UUID)
+    case progress(StationLinkProgress)
+    case completion(StationLinkCompletion)
+    case station(StationLinkStationState, armID: UUID?)
+    /// Sent only to an iPhone whose display accepts commands: an iPhone from
+    /// before commands can't read one, and the oldest drop the link over it.
+    case command(StationLinkCommand)
+    /// Sent only in answer to a command, so only to an iPad that sends them.
+    case commandReceipt(StationLinkCommandReceipt)
+    /// Link authentication, handled by the transport and never delivered.
+    case challenge(Data)
+    case proof(Data)
+
+    func encoded() throws -> Data {
+        if case .display(let state) = self {
+            // Older v1 peers can still count: they ignore these optional
+            // envelope fields and the existing station-status message. Sending
+            // an unknown enum case would make their authenticated decoder
+            // reject the entire connection, including subsequent counts.
+            return try JSONEncoder().encode(StationLinkEnvelope(version: StationLink.protocolVersion,
+                message: .station(.ready, armID: nil), displayUpdate: true, display: state))
+        }
+        return try JSONEncoder().encode(StationLinkEnvelope(version: StationLink.protocolVersion, message: self))
+    }
+
+    static func decode(_ data: Data) -> StationLinkMessage? {
+        guard data.count <= 1_048_576, let envelope = try? JSONDecoder().decode(StationLinkEnvelope.self, from: data),
+              envelope.version == StationLink.protocolVersion else { return nil }
+        return envelope.displayUpdate == true ? .display(envelope.display) : envelope.message
+    }
+
+    /// Reads an authenticated message. Content this version can't read is
+    /// skipped rather than treated as an attack: it came from the key holder.
+    static func inbound(_ data: Data) -> StationLinkInbound {
+        guard data.count <= 1_048_576 else { return .unreadable }
+        if let header = try? JSONDecoder().decode(StationLinkEnvelopeHeader.self, from: data),
+           header.version == StationLink.protocolVersion, header.heartbeat == true {
+            return .heartbeat
+        }
+        guard let message = decode(data) else { return .unreadable }
+        return .message(message)
+    }
+}
+
+enum StationLinkInbound: Equatable {
+    case message(StationLinkMessage)
+    /// Proof of life only; never delivered.
+    case heartbeat
+    /// Sound, but from a newer version.
+    case unreadable
+}
+
+private struct StationLinkEnvelope: Codable {
+    let version: Int
+    let message: StationLinkMessage
+    var displayUpdate: Bool? = nil
+    var display: WorkoutDisplayState? = nil
+    /// Older peers ignore this field and read the message: a no-op disarm.
+    var heartbeat: Bool? = nil
+}
+
+private struct StationLinkEnvelopeHeader: Decodable {
+    let version: Int
+    let heartbeat: Bool?
+}
+
+/// The set the iPhone runner would like counted right now, or nil when the
+/// runner is resting, timed, complete or on a movement the Station can't count.
+struct StationLinkTarget: Equatable {
+    let slotID: String
+    let setNumber: Int
+    let exercise: StationExercise
+    let exerciseName: String
+    let targetReps: Int
+}
+
+/// A finished count on the iPhone. A complete count logs at once (the owner
+/// chose instant logging with undo); a partial count, or arms that counted
+/// differently, never auto-logs.
+struct StationLinkProposal: Equatable, Identifiable {
+    let eventID: UUID
+    let slotID: String
+    let setNumber: Int
+    let exerciseName: String
+    let reps: Int
+    let leftCount: Int?
+    let rightCount: Int?
+    let partial: Bool
+    let logsAutomatically: Bool
+    var id: UUID { eventID }
+    /// Both arms were counted and their totals differ.
+    var sidesDiffer: Bool {
+        guard let leftCount, let rightCount else { return false }
+        return leftCount != rightCount
+    }
+}
+
+/// The last set a Station count logged, kept so the member can undo it.
+struct StationLinkLoggedSet: Equatable {
+    let setID: String
+    let slotID: String
+    let setNumber: Int
+    let reps: Int
+}
+
+enum StationLinkPolicy {
+    /// While an undone set's deletion is still queued or sending, its slot
+    /// is not armed: progress still counts the set, so the next arm would be
+    /// for the set after it. A rejected deletion leaves the set logged.
+    static func awaitsUndo(_ undo: StationLinkLoggedSet?, slotID: String, deletionPending: Bool) -> Bool {
+        guard let undo, undo.slotID == slotID else { return false }
+        return deletionPending
+    }
+
+    /// Accept a completion only for the currently armed set, only once, and
+    /// only with a usable rep count.
+    static func proposal(for completion: StationLinkCompletion, arm: StationLinkArm?,
+                         seenEvents: Set<UUID>) -> StationLinkProposal? {
+        guard let arm, completion.armID == arm.armID, !seenEvents.contains(completion.eventID),
+              completion.reps > 0, completion.reps < 1000 else { return nil }
+        return StationLinkProposal(
+            eventID: completion.eventID, slotID: arm.slotID, setNumber: arm.setNumber,
+            exerciseName: arm.exerciseName, reps: completion.reps,
+            leftCount: completion.leftCount, rightCount: completion.rightCount,
+            partial: completion.partial,
+            logsAutomatically: !completion.partial && completion.leftCount == completion.rightCount)
+    }
+
+    /// A proposal may log only into the exact slot, set and exercise it was
+    /// counted for (a swap keeps the slot ID, so the exercise is checked too).
+    static func canCommit(_ proposal: StationLinkProposal, currentSlotID: String?,
+                          currentSetNumber: Int, currentExerciseName: String?, entryBlocked: Bool) -> Bool {
+        proposal.slotID == currentSlotID && proposal.setNumber == currentSetNumber
+            && proposal.exerciseName == currentExerciseName && !entryBlocked
+    }
+
+    /// Whether an existing arm still describes the requested target.
+    static func arm(_ arm: StationLinkArm?, matches target: StationLinkTarget?) -> Bool {
+        guard let arm, let target else { return arm == nil && target == nil }
+        return arm.slotID == target.slotID && arm.setNumber == target.setNumber
+            && arm.exercise == target.exercise && arm.exerciseName == target.exerciseName
+            && arm.targetReps == target.targetReps
+    }
+}
+
+/// Decides on the iPad when an armed set is over: at least one rep, then no new
+/// rep for `settleSeconds` while not mid-movement. Reaching the target count
+/// alone never finishes a set, so extra reps still count.
+struct StationSetEndDetector {
+    private(set) var lastCount = 0
+    private(set) var hasFinished = false
+    private var lastSides: [Int?] = [nil, nil]
+    private var lastChange: TimeInterval?
+
+    mutating func reset() { self = Self() }
+
+    /// Returns true exactly once, when the set is judged finished. A rep on
+    /// either side counts as a change, so a trailing arm keeps the set open,
+    /// and so does any movement or another person in view: the count must
+    /// hold steady while the member is still for the whole window.
+    mutating func observe(count: Int, leftCount: Int? = nil, rightCount: Int? = nil,
+                          status: StationTrackingStatus, at time: TimeInterval) -> Bool {
+        guard !hasFinished, time.isFinite else { return false }
+        let sides = [leftCount, rightCount]
+        if lastChange == nil || count != lastCount || sides != lastSides
+            || status == .moving || status == .multiplePeople {
+            lastCount = count
+            lastSides = sides
+            lastChange = time
+            return false
+        }
+        guard count > 0, let lastChange, time - lastChange >= StationLink.settleSeconds else { return false }
+        hasFinished = true
+        return true
+    }
+}

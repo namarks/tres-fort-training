@@ -1,0 +1,330 @@
+import SwiftUI
+
+/// One correction surface is used by both the active slot and final review.
+/// Original server values remain visible until the correction is acknowledged.
+struct SetReviewList: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @ObservedObject var sync: SyncModel
+    let sets: [SetLog]
+    let pending: [PendingSetIntent]
+    var lastSetShortcut = false
+    var compact = false
+    @State private var editing: ReviewItem?
+    @AppStorage(WeightUnit.preferenceKey) private var weightUnitRaw = "lb"
+
+    private struct ReviewItem: Identifiable {
+        let set: SetLog?
+        let pending: PendingSetIntent?
+        var id: String { self.set?.id ?? pending!.id }
+        var setIndex: Int { self.set?.set_index ?? pending!.body.set_index }
+        var exerciseID: String { self.set?.exercise_id ?? pending!.body.exercise_id }
+        /// The unit this set's weight was logged in. Corrections send weight
+        /// without a unit, so the editor must stay in this one.
+        var weightUnit: WeightUnit { self.set?.weightUnit ?? pending!.body.weightUnit }
+        var values: SetCorrectionValues {
+            SetCorrectionValues(weight: set?.weight ?? pending!.body.weight,
+                                reps: set?.reps ?? pending!.body.reps,
+                                rpe: set != nil ? set!.rpe : pending!.body.rpe,
+                                durationSeconds: set != nil ? set!.duration_s : pending!.body.duration_s)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(sets) { set in row(ReviewItem(set: set, pending: nil)) }
+            ForEach(pending) { intent in row(ReviewItem(set: nil, pending: intent)) }
+            if sync.correctionRefreshNeeded {
+                Text("Correction saved. Refresh needed.").font(.caption).foregroundStyle(Theme.muted)
+            }
+        }
+        .sheet(item: $editing) { item in
+            SetValuesEditor(
+                title: "Correct set", values: item.values,
+                setDescription: "set \(item.setIndex) of \(sync.exerciseName(item.exerciseID))",
+                timed: item.set.map { sync.isTimedSet($0) } ?? item.pending!.body.is_timed,
+                allowsAssistance: sync.isBodyweightExercise(item.exerciseID)
+                    || sync.isTimedExercise(item.exerciseID),
+                storedUnit: item.weightUnit,
+                unilateral: sync.sides(for: item.exerciseID) == 2,
+                onSave: { values in
+                    if let set = item.set { return sync.enqueueCorrection(set: set, values: values) }
+                    return sync.enqueueCorrection(pending: item.pending!, values: values)
+                }, onDelete: {
+                    if let set = item.set { return sync.enqueueCorrection(set: set, values: nil) }
+                    return sync.enqueueCorrection(pending: item.pending!, values: nil)
+                })
+        }
+    }
+
+    @ViewBuilder private func recoveryButtons(_ correction: PendingSetCorrection, context: String) -> some View {
+        Button { Task { await sync.retryCorrection(id: correction.id) } } label: {
+            Text("Retry").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+        }
+        .accessibilityLabel("Retry correction for " + context)
+        Button { Task { await sync.dismissRejectedCorrection(id: correction.id) } } label: {
+            Text("Reload to review").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+        }
+        .accessibilityLabel("Reload to review " + context)
+        .accessibilityIdentifier("reload-correction-\(correction.setID)")
+    }
+
+    private func recordedValues(_ item: ReviewItem, unit: WeightUnit, timed: Bool, formattedValues: String) -> some View {
+        let warmup = (item.set?.is_warmup == 1) || item.pending?.body.is_warmup == true
+        let showPreviousExercise = sync.finished || sync.currentExercise?.exercise_id != item.exerciseID
+        var compactParts = [formattedValues]
+        if !showPreviousExercise { compactParts.insert("Last set", at: 0) }
+        let timedValueIncludesUnit = timed && (item.values.durationSeconds ?? item.values.reps) > 0
+        if item.values.weight != 0 && !timedValueIncludesUnit { compactParts.append(unit.rawValue) }
+        if let rpe = item.values.rpe { compactParts.append("RPE \(SetValueFormatter.number(rpe))") }
+        if warmup { compactParts.append("Warm-up") }
+        let compactLabel = compactParts.joined(separator: " · ")
+        return VStack(alignment: .leading, spacing: 4) {
+            if compact {
+                if showPreviousExercise {
+                    Text("Last set · " + sync.exerciseName(item.exerciseID))
+                        .font(.caption).foregroundStyle(Theme.muted)
+                }
+                Text(compactLabel)
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("rest.lastValues")
+            } else {
+                Text((lastSetShortcut ? "Last set · " : "") + sync.exerciseName(item.exerciseID)).font(Theme.mono(11))
+                Text(formattedValues).font(Theme.mono(14, .bold))
+                if item.values.weight != 0 { Text("Load in \(unit.rawValue)").font(.caption).foregroundStyle(Theme.muted) }
+                if let rpe = item.values.rpe { Text("RPE \(SetValueFormatter.number(rpe))").font(.caption) }
+                if warmup {
+                    Text("Warm-up").font(.caption).foregroundStyle(Theme.muted)
+                }
+            }
+        }
+    }
+
+    private func row(_ item: ReviewItem) -> some View {
+        let unit = WeightUnit(rawValue: weightUnitRaw) ?? .lb
+        let storedUnit = item.weightUnit
+        let correction = sync.correction(for: item.id)
+        let timed = item.set.map { sync.isTimedSet($0) } ?? item.pending!.body.is_timed
+        let values = SetValueFormatter.value(
+            weight: storedUnit.convert(item.values.weight, to: unit), reps: item.values.reps,
+            durationSeconds: item.values.durationSeconds, timed: timed,
+            bodyweight: sync.isBodyweightExercise(item.exerciseID), unit: unit.rawValue,
+            unilateral: sync.sides(for: item.exerciseID) == 2)
+        return VStack(alignment: .leading, spacing: 6) {
+            let layout = dynamicTypeSize.isAccessibilitySize
+                ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8)) : AnyLayout(HStackLayout())
+            layout {
+                recordedValues(item, unit: unit, timed: timed, formattedValues: values)
+                if !dynamicTypeSize.isAccessibilitySize { Spacer() }
+                Button { editing = item } label: {
+                    Text(lastSetShortcut && !compact ? "Edit last set" : "Edit").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                }
+                .accessibilityLabel(lastSetShortcut ? "Edit last set of \(sync.exerciseName(item.exerciseID))" : "Edit set \(item.setIndex) of \(sync.exerciseName(item.exerciseID))")
+                .accessibilityIdentifier(lastSetShortcut ? "rest.editLastSet" : "edit-set-\(item.id)")
+                .disabled(correction != nil || sync.hasPendingTerminalIntentForCurrentWorkout)
+            }
+            if let correction {
+                let failed = correction.deliveryState == .failed
+                Text(failed
+                     ? (correction.failedHTTPStatus == 409
+                        ? "Correction needs review: this set or workout changed."
+                        : "\(correction.isDelete ? "Delete" : "Edit") rejected (HTTP \(correction.failedHTTPStatus ?? 400)).")
+                     : "\(correction.isDelete ? "Delete" : "Edit") pending — original retained until saved.")
+                    .font(.caption).foregroundStyle(failed ? Theme.danger : Theme.muted)
+                if let values = correction.values {
+                    Text("Requested: " + SetValueFormatter.value(
+                        weight: storedUnit.convert(values.weight, to: unit), reps: values.reps, durationSeconds: values.durationSeconds,
+                        timed: timed, bodyweight: sync.isBodyweightExercise(item.exerciseID), unit: unit.rawValue,
+                        unilateral: sync.sides(for: item.exerciseID) == 2))
+                        .font(.caption).foregroundStyle(Theme.muted)
+                }
+                if failed {
+                    let context = "set \(item.setIndex) of \(sync.exerciseName(item.exerciseID))"
+                    ViewThatFits(in: .horizontal) {
+                        HStack { recoveryButtons(correction, context: context) }
+                        VStack(alignment: .leading) { recoveryButtons(correction, context: context) }
+                    }.font(.caption)
+                }
+            }
+            if let pending = item.pending {
+                HStack {
+                    Text(pending.deliveryState == .failed ? "Set not saved" : "Set queued on this device")
+                        .font(.caption).foregroundStyle(Theme.muted)
+                    Spacer()
+                    if pending.deliveryState == .failed {
+                        Button("Retry set") { Task { await sync.retrySetIntent(id: pending.id) } }
+                    }
+                }
+            }
+        }
+        .foregroundStyle(Theme.text)
+        .padding(compact ? 0 : 12).background(compact ? Color.clear : Theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+/// Reuse the correction editor and queued-write rules for the actual committed
+/// set. The runner may already point at a different circuit member or exercise.
+struct LastRunnerSetReview: View {
+    @ObservedObject var sync: SyncModel
+    var compact = false
+
+    var body: some View {
+        if let id = sync.lastRunnerSetID {
+            let sets = sync.sets.filter {
+                $0.id == id && $0.deleted_at == nil && $0.session_id == sync.todaySession?.id
+            }
+            let pending = sync.currentWorkoutPendingSets.filter {
+                $0.id == id && sets.isEmpty
+            }
+            if !sets.isEmpty || !pending.isEmpty {
+                SetReviewList(sync: sync, sets: sets, pending: pending, lastSetShortcut: true, compact: compact)
+            }
+        }
+    }
+}
+
+struct SetValuesEditor: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    let title: String
+    let setDescription: String?
+    let timed: Bool
+    let allowsAssistance: Bool
+    let unilateral: Bool
+    let onSave: (SetCorrectionValues) -> Bool
+    let onDelete: (() -> Bool)?
+    let saveTitle: String
+    let helpText: String?
+    let repsRange: ClosedRange<Int>?
+    let rpeRange: ClosedRange<Double>
+    @Environment(\.dismiss) private var dismiss
+    @State private var weight: WeightEntryDraft
+    @AppStorage(WeightUnit.preferenceKey) private var weightUnitRaw = "lb"
+    @State private var reps: String
+    @State private var rpe: String
+    @State private var duration: String
+    @State private var error: String?
+    @State private var showDeleteConfirmation = false
+
+    init(title: String, values: SetCorrectionValues, setDescription: String? = nil,
+         timed: Bool, allowsAssistance: Bool, storedUnit: WeightUnit = .lb, unilateral: Bool = false,
+         loadIsKnown: Bool = true,
+         saveTitle: String = "Save", helpText: String? = nil,
+         repsRange: ClosedRange<Int>? = nil, rpeRange: ClosedRange<Double> = 0...10,
+         onSave: @escaping (SetCorrectionValues) -> Bool, onDelete: (() -> Bool)? = nil) {
+        self.title = title; self.setDescription = setDescription
+        self.timed = timed; self.allowsAssistance = allowsAssistance
+        self.unilateral = unilateral
+        self.onSave = onSave; self.onDelete = onDelete
+        self.saveTitle = saveTitle; self.helpText = helpText
+        self.repsRange = repsRange; self.rpeRange = rpeRange
+        var load = WeightEntryDraft(weight: values.weight, storedUnit: storedUnit, unit: storedUnit)
+        if !loadIsKnown { load.text = "" }
+        _weight = State(initialValue: load)
+        _reps = State(initialValue: String(values.reps))
+        _rpe = State(initialValue: values.rpe.map(SetValueFormatter.number) ?? "")
+        _duration = State(initialValue: String(values.durationSeconds ?? (timed ? values.reps : 30)))
+    }
+
+    private var values: SetCorrectionValues? {
+        guard let weight = weight.storedWeight, allowsAssistance || weight >= 0,
+              let reps = Int(reps), reps >= 0,
+              repsRange?.contains(reps) ?? true,
+              rpe.isEmpty || Double(rpe).map({ $0.isFinite && rpeRange.contains($0) }) == true,
+              !timed || Int(duration).map({ $0 > 0 }) == true else { return nil }
+        return SetCorrectionValues(weight: weight, reps: timed ? (Int(duration) ?? 0) : reps,
+                                   rpe: Double(rpe), durationSeconds: timed ? Int(duration) : nil)
+    }
+
+    @ViewBuilder private func valueField(_ label: String, placeholder: String,
+                                         text: Binding<String>, keyboard: UIKeyboardType) -> some View {
+        if dynamicTypeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(label)
+                TextField(placeholder, text: text)
+                    .keyboardType(keyboard).textFieldStyle(.roundedBorder)
+                    .accessibilityLabel(label).accessibilityIdentifier(placeholder)
+            }
+        } else {
+            LabeledContent(label) {
+                TextField(placeholder, text: text)
+                    .keyboardType(keyboard).multilineTextAlignment(.trailing)
+                    .accessibilityLabel(label).accessibilityIdentifier(placeholder)
+            }
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if let helpText { Text(helpText).font(.subheadline).foregroundStyle(Theme.muted) }
+                WeightUnitPicker(selection: Binding(get: { weight.unit }, set: {
+                    weight.select($0)
+                    weightUnitRaw = $0.rawValue
+                }))
+                valueField(allowsAssistance ? "Load / assist (\(weight.unit.rawValue))" : "Weight (\(weight.unit.rawValue))",
+                           placeholder: "Weight", text: $weight.text, keyboard: .numbersAndPunctuation)
+                valueField(timed ? "Duration (seconds)" : (unilateral ? "Reps per side" : "Reps"),
+                           placeholder: timed ? "Seconds" : "Reps", text: timed ? $duration : $reps,
+                           keyboard: .numberPad)
+                if unilateral && !timed {
+                    Text("Enter reps for one side. One set covers both sides.").font(.caption)
+                }
+                valueField("Actual RPE (optional)", placeholder: "—", text: $rpe, keyboard: .decimalPad)
+                if allowsAssistance { Text("Use a negative load for assistance, 0 for bodyweight, or a positive added load.").font(.caption) }
+                if let error { Text(error).foregroundStyle(.red) }
+                if onDelete != nil {
+                    Button("Delete set", role: .destructive) {
+                        showDeleteConfirmation = true
+                    }
+                    .accessibilityLabel("Delete " + (setDescription ?? "set"))
+                }
+            }
+            .scrollDismissesKeyboard(.interactively)
+            .navigationTitle(title).navigationBarTitleDisplayMode(.inline)
+            .onAppear { weight.select(WeightUnit(rawValue: weightUnitRaw) ?? .lb) }
+            .alert("Delete \(setDescription ?? "this set")?", isPresented: $showDeleteConfirmation) {
+                Button("Delete set", role: .destructive) {
+                    if onDelete?() == true { dismiss() }
+                    else { error = "Workout changed. Close this sheet and review the set again." }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This set will be removed from your workout record and totals.")
+            }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(saveTitle) {
+                        if let values, onSave(values) { dismiss() }
+                        else { error = "Workout changed. Close this sheet and review the values again." }
+                    }.disabled(values == nil)
+                }
+            }
+        }
+    }
+}
+
+/// Recovery must expose corrections even before the runner is resumed.
+struct PendingCorrectionsView: View {
+    @ObservedObject var sync: SyncModel
+    var body: some View {
+        DisclosureGroup("\(sync.setCorrections.count) set correction\(sync.setCorrections.count == 1 ? "" : "s") waiting to sync") {
+            ForEach(sync.setCorrections) { intent in
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("\(sync.exerciseName(intent.exerciseID)) · \(intent.isDelete ? "delete" : "edit") · \(intent.deliveryState == .failed ? "needs review" : "pending")")
+                    HStack {
+                        Button("Retry") { Task { await sync.retryCorrection(id: intent.id) } }
+                            .disabled(sync.sendingCorrectionIDs.contains(intent.id))
+                        if intent.deliveryState == .failed {
+                            Spacer()
+                            Button("Reload to review") { Task { await sync.dismissRejectedCorrection(id: intent.id) } }
+                        }
+                    }.frame(minHeight: 44)
+                }.padding(.top, 8)
+            }
+        }
+        .font(Theme.mono(11)).foregroundStyle(Theme.accent)
+        .padding(14).background(Theme.surface)
+    }
+}

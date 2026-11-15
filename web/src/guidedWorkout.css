@@ -1,0 +1,31 @@
+.guided-workout { max-width: 800px; }
+.guided-workout h2 { margin-bottom: 0.75rem; }
+.guided-workout button, .guided-workout input, .guided-picker summary { min-height: 44px; }
+.guided-workout .form-actions { flex-wrap: wrap; }
+.guided-choices { display: grid; gap: 0.75rem; }
+.guided-choices button { text-align: left; display: grid; gap: 0.25rem; padding: 1rem; }
+.guided-choices button span { color: var(--muted); font-weight: 400; }
+.guided-fields { border: 0; min-width: 0; margin: 0; padding: 0; }
+.guided-fields:disabled { opacity: 0.8; }
+.guided-presets { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1rem; }
+.guided-targets { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); gap: 0 1rem; }
+.guided-workout .check { min-height: 44px; margin-bottom: 0.25rem; }
+.guided-workout .check input { min-height: auto; }
+.guided-exercises { margin: 0 0 1rem; padding-left: 1.5rem; }
+.guided-exercises li { padding: 0.5rem 0; border-bottom: 1px solid var(--line); }
+.guided-exercises li > div:first-child { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.25rem 1rem; }
+.guided-exercises .row-actions { margin-top: 0.25rem; }
+.guided-picker { margin-bottom: 1rem; }
+.guided-picker summary { cursor: pointer; color: var(--accent); padding-block: 0.5rem; }
+.guided-workout .new-workout { margin-bottom: 1rem; }
+.lifting-exercises { list-style: none; padding: 0; margin: 0; }
+.lifting-targets { min-width: 0; margin: 0 0 1rem; }
+.lifting-targets summary { cursor: pointer; min-height: 44px; }
+.lifting-targets summary .muted { display: block; margin-top: 0.25rem; }
+.lifting-targets > fieldset { border: 0; margin: 1rem 0 0; padding: 0; min-width: 0; }
+.lifting-targets .row-actions { justify-content: flex-end; margin-bottom: 0.75rem; }
+.lifting-targets .field-row { flex-wrap: wrap; }
+.lifting-targets .field, .lifting-targets .inline-fields { min-width: 0; }
+.routine-preview-step { background: var(--surface-2); border-radius: 12px; padding: 1rem; }
+.routine-preview-step h4 { margin: 0.5rem 0; }
+.routine-preview-step p { margin: 0.5rem 0; }

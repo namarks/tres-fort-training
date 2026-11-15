@@ -1,0 +1,13496 @@
+import { credentialDigest, openCredential, randomSecret, sealCredential } from './credentials';
+import {
+  createIntervalsSyncService, INTERVALS_EFFECTIVE_ATHLETE_SQL, INTERVALS_SOURCE_FENCE_ENABLED_SQL,
+  type IntervalsConnectionStatus, type IntervalsUserCreds, type ActivityDedupeWindow,
+} from './services/intervalsSync';
+import { createOAuthGrantService } from './services/oauthGrants';
+import { refreshActivityLoads } from './services/activityLoad';
+import { createWhoopService, retireWhoopDuplicates } from './services/whoop';
+import {
+  createGarminService, ACTIVITY_PERMISSION_SQL as GARMIN_ACTIVITY_PERMISSION_SQL, type GarminFileMeta, type GarminWorkout,
+} from './services/garmin';
+import { heartRateStreamSummary, powerStreamSummary, type Sample } from './trainingLoad';
+import type { FitActivity } from './fitFile';
+import type { TcxRun } from './tcxFile';
+import { decodeRoute, encodeRoute, parseStoredRoute, routePointCount, type EncodedRoute } from './activityRoute';
+import { buildActivityStreams, trackFromRoute, type ActivityStreams } from './activityStreams';
+import { decodeHeartRate, encodeHeartRate, parseStoredHeartRate, type EncodedHeartRate } from './heartRateSeries';
+import {
+  decodeValues, encodePowerSeries, fitPowerSeries, parseStoredPowerSeries, powerSeriesPoints, type EncodedPowerSeries,
+} from './powerSeries';
+import type { Fetcher } from './intervals';
+import {
+  addAthleteThreshold, deleteAthleteThreshold, listAthleteThresholds, thresholdOn, type ThresholdInput,
+} from './services/athleteThresholds';
+import { createIntervalsActivityWriteService } from './services/intervalsActivityWrite';
+import { createIntervalsRouteService } from './services/intervalsRoute';
+import { isPartnerWorkoutInput, isPartnerStartInput, partnerRequestJSON, partnerSlotKeys,
+  type PartnerWorkoutInput, type PartnerStartInput, type PartnerSlot } from './partnerTraining';
+import { validWorkoutTags, normalizeWorkoutTags, validArchivedAt } from './workoutMetadata';
+import { deriveFreestylePrescriptions, type FreestylePrescription } from './freestyle';
+import { addDays, weekdayOf, weekPatternOn, projectCalendar, projectCalendarWindow, projectRideConflicts } from './calendarProjection';
+import { applyWeekTargets, weekTargetsOn } from './programTargets';
+import {
+  buildEventProgram, defaultPeakMeters, defaultTaperWeeks, defaultWorkoutWeekday, goalPace, mondayOf, mondayOnOrAfter,
+  BUILD_LIMITS, type BuildUnit, type BuildWeekSummary,
+} from './programBuilder';
+import type { PlanVersionConflict, SlotEditOptions, SlotEditResult } from './planEditResult';
+export type { PlanVersionConflict } from './planEditResult';
+import type { CalendarCell, CalendarInputs, ProjectionEvent, ProjectionActivity, StrengthCalendarInputs } from './calendarProjection';
+export { addDays, weekdayOf, projectCalendar, detectConflicts } from './calendarProjection';
+export type { CalendarCell, EnduranceItem, ProjectionEvent, ProjectionActivity } from './calendarProjection';
+import { activitySourceAttribution, withActivityAttribution, GARMIN_ACTIVITY_SQL, GARMIN_SUMMARY_ATTRIBUTION } from './dataAttribution';
+import { applicableSessionSwap, parseSessionExerciseSwaps } from './sessionExerciseSwaps';
+import { parseTrainingProfile, starterWorkouts, type TrainingProfile } from './trainingProfile';
+import { sharedText, type GroupReportReason } from './groupSafety';
+import { APP_REVIEW_SUB } from './appReview';
+import { validActivitySourceTime } from './activityTime';
+import { healthKitTypeOf, sportForHealthKitType, sportLabel } from './sports';
+// Public service facade: REST and MCP share the same domain operations.
+// Cohesive internal services live in services/; they never import this facade. Timestamps are epoch-ms integers.
+import { parseRunnerTargets, summarizeWorkout, type SummaryExercise, type SummarySet, type RunnerTargetSnapshot, type WorkoutSummary } from './workoutSummary';
+import { metricCohorts, estimatedOneRepMax, loadUnit, positiveSetTonnage, type MetricExercise } from './metrics';
+import type {
+  ActivityRow,
+  AppClient,
+  DayConflict,
+  WorkoutRow,
+  EnrichedTemplateExercise,
+  ExternalActivityRow,
+  ExternalEventRow,
+  Group,
+  GroupInvite,
+  PeriodizationPhase,
+  PlanMeta,
+  PlanRow,
+  PlanTree,
+  RaceGoal,
+  ResolvedGroupMember,
+  ScheduleExtras,
+  ScheduleTimes,
+  ScheduleWeek,
+  SessionRow,
+  SetLogRow,
+  StressModel,
+  TemplateExerciseRow,
+  Trip,
+  User,
+  Weekday,
+  WeeklySchedule,
+  Env,
+} from './types';
+import { MAX_PROGRAM_LABEL, MAX_PROGRAM_NAME, MAX_PROGRAM_WEEKS, MAX_PROGRAM_WEEK_TARGETS, MAX_SCHEDULE_EXTRAS, SLOT_TARGET_FIELDS, WEEKDAYS, normalizeScheduleExtras, normalizeScheduleTimes, parsePlanMeta, serializePlanMeta, type ProgramWeek, type SlotTargets, type TrainingProgram } from './types';
+import {
+  comparePlanSnapshots,
+  parsePlanSnapshot,
+  serializePlanSnapshot,
+  type PlanSnapshotDocument,
+} from './planSnapshots';
+import {
+  hasAppleProviderSigningConfig,
+  revokeAppleRefreshToken,
+  type AppleProviderConfig,
+} from './apple';
+import {
+  runWorkoutWriteBatch,
+  runWorkoutWriteStatement,
+} from './workout-write-fence';
+import { RUN_EXERCISE_ID, parseRunSteps, serializeRunSteps } from './runSteps';
+import { parseRunLaps, serializeRunLaps, type RunLap } from './runLaps';
+import {
+  parseRecordingDiagnostics,
+  serializeRecordingDiagnostics,
+  type RecordingDiagnostics,
+} from './recordingDiagnostics';
+import { blobBytes, bytesToBase64, parseStoredContext } from './problemReports';
+import { parseStoredSwimDetail, summarizeSwim, type SwimDetail, type SwimSummary } from './swimDetail';
+import { emptyExerciseGroup, isGroupId, normalizeRemovedGroupMember, validateExerciseGroups, validatePlanExerciseGroups, type ExerciseGroupFields, type GroupConflict } from './exerciseGroups';
+export type { GroupConflict } from './exerciseGroups';
+const now = () => Date.now();
+const uuid = () => crypto.randomUUID();
+
+/** Snapshot the selected slot's day at the same write boundary as its first
+ * accepted set. In-session overrides can differ from the session's day pin. */
+function runnerTargetSnapshotSQL(dayExpression: string, timestamp: string, ownerExpression = 'sessions.user_id',
+  overridesExpression = "'{}'"): string {
+  // One week of a block can give a slot its own targets (P1). The overrides
+  // are JSON, slot id → fields; json_type tells an absent field (keep the
+  // slot's value) from an explicit null (clear it).
+  const target = (field: string) => {
+    const path = `'$."' || te.id || '".${field}'`;
+    return `CASE WHEN json_type(${overridesExpression}, ${path}) IS NOT NULL
+      THEN json_extract(${overridesExpression}, ${path}) ELSE te.${field} END`;
+  };
+  const duration = target('target_duration_s');
+  const reps = target('target_reps');
+  const repsMax = target('target_reps_max');
+  return `(SELECT json_object('version', 1, 'captured_at', ${timestamp}, 'plan_version', p.version,
+    'slots', json((SELECT json_group_array(json_object(
+      'slot_id', te.id, 'exercise_id', te.exercise_id, 'name', e.name,
+      'is_warmup', te.is_warmup,
+      'is_timed', CASE WHEN e.modality IN ('timed','cardio') OR ${duration} IS NOT NULL THEN 1 ELSE 0 END,
+      'sets', ${target('target_sets')}, 'reps', ${reps},
+      'reps_max', CASE WHEN ${repsMax} < ${reps} THEN NULL ELSE ${repsMax} END,
+      'weight', ${target('target_weight')}, 'weight_unit', ${target('target_weight_unit')},
+      'duration_s', ${duration}, 'rpe', ${target('target_rpe')}))
+      FROM template_exercises te JOIN exercises e ON e.id=te.exercise_id
+      WHERE te.workout_id=d.id)))
+    FROM workouts d JOIN plans p ON p.id=d.plan_id
+    WHERE d.id=${dayExpression} AND p.user_id=${ownerExpression})`;
+}
+
+/** SQL for the slot targets of the block week covering `dateExpression`, read
+ * from the same plans row (`p`) as the snapshot's version and slots, so a
+ * concurrent set_program cannot leave a mixed snapshot. Mirror of
+ * `weekTargetsOn` over the normalized stored program: civil day span from
+ * the start Monday, one week per seven days, wrapping only when it repeats. */
+function programWeekTargetsSQL(dateExpression: string, metaExpression = 'p.meta'): string {
+  const start = `json_extract(${metaExpression}, '$.program.start')`;
+  const count = `json_array_length(${metaExpression}, '$.program.weeks')`;
+  const span = `CAST(julianday(${dateExpression}) - julianday(${start}) AS INTEGER)`;
+  const index = `CASE WHEN json_extract(${metaExpression}, '$.program.repeat') THEN (${span} / 7) % ${count}
+    WHEN ${span} / 7 < ${count} THEN ${span} / 7 END`;
+  return `COALESCE(CASE WHEN json_valid(${metaExpression}) AND ${count} > 0 AND ${span} >= 0
+    THEN json_extract(${metaExpression}, '$.program.weeks[' || (${index}) || '].targets') END, '{}')`;
+}
+
+interface SetPrescriptionContext { plan_id: string; version: number; day_id: string }
+
+/** Offline log intents name an immutable, owner-scoped plan snapshot. Missing
+ * history stays unavailable; never substitute a newer prescription. */
+async function targetsForSetPrescription(
+  db: D1Database, userId: string, context: SetPrescriptionContext, capturedAt: number, date: string,
+): Promise<string | null> {
+  const stored = await db.prepare(
+    'SELECT document FROM plan_snapshots WHERE user_id=?1 AND plan_id=?2 AND version=?3')
+    .bind(userId, context.plan_id, context.version).first<{ document: string }>();
+  if (!stored) return null;
+  let day;
+  let program;
+  try {
+    const document = parsePlanSnapshot(stored.document);
+    day = document.workouts.find((day) => day.id === context.day_id);
+    program = parsePlanMeta(document.plan.meta).program;
+  } catch { return null; }
+  if (!day) return null;
+  // The week of the block that covers the session's date sets its targets.
+  day = applyWeekTargets(day, program, date);
+  const catalog = await getExercises(db) as unknown as SummaryExercise[];
+  const targets: RunnerTargetSnapshot = { version: 1, captured_at: capturedAt,
+    plan_version: context.version, slots: [] };
+  for (const slot of day.exercises) {
+    const exercise = catalog.find((exercise) => exercise.id === slot.exercise_id);
+    if (!exercise) return null;
+    targets.slots.push({ slot_id: slot.id, exercise_id: slot.exercise_id, name: exercise.name,
+      is_warmup: slot.is_warmup, is_timed: ['timed', 'cardio'].includes(exercise.modality)
+        || slot.target_duration_s != null ? 1 : 0,
+      sets: slot.target_sets, reps: slot.target_reps, reps_max: slot.target_reps_max,
+      weight: slot.target_weight, weight_unit: slot.target_weight_unit ?? 'lb',
+      duration_s: slot.target_duration_s, rpe: slot.target_rpe });
+  }
+  return JSON.stringify(targets);
+}
+
+// ---- D1 usage observability ---------------------------------------------
+
+export interface D1Usage {
+  query_count: number;
+  rows_read: number;
+  rows_written: number;
+}
+
+export interface D1UsageObserver {
+  db: D1Database;
+  usage: D1Usage;
+}
+
+/** Add one completed D1 query's billing counters to a request-local total. */
+function addD1Usage(usage: D1Usage, result: D1Result<unknown>): void {
+  usage.query_count += 1;
+  usage.rows_read += result.meta.rows_read;
+  usage.rows_written += result.meta.rows_written;
+}
+
+/**
+ * Wrap a prepared statement so all()/run() metadata contributes to `usage`.
+ * D1 first() deliberately returns no metadata, so measured paths execute the
+ * same prepared query through all() and project its first row locally.
+ */
+function measuredStatement(
+  statement: D1PreparedStatement,
+  usage: D1Usage,
+  originals: WeakMap<D1PreparedStatement, D1PreparedStatement>,
+): D1PreparedStatement {
+  const measured = new Proxy(statement, {
+    get(target, property) {
+      if (property === 'bind') {
+        return (...values: unknown[]) => measuredStatement(target.bind(...values), usage, originals);
+      }
+      if (property === 'first') {
+        return async (columnName?: string): Promise<unknown> => {
+          const result = await target.all<Record<string, unknown>>();
+          addD1Usage(usage, result);
+          const first = result.results[0];
+          if (first === undefined) return null;
+          if (columnName === undefined) return first;
+          if (!Object.prototype.hasOwnProperty.call(first, columnName)) {
+            throw new Error(`D1_ERROR: column not found: ${columnName}`);
+          }
+          return first[columnName];
+        };
+      }
+      if (property === 'run') {
+        return async <T = Record<string, unknown>>(): Promise<D1Result<T>> => {
+          const result = await target.run<T>();
+          addD1Usage(usage, result);
+          return result;
+        };
+      }
+      if (property === 'all') {
+        return async <T = Record<string, unknown>>(): Promise<D1Result<T>> => {
+          const result = await target.all<T>();
+          addD1Usage(usage, result);
+          return result;
+        };
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  originals.set(measured, statement);
+  return measured;
+}
+
+/**
+ * Run one request/tool/tick with a request-local D1 collector and emit one
+ * searchable JSON line. The wrapper also unwraps statements before batch(),
+ * then totals each result's metadata without double-counting prepared calls.
+ */
+export function createD1UsageObserver(db: D1Database): D1UsageObserver {
+  const usage: D1Usage = { query_count: 0, rows_read: 0, rows_written: 0 };
+  const originals = new WeakMap<D1PreparedStatement, D1PreparedStatement>();
+  const measuredDb = new Proxy(db, {
+    get(target, property) {
+      if (property === 'prepare') {
+        return (query: string) => measuredStatement(target.prepare(query), usage, originals);
+      }
+      if (property === 'batch') {
+        return async <TResult = unknown>(
+          statements: D1PreparedStatement[],
+        ): Promise<D1Result<TResult>[]> => {
+          const results = await target.batch<TResult>(
+            statements.map((statement) => originals.get(statement) ?? statement),
+          );
+          for (const result of results) addD1Usage(usage, result);
+          return results;
+        };
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return { db: measuredDb, usage };
+}
+
+export function logD1Usage(
+  operation: string,
+  outcome: 'ok' | 'error',
+  usage: D1Usage,
+  measurement: { duration_ms: number; response_bytes: number | null },
+): void {
+  console.log({ event: 'd1_usage', operation, outcome, ...usage, ...measurement });
+}
+
+export async function observeD1Usage<T>(
+  db: D1Database,
+  operation: string,
+  task: (measuredDb: D1Database) => Promise<T>,
+  outcomeForResult?: (result: T) => 'ok' | 'error',
+  bytesForResult?: (result: T) => number | null,
+): Promise<T> {
+  const startedAt = performance.now();
+  let response_bytes: number | null = null;
+  const observer = createD1UsageObserver(db);
+  let outcome: 'ok' | 'error' = 'ok';
+  try {
+    const result = await task(observer.db);
+    outcome = outcomeForResult?.(result) ?? 'ok';
+    response_bytes = bytesForResult?.(result) ?? null;
+    return result;
+  } catch (error) {
+    outcome = 'error';
+    throw error;
+  } finally {
+    logD1Usage(operation, outcome, observer.usage, {
+      duration_ms: performance.now() - startedAt, response_bytes,
+    });
+  }
+}
+
+// ---- users ---------------------------------------------------------------
+
+async function sha256Hex(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(value),
+  );
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+export function isAccountDeletionKey(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value,
+  );
+}
+
+/**
+ * A signed, expired app bearer may continue only a deletion that was already
+ * claimed while authentication was recent, or acknowledge its committed
+ * receipt. The exact high-entropy key must match either durable row.
+ */
+export async function accountDeletionContinuationMatches(
+  db: D1Database,
+  userId: string,
+  idempotencyKey: string,
+): Promise<boolean> {
+  if (!isAccountDeletionKey(idempotencyKey)) return false;
+  const row = await db
+    .prepare(
+      `SELECT idempotency_key_sha256
+         FROM account_deletion_intents WHERE user_id = ?1
+       UNION ALL
+       SELECT idempotency_key_sha256
+         FROM account_deletion_receipts WHERE user_id = ?1
+       LIMIT 1`,
+    )
+    .bind(userId)
+    .first<{ idempotency_key_sha256: string }>();
+  return Boolean(
+    row && row.idempotency_key_sha256 === (await sha256Hex(idempotencyKey)),
+  );
+}
+
+/** True while the provider/local deletion operation owns this principal. */
+export async function isAccountDeletionInProgress(
+  db: D1Database,
+  userId: string,
+): Promise<boolean> {
+  return (
+    (await db
+      .prepare(
+        'SELECT 1 AS x FROM account_deletion_intents WHERE user_id = ?1',
+      )
+      .bind(userId)
+      .first<{ x: number }>()) !== null
+  );
+}
+
+/**
+ * Store only the caller-scoped Apple refresh token. The conditional upsert and
+ * migration triggers serialize replacement against deletion intent creation.
+ */
+export async function storeAppleRefreshToken(
+  db: D1Database,
+  userId: string,
+  refreshToken: string,
+): Promise<boolean> {
+  if (!refreshToken) return false;
+  const result = await db
+    .prepare(
+      `INSERT INTO apple_refresh_tokens (user_id, refresh_token, updated_at)
+       SELECT ?1, ?2, ?3
+        WHERE EXISTS (SELECT 1 FROM users WHERE id = ?1)
+          AND NOT EXISTS (
+                SELECT 1 FROM account_deletion_intents WHERE user_id = ?1
+              )
+          AND NOT EXISTS (
+                SELECT 1 FROM account_deletion_receipts WHERE user_id = ?1
+              )
+          AND NOT EXISTS (
+                SELECT 1 FROM apple_grant_exchange_state WHERE user_id = ?1
+              )
+       ON CONFLICT(user_id) DO UPDATE SET
+         refresh_token = excluded.refresh_token,
+         updated_at = excluded.updated_at`,
+    )
+    .bind(userId, refreshToken, now())
+    .run();
+  return (result.meta.changes ?? 0) === 1;
+}
+
+const APPLE_GRANT_EXCHANGE_FRESH_MS = 60_000;
+
+/**
+ * Reserve the provider-I/O gap for one Sign in with Apple code exchange.
+ * A fresh active reservation wins. An abandoned active reservation may be
+ * replaced after 60 seconds, but doing so permanently records revocation
+ * uncertainty because Apple may have issued a grant to the abandoned call.
+ */
+export async function beginAppleGrantExchange(
+  db: D1Database,
+  userId: string,
+  reservationId: string,
+  nowMs = now(),
+): Promise<boolean> {
+  if (!isAccountDeletionKey(reservationId)) return false;
+  const staleBefore = nowMs - APPLE_GRANT_EXCHANGE_FRESH_MS;
+  const result = await db
+    .prepare(
+      `INSERT INTO apple_grant_exchange_state
+         (user_id, reservation_id, active_since, revocation_uncertain)
+       SELECT id, ?2, ?3, 0 FROM users
+        WHERE id = ?1
+          AND NOT EXISTS (
+                SELECT 1 FROM account_deletion_intents WHERE user_id = ?1
+              )
+          AND NOT EXISTS (
+                SELECT 1 FROM account_deletion_receipts WHERE user_id = ?1
+              )
+       ON CONFLICT(user_id) DO UPDATE SET
+         reservation_id = excluded.reservation_id,
+         active_since = excluded.active_since,
+         revocation_uncertain = CASE
+           WHEN apple_grant_exchange_state.reservation_id IS NOT NULL
+            AND apple_grant_exchange_state.active_since < ?4
+           THEN 1
+           ELSE apple_grant_exchange_state.revocation_uncertain
+         END
+       WHERE (
+               apple_grant_exchange_state.reservation_id IS NULL
+            OR apple_grant_exchange_state.active_since < ?4
+             )
+         AND NOT EXISTS (
+               SELECT 1 FROM account_deletion_intents WHERE user_id = ?1
+             )
+         AND NOT EXISTS (
+               SELECT 1 FROM account_deletion_receipts WHERE user_id = ?1
+             )`,
+    )
+    .bind(userId, reservationId, nowMs, staleBefore)
+    .run();
+  return (result.meta.changes ?? 0) === 1;
+}
+
+/**
+ * Record that Apple may have accepted the matching exchange even though the
+ * caller did not receive a trustworthy token response. Uncertainty survives
+ * every later exchange and forces manual provider cleanup at deletion.
+ */
+export async function markAppleGrantExchangeUncertain(
+  db: D1Database,
+  userId: string,
+  reservationId: string,
+): Promise<boolean> {
+  if (!isAccountDeletionKey(reservationId)) return false;
+  const result = await db
+    .prepare(
+      `UPDATE apple_grant_exchange_state
+          SET reservation_id = NULL,
+              active_since = NULL,
+              revocation_uncertain = 1
+        WHERE user_id = ?1 AND reservation_id = ?2`,
+    )
+    .bind(userId, reservationId)
+    .run();
+  return (result.meta.changes ?? 0) === 1;
+}
+
+/**
+ * Store the newly returned refresh token while retaining exactly its active
+ * reservation. Keeping that row through the storage commit is deliberate: if
+ * D1 commits and the binding then throws, the route can still mark the exact
+ * exchange uncertain and deletion remains blocked until it does. A separate
+ * acknowledgement clears the reservation only after this call returns.
+ */
+export async function finishAppleGrantExchange(
+  db: D1Database,
+  userId: string,
+  reservationId: string,
+  refreshToken: string,
+): Promise<boolean> {
+  if (!isAccountDeletionKey(reservationId) || !refreshToken) return false;
+  const ts = now();
+  const [stored, retained] = await db.batch([
+    db
+      .prepare(
+        `INSERT INTO apple_refresh_tokens (user_id, refresh_token, updated_at)
+         SELECT s.user_id, ?3, ?4
+           FROM apple_grant_exchange_state s
+          WHERE s.user_id = ?1
+            AND s.reservation_id = ?2
+            AND EXISTS (SELECT 1 FROM users WHERE id = ?1)
+            AND NOT EXISTS (
+                  SELECT 1 FROM account_deletion_intents WHERE user_id = ?1
+                )
+            AND NOT EXISTS (
+                  SELECT 1 FROM account_deletion_receipts WHERE user_id = ?1
+                )
+         ON CONFLICT(user_id) DO UPDATE SET
+           refresh_token = excluded.refresh_token,
+           updated_at = excluded.updated_at`,
+      )
+      .bind(userId, reservationId, refreshToken, ts),
+    db
+      .prepare(
+        `UPDATE apple_grant_exchange_state
+            SET active_since = ?3
+          WHERE user_id = ?1
+            AND reservation_id = ?2
+            AND changes() = 1`,
+      )
+      .bind(userId, reservationId, ts),
+  ]);
+  return (
+    (stored?.meta.changes ?? 0) === 1 &&
+    (retained?.meta.changes ?? 0) === 1
+  );
+}
+
+/**
+ * Acknowledge a refresh-token store that the caller observed as successful.
+ * Clearing and clean-row deletion remain exact-reservation conditional; any
+ * prior sticky uncertainty survives for deletion to consume. If this call is
+ * ambiguous, the route can safely attempt the exact uncertainty marker: a
+ * committed acknowledgement means the token is known, while an uncommitted
+ * acknowledgement still has the reservation available to mark fail-closed.
+ */
+export async function acknowledgeAppleGrantExchange(
+  db: D1Database,
+  userId: string,
+  reservationId: string,
+): Promise<boolean> {
+  if (!isAccountDeletionKey(reservationId)) return false;
+  const [cleared, removed] = await db.batch([
+    db
+      .prepare(
+        `UPDATE apple_grant_exchange_state
+            SET reservation_id = NULL, active_since = NULL
+          WHERE user_id = ?1 AND reservation_id = ?2`,
+      )
+      .bind(userId, reservationId),
+    db
+      .prepare(
+        `DELETE FROM apple_grant_exchange_state
+          WHERE user_id = ?1
+            AND reservation_id IS NULL
+            AND revocation_uncertain = 0
+            AND changes() = 1`,
+      )
+      .bind(userId),
+  ]);
+  const clearedCount = cleared?.meta.changes ?? 0;
+  const removedCount = removed?.meta.changes ?? 0;
+  return clearedCount === 1 && (removedCount === 0 || removedCount === 1);
+}
+
+/**
+ * Account deletion is terminal for the distinguished owner until an
+ * administrator deliberately clears the singleton tombstone. Keeping this
+ * check independent of the users table prevents static MCP/bootstrap traffic
+ * from recreating the owner or promoting the earliest surviving member.
+ */
+export async function isOwnerDeletionTombstoned(
+  db: D1Database,
+): Promise<boolean> {
+  const row = await db
+    .prepare('SELECT 1 AS x FROM owner_deletion_tombstone WHERE singleton = 1')
+    .first<{ x: number }>();
+  return row !== null;
+}
+
+/**
+ * Durable owner-deletion history survives administrative removal of the
+ * identity tombstone. It prevents the legacy OWNER_APPLE_SUB-unset fallback
+ * from treating the earliest surviving member as the new distinguished owner.
+ */
+async function hasOwnerDeletionReceipt(db: D1Database): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `SELECT 1 AS x FROM account_deletion_receipts
+        WHERE owner_tombstoned = 1 LIMIT 1`,
+    )
+    .first<{ x: number }>();
+  return row !== null;
+}
+
+/** True only for the Apple identity that deleted the owner account. */
+export async function isDeletedOwnerAppleSub(
+  db: D1Database,
+  appleSub: string,
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      'SELECT apple_sub_sha256 FROM owner_deletion_tombstone WHERE singleton = 1',
+    )
+    .first<{ apple_sub_sha256: string }>();
+  if (!row) return false;
+  return row.apple_sub_sha256 === (await sha256Hex(appleSub));
+}
+
+/** The single Apple-identity lookup: sign-in, upsert and the owner claim all
+ *  resolve a principal by `users.apple_sub` through here. */
+export async function findUserByAppleSub(
+  db: D1Database,
+  appleSub: string,
+): Promise<User | null> {
+  return db
+    .prepare('SELECT * FROM users WHERE apple_sub = ?1')
+    .bind(appleSub)
+    .first<User>();
+}
+
+export async function upsertUser(
+  db: D1Database,
+  appleSub: string,
+  email: string | null,
+  displayName: string | null,
+): Promise<User> {
+  const existing = await findUserByAppleSub(db, appleSub);
+  if (existing) {
+    if (displayName && !existing.display_name) {
+      await db
+        .prepare('UPDATE users SET display_name = ?2 WHERE id = ?1')
+        .bind(existing.id, displayName)
+        .run();
+      existing.display_name = displayName;
+    }
+    return existing;
+  }
+  const user: User = {
+    id: uuid(),
+    apple_sub: appleSub,
+    email,
+    display_name: displayName,
+    created_at: now(),
+    timezone: null,
+    intervals_api_key: null,
+    intervals_athlete_id: null,
+    intervals_cutover_athlete_id: null,
+    intervals_oauth_access_token: null,
+    intervals_oauth_refresh_token: null,
+    intervals_oauth_expires_at: null,
+    intervals_auth_error_at: null,
+    intervals_credential_generation: 0,
+    intervals_events_synced_at: null,
+    intervals_activities_synced_at: null,
+    intervals_events_sync_attempt: 0,
+    intervals_activities_sync_attempt: 0,
+    intervals_protocol_write_seq: 0,
+    mcp_passphrase_hash: null,
+    mcp_passphrase_salt: null,
+  };
+  await db
+    .prepare(
+      'INSERT INTO users (id, apple_sub, email, display_name, created_at) VALUES (?1,?2,?3,?4,?5)',
+    )
+    .bind(user.id, user.apple_sub, user.email, user.display_name, user.created_at)
+    .run();
+  return user;
+}
+
+/**
+ * Open-sign-in creation path that cannot recreate the deliberately deleted
+ * owner identity. The one-way identity comparison and INSERT share one SQLite
+ * statement, so a concurrent owner deletion that wins the write lock also
+ * prevents a stale sign-in request from inserting the same Apple subject.
+ */
+export async function upsertUserUnlessDeletedOwner(
+  db: D1Database,
+  appleSub: string,
+  email: string | null,
+  displayName: string | null,
+): Promise<User | null> {
+  const candidateId = uuid();
+  const createdAt = now();
+  const appleSubHash = await sha256Hex(appleSub);
+  await db
+    .prepare(
+      `INSERT INTO users (id, apple_sub, email, display_name, created_at)
+       SELECT ?1, ?2, ?3, ?4, ?5
+        WHERE NOT EXISTS (
+                SELECT 1 FROM owner_deletion_tombstone
+                 WHERE singleton = 1 AND apple_sub_sha256 = ?6
+              )
+       ON CONFLICT(apple_sub) DO NOTHING`,
+    )
+    .bind(candidateId, appleSub, email, displayName, createdAt, appleSubHash)
+    .run();
+  return db
+    .prepare(
+      `SELECT u.* FROM users u
+        WHERE u.apple_sub = ?1
+          AND NOT EXISTS (
+                SELECT 1 FROM owner_deletion_tombstone
+                 WHERE singleton = 1 AND apple_sub_sha256 = ?2
+              )`,
+    )
+    .bind(appleSub, appleSubHash)
+    .first<User>();
+}
+
+/**
+ * Create the distinguished owner only while no terminal owner tombstone
+ * exists. The predicate and INSERT share one SQLite statement, so a deletion
+ * that wins the write lock cannot be followed by a stale bootstrap request
+ * recreating the owner.
+ */
+async function insertOwnerUnlessTombstoned(
+  db: D1Database,
+  appleSub: string,
+  email: string | null,
+  displayName: string | null,
+  requireEmptyUsers: boolean,
+): Promise<User | null> {
+  if (appleSub === APP_REVIEW_SUB) return null;
+  const candidate: User = {
+    id: uuid(),
+    apple_sub: appleSub,
+    email,
+    display_name: displayName,
+    created_at: now(),
+    timezone: null,
+    intervals_api_key: null,
+    intervals_athlete_id: null,
+    intervals_cutover_athlete_id: null,
+    intervals_oauth_access_token: null,
+    intervals_oauth_refresh_token: null,
+    intervals_oauth_expires_at: null,
+    intervals_auth_error_at: null,
+    intervals_credential_generation: 0,
+    intervals_events_synced_at: null,
+    intervals_activities_synced_at: null,
+    intervals_events_sync_attempt: 0,
+    intervals_activities_sync_attempt: 0,
+    intervals_protocol_write_seq: 0,
+    mcp_passphrase_hash: null,
+    mcp_passphrase_salt: null,
+  };
+  await db
+    .prepare(
+      `INSERT INTO users (id, apple_sub, email, display_name, created_at)
+       SELECT ?1, ?2, ?3, ?4, ?5
+        WHERE NOT EXISTS (
+                SELECT 1 FROM owner_deletion_tombstone WHERE singleton = 1
+              )
+          AND (?6 = 0 OR NOT EXISTS (SELECT 1 FROM users WHERE apple_sub != ?7))
+       ON CONFLICT(apple_sub) DO NOTHING`,
+    )
+    .bind(
+      candidate.id,
+      candidate.apple_sub,
+      candidate.email,
+      candidate.display_name,
+      candidate.created_at,
+      requireEmptyUsers ? 1 : 0,
+      APP_REVIEW_SUB,
+    )
+    .run();
+  return db
+    .prepare(
+      `SELECT u.* FROM users u
+        WHERE u.apple_sub = ?1
+          AND NOT EXISTS (
+                SELECT 1 FROM owner_deletion_tombstone WHERE singleton = 1
+              )`,
+    )
+    .bind(appleSub)
+    .first<User>();
+}
+
+/**
+ * Sign in with Apple owner resolution. Single-user invariant: there is
+ * exactly one user row. If this Apple sub is unseen and the only existing
+ * user is the MCP bootstrap sentinel, *claim* that row — rebinding it to the
+ * real Apple identity — so MCP-seeded data and iOS stay on one user_id.
+ * The claim is a compare-and-swap: a concurrent sign-in that loses the
+ * sentinel creates an ordinary user instead of stealing the winner's row.
+ */
+export async function claimOrCreateOwner(
+  db: D1Database,
+  appleSub: string,
+  email: string | null,
+  displayName: string | null,
+  ownerSubLocked: boolean,
+): Promise<User | null> {
+  if (appleSub === APP_REVIEW_SUB) return null;
+  const byApple = await db
+    .prepare(
+      `SELECT u.* FROM users u
+        WHERE u.apple_sub = ?1
+          AND NOT EXISTS (
+                SELECT 1 FROM owner_deletion_tombstone WHERE singleton = 1
+              )`,
+    )
+    .bind(appleSub)
+    .first<User>();
+  if (byApple) return byApple;
+
+  if (!ownerSubLocked) {
+    const bootstrap = await findUserByAppleSub(db, BOOTSTRAP_APPLE_SUB);
+    if (bootstrap) {
+      const claimed = await db
+        .prepare(
+          `UPDATE users
+              SET apple_sub = ?2, email = ?3, display_name = ?4
+            WHERE id = ?1
+              AND apple_sub = ?5
+              AND NOT EXISTS (
+                    SELECT 1 FROM owner_deletion_tombstone WHERE singleton = 1
+                  )`,
+        )
+        .bind(
+          bootstrap.id,
+          appleSub,
+          email ?? bootstrap.email,
+          displayName ?? bootstrap.display_name,
+          BOOTSTRAP_APPLE_SUB,
+        )
+        .run();
+      if ((claimed.meta.changes ?? 0) === 1) {
+        return db
+          .prepare(
+            `SELECT u.* FROM users u
+              WHERE u.id = ?1 AND u.apple_sub = ?2
+                AND NOT EXISTS (
+                      SELECT 1 FROM owner_deletion_tombstone WHERE singleton = 1
+                    )`,
+          )
+          .bind(bootstrap.id, appleSub)
+          .first<User>();
+      }
+    }
+  }
+  return insertOwnerUnlessTombstoned(db, appleSub, email, displayName, false);
+}
+
+/**
+ * Sentinel apple_sub the MCP bootstrap path stamps on the seeded owner row
+ * when OWNER_APPLE_SUB is unset. iOS sign-in detects this value to decide
+ * whether the sole users row is an unclaimed bootstrap (safe to claim) vs.
+ * a real Apple-bound account (must NOT be re-claimed by a different sub).
+ */
+export const BOOTSTRAP_APPLE_SUB = 'mcp-owner';
+
+/**
+ * Resolve the single owner user for MCP calls. The MCP principal is "Claude
+ * acting as the owner", not an end-user login — so it maps to the one user
+ * row. If none exists yet (iOS app not built), bootstrap it so Claude can
+ * start building a plan in chat before milestone (d).
+ */
+export async function ensureOwnerUser(
+  db: D1Database,
+  ownerAppleSub: string | undefined,
+): Promise<User | null> {
+  const existing = await findOwnerRow(db, ownerAppleSub);
+  if (existing) return existing;
+  // Clearing the identity tombstone re-enables explicit recovery, but it must
+  // not restore the old implicit bootstrap/earliest-user behavior. Configure
+  // a replacement OWNER_APPLE_SUB or deliberately insert the bootstrap
+  // sentinel before calling this path.
+  if (!ownerAppleSub && (await hasOwnerDeletionReceipt(db))) return null;
+  return insertOwnerUnlessTombstoned(
+    db,
+    ownerAppleSub ?? BOOTSTRAP_APPLE_SUB,
+    null,
+    'Owner',
+    !ownerAppleSub,
+  );
+}
+
+/**
+ * Find the owner user row. Two semantics depending on whether the
+ * deployment has configured an OWNER_APPLE_SUB allowlist:
+ *
+ *  - ownerAppleSub SET → look up by apple_sub. The owner is specifically
+ *    the row whose apple_sub matches the configured allowlist; "earliest
+ *    user by created_at" would be wrong here because open sign-in (Path
+ *    4 in /auth/apple) can create non-owner accounts before the owner
+ *    ever signs in or MCP seeds the row. Treating a reviewer/new-user
+ *    row as the owner would attribute Claude's plan + sets + intervals
+ *    creds to the wrong user. (Codex PR #38 P1.)
+ *  - ownerAppleSub UNSET → fall back to "earliest by created_at" only before
+ *    any distinguished-owner deletion. After deletion history exists, an
+ *    explicitly inserted bootstrap sentinel is the only owner row this mode
+ *    will resolve; ordinary surviving members are never promoted.
+ *
+ * Returns null when no matching row exists; the caller chooses whether
+ * to seed (ensureOwnerUser) or no-op (seedOwnerIntervalsCredsFromEnv).
+ */
+export async function findOwnerRow(
+  db: D1Database,
+  ownerAppleSub: string | undefined,
+): Promise<User | null> {
+  if (ownerAppleSub === APP_REVIEW_SUB) return null;
+  if (ownerAppleSub) {
+    return await db
+      .prepare(
+        `SELECT u.* FROM users u
+          WHERE u.apple_sub = ?1
+            AND NOT EXISTS (
+                  SELECT 1 FROM owner_deletion_tombstone WHERE singleton = 1
+                )`,
+      )
+      .bind(ownerAppleSub)
+      .first<User>();
+  }
+  if (await hasOwnerDeletionReceipt(db)) {
+    return await db
+      .prepare(
+        `SELECT u.* FROM users u
+          WHERE u.apple_sub = ?1
+            AND NOT EXISTS (
+                  SELECT 1 FROM owner_deletion_tombstone WHERE singleton = 1
+                )
+          LIMIT 1`,
+      )
+      .bind(BOOTSTRAP_APPLE_SUB)
+      .first<User>();
+  }
+  return await db
+    .prepare(
+      `SELECT u.* FROM users u
+        WHERE u.apple_sub != ?1 AND NOT EXISTS (
+                SELECT 1 FROM owner_deletion_tombstone WHERE singleton = 1
+              )
+        ORDER BY u.created_at LIMIT 1`,
+    )
+    .bind(APP_REVIEW_SUB)
+    .first<User>();
+}
+
+/**
+ * Sign-in bootstrap eligibility for the OWNER_APPLE_SUB-unset path: true
+ * when (a) the users table is empty (fresh deploy) OR (b) the only row is
+ * the MCP-seeded bootstrap sentinel still waiting to be claimed by a real
+ * Apple identity. A second case must NEVER claim a row that's already been
+ * bound to a real apple_sub, hence the strict sentinel match.
+ */
+export async function isBootstrapClaimEligible(db: D1Database): Promise<boolean> {
+  if (
+    (await isOwnerDeletionTombstoned(db)) ||
+    (await hasOwnerDeletionReceipt(db))
+  ) {
+    return false;
+  }
+  const rows = await db
+    .prepare('SELECT apple_sub FROM users WHERE apple_sub != ?1')
+    .bind(APP_REVIEW_SUB)
+    .all<{ apple_sub: string }>();
+  if (rows.results.length === 0) return true;
+  if (rows.results.length === 1) {
+    return rows.results[0]!.apple_sub === BOOTSTRAP_APPLE_SUB;
+  }
+  return false;
+}
+
+export type AppleRevocationOutcome = 'revoked' | 'manual_required';
+
+export type DeleteUserAccountResult =
+  | {
+      ok: true;
+      owner_tombstoned: boolean;
+      apple_revocation: AppleRevocationOutcome;
+    }
+  | { error: 'not_found' | 'conflict' };
+
+export interface DeleteUserAccountDeps {
+  appleConfig?: AppleProviderConfig;
+  /** Test seam for deterministic provider success, failure, and race cases. */
+  revokeAppleToken?: (
+    config: AppleProviderConfig,
+    refreshToken: string,
+  ) => Promise<void>;
+}
+
+interface AccountDeletionReceiptRow {
+  idempotency_key_sha256: string;
+  owner_tombstoned: number;
+  apple_revocation: AppleRevocationOutcome;
+}
+
+async function getAccountDeletionReceipt(
+  db: D1Database,
+  userId: string,
+): Promise<AccountDeletionReceiptRow | null> {
+  return db
+    .prepare(
+      `SELECT idempotency_key_sha256, owner_tombstoned, apple_revocation
+         FROM account_deletion_receipts WHERE user_id = ?1`,
+    )
+    .bind(userId)
+    .first<AccountDeletionReceiptRow>();
+}
+
+function receiptResult(
+  receipt: AccountDeletionReceiptRow,
+): Extract<DeleteUserAccountResult, { ok: true }> {
+  return {
+    ok: true,
+    owner_tombstoned: receipt.owner_tombstoned === 1,
+    apple_revocation: receipt.apple_revocation,
+  };
+}
+
+/**
+ * Permanently remove one authenticated account and every row it owns.
+ *
+ * D1 batch execution is transactional: the owner tombstone, group transfer,
+ * descendant cleanup, credential/token revocation, and final users-row delete
+ * either all commit or none do. Exercises and shared groups/member data are
+ * intentionally retained. A creator's surviving group transfers to its
+ * longest-tenured remaining member (user id is the deterministic tie-breaker);
+ * a group with no remaining member is removed.
+ */
+export async function deleteUserAccount(
+  db: D1Database,
+  userId: string,
+  ownerAppleSub: string | undefined,
+  idempotencyKey: string,
+  deps: DeleteUserAccountDeps = {},
+): Promise<DeleteUserAccountResult> {
+  const idempotencyKeyHash = await sha256Hex(idempotencyKey);
+  const claimTime = now();
+  const staleExchangeBefore =
+    claimTime - APPLE_GRANT_EXCHANGE_FRESH_MS;
+  // Claim the destructive operation under D1's write lock before provider
+  // I/O. INSERT OR IGNORE makes a different key lose without changing the
+  // winner; a matching key may safely resume an interrupted intent. A fresh
+  // Apple exchange reservation blocks the claim. Sticky uncertainty or a
+  // stale active exchange is consumed into an immediately-sticky manual
+  // outcome, so deletion can never report revocation of only an older grant.
+  await db.batch([
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO account_deletion_intents
+           (user_id, idempotency_key_sha256, apple_revocation, created_at)
+         SELECT u.id,
+                ?2,
+                CASE
+                  WHEN COALESCE(s.revocation_uncertain, 0) = 1
+                    OR (
+                      s.reservation_id IS NOT NULL
+                      AND s.active_since < ?4
+                    )
+                  THEN 'manual_required'
+                  ELSE NULL
+                END,
+                ?3
+           FROM users u
+           LEFT JOIN apple_grant_exchange_state s ON s.user_id = u.id
+          WHERE u.id = ?1
+            AND NOT EXISTS (
+                  SELECT 1 FROM account_deletion_receipts WHERE user_id = ?1
+                )
+            AND NOT (
+                  s.reservation_id IS NOT NULL
+                  AND s.active_since >= ?4
+                )`,
+      )
+      .bind(userId, idempotencyKeyHash, claimTime, staleExchangeBefore),
+    db
+      .prepare(
+        `DELETE FROM apple_grant_exchange_state
+          WHERE user_id = ?1
+            AND EXISTS (
+                  SELECT 1 FROM account_deletion_intents
+                   WHERE user_id = ?1
+                     AND idempotency_key_sha256 = ?2
+                )`,
+      )
+      .bind(userId, idempotencyKeyHash),
+  ]);
+
+  const priorReceipt = await getAccountDeletionReceipt(db, userId);
+  if (priorReceipt) {
+    return priorReceipt.idempotency_key_sha256 === idempotencyKeyHash
+      ? receiptResult(priorReceipt)
+      : { error: 'not_found' };
+  }
+
+  let intent = await db
+    .prepare(
+      `SELECT idempotency_key_sha256, apple_revocation
+         FROM account_deletion_intents WHERE user_id = ?1`,
+    )
+    .bind(userId)
+    .first<{
+      idempotency_key_sha256: string;
+      apple_revocation: AppleRevocationOutcome | null;
+    }>();
+  if (!intent || intent.idempotency_key_sha256 !== idempotencyKeyHash) {
+    // A live intent bound to another high-entropy key is a collision, not
+    // proof that the account disappeared. iOS reserves 404 for cross-device
+    // completion and must not erase local state for this case.
+    if (intent) return { error: 'conflict' };
+    const liveUser = await db
+      .prepare('SELECT 1 AS x FROM users WHERE id = ?1')
+      .bind(userId)
+      .first<{ x: number }>();
+    return liveUser ? { error: 'conflict' } : { error: 'not_found' };
+  }
+
+  let appleRevocation = intent.apple_revocation;
+  if (appleRevocation === null) {
+    const credential = await db
+      .prepare(
+        'SELECT refresh_token FROM apple_refresh_tokens WHERE user_id = ?1',
+      )
+      .bind(userId)
+      .first<{ refresh_token: string }>();
+    appleRevocation = 'manual_required';
+    if (
+      credential &&
+      deps.appleConfig &&
+      hasAppleProviderSigningConfig(deps.appleConfig)
+    ) {
+      try {
+        await (deps.revokeAppleToken ?? revokeAppleRefreshToken)(
+          deps.appleConfig,
+          credential.refresh_token,
+        );
+        appleRevocation = 'revoked';
+      } catch {
+        // Provider unavailability must never retain the user's local account.
+        // The value-free outcome sends iOS to Apple's manual revocation path.
+        appleRevocation = 'manual_required';
+      }
+    }
+
+    // Persist provider truth on the intent immediately. If local finalization
+    // is interrupted, a matching retry skips provider I/O and carries this
+    // exact outcome into the durable receipt.
+    await db
+      .prepare(
+        `UPDATE account_deletion_intents
+            SET apple_revocation = ?3
+          WHERE user_id = ?1
+            AND idempotency_key_sha256 = ?2
+            AND apple_revocation IS NULL`,
+      )
+      .bind(userId, idempotencyKeyHash, appleRevocation)
+      .run();
+    intent = await db
+      .prepare(
+        `SELECT idempotency_key_sha256, apple_revocation
+           FROM account_deletion_intents WHERE user_id = ?1`,
+      )
+      .bind(userId)
+      .first<{
+        idempotency_key_sha256: string;
+        apple_revocation: AppleRevocationOutcome | null;
+      }>();
+    if (!intent) {
+      const committed = await getAccountDeletionReceipt(db, userId);
+      return committed?.idempotency_key_sha256 === idempotencyKeyHash
+        ? receiptResult(committed)
+        : { error: 'not_found' };
+    }
+    if (
+      intent.idempotency_key_sha256 !== idempotencyKeyHash ||
+      intent.apple_revocation === null
+    ) {
+      return { error: 'not_found' };
+    }
+    appleRevocation = intent.apple_revocation;
+  }
+
+  const user = await db
+    .prepare('SELECT * FROM users WHERE id = ?1')
+    .bind(userId)
+    .first<User>();
+  if (!user) {
+    const committed = await getAccountDeletionReceipt(db, userId);
+    return committed?.idempotency_key_sha256 === idempotencyKeyHash
+      ? receiptResult(committed)
+      : { error: 'not_found' };
+  }
+
+  const owner = await findOwnerRow(db, ownerAppleSub);
+  const deletingOwner = owner?.id === userId;
+  const deletionTime = now();
+  const statements: D1PreparedStatement[] = [
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO account_deletion_receipts
+           (user_id, idempotency_key_sha256, owner_tombstoned, deleted_at,
+            apple_revocation)
+         VALUES (?1, ?2, ?3, ?4, ?5)`,
+      )
+      .bind(
+        userId,
+        idempotencyKeyHash,
+        deletingOwner ? 1 : 0,
+        deletionTime,
+        appleRevocation,
+      ),
+  ];
+
+  if (deletingOwner) {
+    statements.push(
+      db
+        .prepare(
+          `INSERT INTO owner_deletion_tombstone
+             (singleton, apple_sub_sha256, deleted_at)
+           VALUES (1, ?1, ?2)
+           ON CONFLICT(singleton) DO UPDATE SET
+             apple_sub_sha256 = excluded.apple_sub_sha256,
+             deleted_at = excluded.deleted_at`,
+        )
+        .bind(await sha256Hex(user.apple_sub), deletionTime),
+    );
+  }
+
+  // Empty groups owned by the caller have no shared state to preserve.
+  statements.push(
+    db
+      .prepare(
+        `DELETE FROM group_invites
+          WHERE group_id IN (
+            SELECT g.id FROM groups g
+             WHERE g.created_by = ?1
+               AND NOT EXISTS (
+                 SELECT 1 FROM group_members gm
+                  WHERE gm.group_id = g.id AND gm.user_id <> ?1
+               )
+          )`,
+      )
+      .bind(userId),
+    db
+      .prepare(
+        `DELETE FROM group_members
+          WHERE group_id IN (
+            SELECT g.id FROM groups g
+             WHERE g.created_by = ?1
+               AND NOT EXISTS (
+                 SELECT 1 FROM group_members gm
+                  WHERE gm.group_id = g.id AND gm.user_id <> ?1
+               )
+          )`,
+      )
+      .bind(userId),
+    db
+      .prepare(
+        `DELETE FROM groups
+          WHERE created_by = ?1
+            AND NOT EXISTS (
+              SELECT 1 FROM group_members gm
+               WHERE gm.group_id = groups.id AND gm.user_id <> ?1
+            )`,
+      )
+      .bind(userId),
+
+    // Preserve a shared group by transferring its creator anchor before the
+    // deleting user's membership and users row disappear.
+    db
+      .prepare(
+        `UPDATE groups
+            SET created_by = (
+              SELECT gm.user_id FROM group_members gm
+               WHERE gm.group_id = groups.id AND gm.user_id <> ?1
+               ORDER BY gm.joined_at, gm.user_id
+               LIMIT 1
+            )
+          WHERE created_by = ?1
+            AND EXISTS (
+              SELECT 1 FROM group_members gm
+               WHERE gm.group_id = groups.id AND gm.user_id <> ?1
+            )`,
+      )
+      .bind(userId),
+
+    // Invites created by the account are credentials and are revoked. Invites
+    // another member created remain, but no longer retain used_by attribution
+    // to the deleted account.
+    db.prepare('DELETE FROM group_invites WHERE created_by = ?1').bind(userId),
+    db.prepare('UPDATE group_invites SET used_by = NULL WHERE used_by = ?1').bind(userId),
+    db.prepare('DELETE FROM group_members WHERE user_id = ?1').bind(userId),
+
+    // Session-dependent ledgers and logs must go before their canonical
+    // sessions; the plan tree follows sessions because those rows hold plan/day
+    // references under strict foreign keys.
+    db
+      .prepare(
+        `DELETE FROM session_aliases
+          WHERE canonical_session_id IN (
+            SELECT id FROM sessions WHERE user_id = ?1
+          )`,
+      )
+      .bind(userId),
+    db
+      .prepare(
+        `DELETE FROM session_load_exports
+          WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ?1)`,
+      )
+      .bind(userId),
+    db
+      .prepare(
+        `DELETE FROM set_logs
+          WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ?1)`,
+      )
+      .bind(userId),
+    db.prepare('DELETE FROM freestyle_workout_receipts WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM sessions WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM plan_snapshots WHERE user_id = ?1').bind(userId),
+    db
+      .prepare(
+        `DELETE FROM template_exercises
+          WHERE workout_id IN (
+            SELECT d.id FROM workouts d
+            JOIN plans p ON p.id = d.plan_id
+            WHERE p.user_id = ?1
+          )`,
+      )
+      .bind(userId),
+    db
+      .prepare(
+        `DELETE FROM workouts
+          WHERE plan_id IN (SELECT id FROM plans WHERE user_id = ?1)`,
+      )
+      .bind(userId),
+    db.prepare('DELETE FROM plans WHERE user_id = ?1').bind(userId),
+
+    db.prepare('DELETE FROM training_profiles WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM athlete_thresholds WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM starter_workout_receipts WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM activities WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM external_events WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM activity_routes WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM activity_heart_rates WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM activity_power_series WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM activity_laps WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM recording_diagnostics WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM problem_report_screenshots WHERE report_id IN (SELECT id FROM problem_reports WHERE user_id = ?1)').bind(userId),
+    db.prepare('DELETE FROM problem_reports WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM member_app_use WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM member_active_days WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM activity_swims WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM external_activities WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM notes WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM audit_log WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM intervals_oauth_states WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM provider_oauth_states WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM provider_oauth_completions WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM provider_connections WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM daily_recovery WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM garmin_activity_files WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM oauth_codes WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM oauth_tokens WHERE user_id = ?1').bind(userId),
+    db.prepare('DELETE FROM oauth_grants WHERE user_id = ?1').bind(userId),
+  );
+
+  // Tokens issued before multi-user MCP have a NULL principal and resolve to
+  // the owner. Revoke them only when the distinguished owner is deleted.
+  if (deletingOwner) {
+    statements.push(
+      db.prepare('DELETE FROM oauth_codes WHERE user_id IS NULL'),
+      db.prepare('DELETE FROM oauth_tokens WHERE user_id IS NULL'),
+      db.prepare('DELETE FROM oauth_grants WHERE user_id IS NULL'),
+    );
+  }
+
+  statements.push(db.prepare('DELETE FROM users WHERE id = ?1').bind(userId));
+  await db.batch(statements);
+  const receipt = await getAccountDeletionReceipt(db, userId);
+  if (!receipt || receipt.idempotency_key_sha256 !== idempotencyKeyHash) {
+    return { error: 'not_found' };
+  }
+  return receiptResult(receipt);
+}
+
+// ---- Owner test member ---------------------------------------------------
+//
+// The owner can try the new-member setup on their own phone by switching to
+// a throwaway account. Sign in with Apple always returns the owner's same
+// identity, so the Worker mints this account itself. Its apple_sub carries a
+// reserved prefix that Apple subjects never use, which is how every rule
+// below recognises it; no schema change is needed. Only the distinguished
+// owner can create one, and at most one exists: creating a new one deletes
+// any earlier one through the ordinary account-deletion transaction.
+
+export const TEST_MEMBER_APPLE_SUB_PREFIX = 'tres-fort:test-member:';
+
+export function isTestMemberAppleSub(appleSub: string | null | undefined): boolean {
+  return typeof appleSub === 'string' && appleSub.startsWith(TEST_MEMBER_APPLE_SUB_PREFIX);
+}
+
+export function testMemberDeletionKey(userId: string): string {
+  return `test-member-deletion:${userId}`;
+}
+
+async function deleteTestMemberRow(
+  db: D1Database,
+  userId: string,
+  ownerAppleSub: string | undefined,
+): Promise<boolean> {
+  // No Apple grant exists for a test member, so deletion needs no provider
+  // call. The key is stable per test member: if a deletion is interrupted
+  // after its intent commits, the owner's next create sweeps the leftover
+  // row and resumes that same deletion instead of conflicting with it.
+  const result = await deleteUserAccount(
+    db,
+    userId,
+    ownerAppleSub,
+    testMemberDeletionKey(userId),
+  );
+  return 'ok' in result;
+}
+
+/**
+ * Create a fresh test member for the owner, replacing any earlier one.
+ * `not_found` when the caller is not the owner, so the route can answer as
+ * if the feature did not exist.
+ */
+export async function createOwnerTestMember(
+  db: D1Database,
+  callerId: string,
+  ownerAppleSub: string | undefined,
+): Promise<{ user: User } | { error: 'not_found' | 'conflict' }> {
+  const owner = await findOwnerRow(db, ownerAppleSub);
+  if (!owner || owner.id !== callerId || isTestMemberAppleSub(owner.apple_sub)) {
+    return { error: 'not_found' };
+  }
+  const id = uuid();
+  const appleSub = `${TEST_MEMBER_APPLE_SUB_PREFIX}${uuid()}`;
+  await db
+    .prepare(
+      `INSERT INTO users (id, apple_sub, email, display_name, created_at)
+       VALUES (?1, ?2, NULL, 'Test member', ?3)`,
+    )
+    .bind(id, appleSub, now())
+    .run();
+  // Sweep after inserting so concurrent creates (two of the owner's devices)
+  // converge: every request keeps only the newest test member, and a request
+  // whose row lost reports a conflict instead of a session for a deleted
+  // account.
+  const members = await db
+    .prepare(
+      `SELECT id FROM users WHERE substr(apple_sub, 1, ?2) = ?1
+        ORDER BY created_at DESC, id DESC`,
+    )
+    .bind(TEST_MEMBER_APPLE_SUB_PREFIX, TEST_MEMBER_APPLE_SUB_PREFIX.length)
+    .all<{ id: string }>();
+  const [newest, ...older] = members.results;
+  for (const row of older) {
+    await deleteTestMemberRow(db, row.id, ownerAppleSub);
+  }
+  if (newest?.id !== id) return { error: 'conflict' };
+  await writeAudit(db, owner.id, 'create_test_member', {}, 'ok', 'ios');
+  const user = await db.prepare('SELECT * FROM users WHERE id = ?1').bind(id).first<User>();
+  return user ? { user } : { error: 'conflict' };
+}
+
+/**
+ * The signed-in test member ends its own trial. Returns false when the caller
+ * is not a test member, so a real account can never be removed this way.
+ */
+export async function deleteTestMemberSelf(
+  db: D1Database,
+  callerId: string,
+  ownerAppleSub: string | undefined,
+): Promise<boolean> {
+  const caller = await db
+    .prepare('SELECT apple_sub FROM users WHERE id = ?1')
+    .bind(callerId)
+    .first<{ apple_sub: string }>();
+  if (!caller || !isTestMemberAppleSub(caller.apple_sub)) return false;
+  if (!(await deleteTestMemberRow(db, callerId, ownerAppleSub))) return false;
+  const owner = await findOwnerRow(db, ownerAppleSub);
+  if (owner) await writeAudit(db, owner.id, 'delete_test_member', {}, 'ok', 'ios');
+  return true;
+}
+
+// ---- per-user MCP passphrase (M3 multi-tenant auth) -----------------------
+// Non-owner users authenticate the OAuth /authorize step with a personal
+// passphrase (the owner also has the OWNER_AUTH_PASSPHRASE env path). Stored
+// PBKDF2-SHA256 with a per-user random salt — never in plaintext.
+
+const PBKDF2_ITERS = 100_000;
+
+async function pbkdf2(passphrase: string, saltB64: string): Promise<string> {
+  const salt = Uint8Array.from(atob(saltB64), (ch) => ch.charCodeAt(0));
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(passphrase),
+    'PBKDF2',
+    false,
+    ['deriveBits'],
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt, iterations: PBKDF2_ITERS, hash: 'SHA-256' },
+    key,
+    256,
+  );
+  return btoa(String.fromCharCode(...new Uint8Array(bits)));
+}
+
+/** Constant-time equality over two base64 strings (avoids early-exit leak). */
+function safeEq(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+/**
+ * Set (or replace) a user's MCP passphrase. Hash + fresh per-user salt.
+ * REJECTS a passphrase that would bind this user's Claude session to a DIFFERENT
+ * account at /oauth/authorize, because authorize resolves a token's user solely
+ * by passphrase:
+ *   - one already in use by another user (silent cross-user access), and
+ *   - the env `OWNER_AUTH_PASSPHRASE` (`ownerPassphrase`), which authorize checks
+ *     FIRST and maps to the owner — the per-user hash check can't see the env
+ *     secret, so this collision must be caught here (Codex #64 P2).
+ * Re-setting your OWN passphrase is allowed.
+ */
+export async function setUserMcpPassphrase(
+  db: D1Database,
+  userId: string,
+  passphrase: string,
+  ownerPassphrase?: string,
+): Promise<{ ok: true } | { error: 'passphrase_taken' }> {
+  if (ownerPassphrase && passphrase === ownerPassphrase) return { error: 'passphrase_taken' };
+  const owner = await findUserByMcpPassphrase(db, passphrase);
+  if (owner && owner !== userId) return { error: 'passphrase_taken' };
+  const saltBytes = crypto.getRandomValues(new Uint8Array(16));
+  const salt = btoa(String.fromCharCode(...saltBytes));
+  const hash = await pbkdf2(passphrase, salt);
+  await db
+    .prepare('UPDATE users SET mcp_passphrase_hash = ?2, mcp_passphrase_salt = ?3 WHERE id = ?1')
+    .bind(userId, hash, salt)
+    .run();
+  return { ok: true };
+}
+
+/**
+ * Resolve a user id by their MCP passphrase, or null if none match. Iterates
+ * the (small) set of users who have a passphrase set and PBKDF2-verifies each
+ * — fine for a household-scale deployment; revisit if user count grows large.
+ */
+export async function findUserByMcpPassphrase(
+  db: D1Database,
+  passphrase: string,
+): Promise<string | null> {
+  if (!passphrase) return null;
+  const rows = await db
+    .prepare(
+      'SELECT id, mcp_passphrase_hash, mcp_passphrase_salt FROM users WHERE mcp_passphrase_hash IS NOT NULL AND mcp_passphrase_salt IS NOT NULL',
+    )
+    .all<{ id: string; mcp_passphrase_hash: string; mcp_passphrase_salt: string }>();
+  // Defense in depth: if more than one user matches (legacy data predating the
+  // set-time collision check), REFUSE to resolve — an ambiguous match must
+  // never bind a token to an arbitrary account.
+  let match: string | null = null;
+  for (const r of rows.results) {
+    const h = await pbkdf2(passphrase, r.mcp_passphrase_salt);
+    if (safeEq(h, r.mcp_passphrase_hash)) {
+      if (match) return null;
+      match = r.id;
+    }
+  }
+  return match;
+}
+
+/** True if `tz` is a valid IANA timezone the runtime accepts. */
+export function isValidTimezone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-CA', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Civil date (YYYY-MM-DD) "now" in the given IANA timezone. Falls back to
+ * UTC when tz is null/invalid (the pre-0012 behavior). Uses formatToParts
+ * to assemble the date locale-independently — never parses a formatted
+ * string.
+ */
+export function todayInTz(tz: string | null | undefined): string {
+  if (!tz || !isValidTimezone(tz)) {
+    return new Date().toISOString().slice(0, 10);
+  }
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
+  return `${get('year')}-${get('month')}-${get('day')}`;
+}
+
+/**
+ * The member's civil "today" (YYYY-MM-DD) in the timezone their device last
+ * reported, falling back to UTC when none is recorded.
+ *
+ * MCP calls arrive from a chat client rather than the device, so resolving
+ * "today" from the stored tz is what stops get_today_workout returning
+ * tomorrow's date after ~17:00 PT. REST resolves it the same way whenever the
+ * client did not send an explicit date, so both surfaces share this read.
+ */
+export async function todayForUser(db: D1Database, userId: string): Promise<string> {
+  return todayInTz(await getUserTimezone(db, userId));
+}
+
+/** The owner's stored IANA timezone, or null if none recorded yet. */
+export async function getUserTimezone(
+  db: D1Database,
+  userId: string,
+): Promise<string | null> {
+  const row = await db
+    .prepare('SELECT timezone FROM users WHERE id = ?1')
+    .bind(userId)
+    .first<{ timezone: string | null }>();
+  return row?.timezone ?? null;
+}
+
+/**
+ * Record the device's current IANA timezone on the user row when it differs
+ * from what's stored. The iOS app reports it on each sync, so "today" on the
+ * MCP side follows the user across time zones. Invalid/empty values are
+ * ignored. Returns the effective stored value.
+ */
+export async function setUserTimezoneIfChanged(
+  db: D1Database,
+  userId: string,
+  tz: string | null | undefined,
+): Promise<void> {
+  if (!tz || !isValidTimezone(tz)) return;
+  const current = await getUserTimezone(db, userId);
+  if (current === tz) return;
+  await db.prepare('UPDATE users SET timezone = ?2 WHERE id = ?1').bind(userId, tz).run();
+}
+
+export interface IntervalsSourceFenceState {
+  enabled: boolean;
+  activated_at: number | null;
+  activated_user_count: number | null;
+  activated_connected_count: number | null;
+}
+
+/**
+ * Activate the source-bound cutover with one SQLite statement. The database
+ * trigger owns the all-user move, validation, and rollback semantics; callers
+ * never read or rewrite credential values. This helper is intentionally not
+ * mounted on an HTTP route.
+ */
+export async function activateIntervalsSourceFence(
+  db: D1Database,
+  activatedAt: number,
+): Promise<IntervalsSourceFenceState> {
+  if (!Number.isSafeInteger(activatedAt) || activatedAt < 0) {
+    throw new Error('intervals_source_fence_invalid_activation_time');
+  }
+  const activated = await db
+    .prepare(
+      `UPDATE intervals_source_fence
+          SET enabled = 1,
+              activated_at = ?1,
+              activated_user_count = (SELECT COUNT(*) FROM users),
+              activated_connected_count = (
+                SELECT COUNT(*) FROM users
+                 WHERE intervals_athlete_id IS NOT NULL
+                   AND (intervals_api_key IS NOT NULL
+                        OR intervals_oauth_access_token IS NOT NULL)
+              )
+        WHERE singleton = 1 AND enabled = 0
+      RETURNING enabled, activated_at,
+                activated_user_count, activated_connected_count`,
+    )
+    .bind(activatedAt)
+    .first<{
+      enabled: number;
+      activated_at: number;
+      activated_user_count: number;
+      activated_connected_count: number;
+    }>();
+  if (activated) {
+    return {
+      enabled: activated.enabled === 1,
+      activated_at: activated.activated_at,
+      activated_user_count: activated.activated_user_count,
+      activated_connected_count: activated.activated_connected_count,
+    };
+  }
+
+  const current = await db
+    .prepare(
+      `SELECT enabled, activated_at,
+              activated_user_count, activated_connected_count
+         FROM intervals_source_fence WHERE singleton = 1`,
+    )
+    .first<{
+      enabled: number;
+      activated_at: number | null;
+      activated_user_count: number | null;
+      activated_connected_count: number | null;
+    }>();
+  if (!current) throw new Error('intervals_source_fence_missing');
+  return {
+    enabled: current.enabled === 1,
+    activated_at: current.activated_at,
+    activated_user_count: current.activated_user_count,
+    activated_connected_count: current.activated_connected_count,
+  };
+}
+
+/**
+ * Enumerate users who have BOTH intervals.icu credentials populated. Used by
+ * sync* in src/index.ts (cron) and refresh_rides (MCP) to loop per user
+ * — each user's events/activities tag to their own user_id, so a second
+ * Apple sign-in can connect a separate intervals.icu athlete without
+ * clobbering the owner's data.
+ */
+export async function listUsersWithIntervalsCreds(
+  db: D1Database,
+): Promise<IntervalsUserCreds[]> {
+  const r = await db
+    .prepare(
+      `SELECT id, intervals_api_key, intervals_oauth_access_token,
+              intervals_oauth_refresh_token, intervals_oauth_expires_at,
+              ${INTERVALS_EFFECTIVE_ATHLETE_SQL} AS intervals_effective_athlete_id,
+              intervals_credential_generation,
+              intervals_events_synced_at, intervals_activities_synced_at
+         FROM users
+        WHERE ${INTERVALS_EFFECTIVE_ATHLETE_SQL} IS NOT NULL
+          AND (intervals_api_key IS NOT NULL
+               OR intervals_oauth_access_token IS NOT NULL)`,
+    )
+    .all<{
+      id: string;
+      intervals_api_key: string | null;
+      intervals_oauth_access_token: string | null;
+      intervals_oauth_refresh_token: string | null;
+      intervals_oauth_expires_at: number | null;
+      intervals_effective_athlete_id: string;
+      intervals_credential_generation: number;
+      intervals_events_synced_at: number | null;
+      intervals_activities_synced_at: number | null;
+    }>();
+  return r.results.map((row) => ({
+    user_id: row.id,
+    api_key: row.intervals_api_key,
+    access_token: row.intervals_oauth_access_token,
+    refresh_token: row.intervals_oauth_refresh_token,
+    expires_at: row.intervals_oauth_expires_at,
+    athlete_id: row.intervals_effective_athlete_id,
+    credential_generation: row.intervals_credential_generation,
+    events_synced_at: row.intervals_events_synced_at,
+    activities_synced_at: row.intervals_activities_synced_at,
+  }));
+}
+
+/** Read one user's intervals.icu credentials (nulls if either is unset). */
+export async function getStoredUserIntervalsCreds(
+  db: D1Database,
+  userId: string,
+): Promise<{
+  api_key: string | null;
+  access_token: string | null;
+  refresh_token: string | null;
+  expires_at: number | null;
+  athlete_id: string | null;
+  auth_error_at: number | null;
+  credential_generation: number;
+}> {
+  const r = await db
+    .prepare(
+      `SELECT intervals_api_key AS api_key,
+              intervals_oauth_access_token AS access_token,
+              intervals_oauth_refresh_token AS refresh_token,
+              intervals_oauth_expires_at AS expires_at,
+              ${INTERVALS_EFFECTIVE_ATHLETE_SQL} AS athlete_id,
+              intervals_auth_error_at AS auth_error_at,
+              intervals_credential_generation AS credential_generation
+         FROM users WHERE id = ?1`,
+    )
+    .bind(userId)
+    .first<{
+      api_key: string | null;
+      access_token: string | null;
+      refresh_token: string | null;
+      expires_at: number | null;
+      athlete_id: string | null;
+      auth_error_at: number | null;
+      credential_generation: number;
+    }>();
+  return {
+    api_key: r?.api_key ?? null,
+    access_token: r?.access_token ?? null,
+    refresh_token: r?.refresh_token ?? null,
+    expires_at: r?.expires_at ?? null,
+    athlete_id: r?.athlete_id ?? null,
+    auth_error_at: r?.auth_error_at ?? null,
+    credential_generation: r?.credential_generation ?? 0,
+  };
+}
+
+/** Plain credentials are released only to a caller holding the Worker key. */
+export async function getUserIntervalsCreds(db: D1Database, userId: string, encryptionKey: string | undefined) {
+  const stored = await getStoredUserIntervalsCreds(db, userId);
+  return { ...stored,
+    api_key: await openCredential(stored.api_key, encryptionKey, userId, 'intervals-api-key'),
+    access_token: await openCredential(stored.access_token, encryptionKey, userId, 'intervals-access-token'),
+    refresh_token: await openCredential(stored.refresh_token, encryptionKey, userId, 'intervals-refresh-token'),
+  };
+}
+
+/**
+ * Resolve the user row owning a given intervals.icu `athlete_id`. Used by the
+ * webhook receiver (`POST /webhooks/intervals`) to route a pushed event to the
+ * right user before kicking the relevant sync. The expression index installed
+ * by migration 0039 covers the effective identity before and after cutover.
+ * Returns null when no user has connected that athlete.
+ */
+export async function getUserByIntervalsAthleteId(
+  db: D1Database,
+  athleteId: string,
+): Promise<User | null> {
+  return await db
+    .prepare(`SELECT * FROM users WHERE ${INTERVALS_EFFECTIVE_ATHLETE_SQL} = ?1`)
+    .bind(athleteId)
+    .first<User>();
+}
+
+/**
+ * Has this user ever explicitly set or cleared their intervals.icu
+ * credentials via PATCH /api/me/integrations/intervals? Determined from
+ * audit_log (the REST endpoint writes a `set_intervals_creds` row on every
+ * connect AND disconnect). Once true, the env→DB seed and the per-call env
+ * fallback both back off — "no creds" then means "intentionally
+ * disconnected", not "first sync after deploy".
+ */
+export async function userHasTouchedIntervalsCreds(
+  db: D1Database,
+  userId: string,
+): Promise<boolean> {
+  const r = await db
+    .prepare(
+      "SELECT 1 FROM audit_log WHERE user_id = ?1 AND tool = 'set_intervals_creds' LIMIT 1",
+    )
+    .bind(userId)
+    .first();
+  return r !== null;
+}
+
+/**
+ * Env → DB transition path. If NO user has intervals.icu credentials set
+ * and the legacy Worker secrets are present, seed the OWNER user row
+ * (the first row by created_at) from env exactly once. Idempotent: returns
+ * the resulting per-user creds list, which on subsequent calls is just the
+ * already-populated row.
+ *
+ * Rationale: a static SQL migration cannot read `wrangler secret`-managed
+ * env vars, so 0016 added nullable columns and this code path does the
+ * one-shot copy on the next sync after deploy. Calling this before each
+ * sync is cheap (one SELECT + at most one UPDATE on first invocation).
+ *
+ * Respects explicit disconnects: if the owner has ever PATCHed their
+ * intervals creds (set OR clear), the seed is permanently a no-op for them.
+ * Otherwise, after the user disconnects via the UI, the next sync would
+ * silently re-seed from env and resume polling — defeating the disconnect.
+ * Generation zero remains mandatory even after the P4.6 cutover. Activation
+ * bumps every generation, permanently closing this fallback; a release must
+ * seed any legitimate env-only owner before activation. This also prevents an
+ * old Worker's disconnect-row commit from racing ahead of its separate audit
+ * insert and being resurrected by a new Worker.
+ */
+export async function seedOwnerIntervalsCredsFromEnv(
+  db: D1Database,
+  apiKey: string | null | undefined,
+  athleteId: string | null | undefined,
+  ownerAppleSub: string | undefined,
+  encryptionKey: string | undefined,
+): Promise<IntervalsUserCreds[]> {
+  // Resolve the owner row through findOwnerRow so OWNER_APPLE_SUB-set
+  // deployments don't accidentally seed env creds onto a non-owner row
+  // that happened to sign in first (Codex PR #38 P1). The seed gate is
+  // also OWNER-SPECIFIC: an early "any user has creds → done" check
+  // would skip the owner if a later-joined member happened to connect
+  // their intervals account before the first post-deploy sync (the
+  // owner would then lose ride syncing until they manually re-entered).
+  const owner = await findOwnerRow(db, ownerAppleSub);
+  if (!owner) return listUsersWithIntervalsCreds(db);
+  // Already seeded (or set via PATCH / connected via OAuth): no-op. Checks
+  // BOTH auth schemes so an OAuth-connected owner (api_key NULL, token set)
+  // is recognised as already-connected and never env-seeded.
+  const ownerAthleteId =
+    owner.intervals_cutover_athlete_id ?? owner.intervals_athlete_id;
+  if ((owner.intervals_api_key || owner.intervals_oauth_access_token) && ownerAthleteId) {
+    return listUsersWithIntervalsCreds(db);
+  }
+  // Owner has explicitly PATCHed their creds (set then cleared, possibly):
+  // NULLs here are intentional disconnects, not "never migrated." Respect.
+  if (await userHasTouchedIntervalsCreds(db, owner.id)) {
+    return listUsersWithIntervalsCreds(db);
+  }
+  // A prior sync rejected the owner's credential (401/403 → markIntervalsAuthError
+  // cleared it and set this marker). Re-seeding the SAME dead env credential
+  // would just 401 again next tick — an infinite reconnect loop. Back off until
+  // the owner explicitly reconnects (which clears the marker).
+  if (owner.intervals_auth_error_at != null) {
+    return listUsersWithIntervalsCreds(db);
+  }
+  // No env values to seed from → dormant.
+  if (!apiKey || !athleteId) return listUsersWithIntervalsCreds(db);
+  await db
+    .prepare(
+      `UPDATE users
+          SET intervals_api_key = ?2,
+              intervals_athlete_id = CASE
+                WHEN ${INTERVALS_SOURCE_FENCE_ENABLED_SQL} = 1 THEN NULL ELSE ?3 END,
+              intervals_cutover_athlete_id = CASE
+                WHEN ${INTERVALS_SOURCE_FENCE_ENABLED_SQL} = 1 THEN ?3 ELSE NULL END,
+              intervals_oauth_refresh_token = NULL,
+              intervals_oauth_expires_at = NULL,
+              intervals_credential_generation = intervals_credential_generation + 1,
+              intervals_events_synced_at = NULL,
+              intervals_activities_synced_at = NULL,
+              intervals_events_sync_attempt = 0,
+              intervals_activities_sync_attempt = 0,
+              intervals_protocol_write_seq = intervals_protocol_write_seq
+                + ${INTERVALS_SOURCE_FENCE_ENABLED_SQL}
+        WHERE id = ?1
+          AND intervals_api_key IS NULL
+          AND intervals_oauth_access_token IS NULL
+          AND ${INTERVALS_EFFECTIVE_ATHLETE_SQL} IS NULL
+          AND intervals_auth_error_at IS NULL
+          AND intervals_credential_generation = 0
+          AND NOT EXISTS (
+                SELECT 1 FROM audit_log
+                 WHERE user_id = ?1 AND tool = 'set_intervals_creds'
+              )`,
+    )
+    .bind(owner.id, await sealCredential(apiKey, encryptionKey, owner.id, 'intervals-api-key'), athleteId)
+    .run();
+  return listUsersWithIntervalsCreds(db);
+}
+
+/**
+ * Set/clear a user's intervals.icu credentials. Both columns move together
+ * — passing null on EITHER clears the pair (disconnect). Returns the
+ * resulting connection state. Audit is the caller's responsibility (the
+ * REST handler writes an audit row tagged actor='ios'). The users-row
+ * generation changes in this mutation itself, so even an interrupted later
+ * audit write cannot let the legacy owner-env fallback reactivate a disconnect.
+ */
+export async function setUserIntervalsCreds(
+  db: D1Database,
+  userId: string,
+  encryptionKey: string | undefined,
+  apiKey: string | null,
+  athleteId: string | null,
+): Promise<{ connected: boolean; credential_generation: number; activity_sync_after: number | null }> {
+  const connect = !!(apiKey && athleteId);
+  const previous = await getStoredUserIntervalsCreds(db, userId);
+  apiKey = await sealCredential(connect ? apiKey : null, encryptionKey, userId, 'intervals-api-key', previous.api_key);
+  // The API-key and OAuth schemes are mutually exclusive: writing an API key
+  // clears any OAuth token, and a disconnect (nulls) clears BOTH schemes'
+  // columns so "not connected" is unambiguous across the codebase.
+  const { results: [row] } = await db
+    .prepare(
+      `UPDATE users
+          SET intervals_api_key = ?2,
+              intervals_athlete_id = CASE
+                WHEN ${INTERVALS_SOURCE_FENCE_ENABLED_SQL} = 1 THEN NULL ELSE ?3 END,
+              intervals_cutover_athlete_id = CASE
+                WHEN ${INTERVALS_SOURCE_FENCE_ENABLED_SQL} = 1 THEN ?3 ELSE NULL END,
+              intervals_oauth_access_token = NULL,
+              intervals_oauth_refresh_token = NULL,
+              intervals_oauth_expires_at = NULL,
+              intervals_auth_error_at = NULL,
+              intervals_credential_generation = CASE
+                WHEN ?4 = 1
+                 AND intervals_api_key IS ?2
+                 AND ${INTERVALS_EFFECTIVE_ATHLETE_SQL} IS ?3
+                 AND intervals_oauth_access_token IS NULL
+                THEN intervals_credential_generation
+                ELSE intervals_credential_generation + 1 END,
+              intervals_events_synced_at = CASE
+                WHEN ?4 = 1
+                 AND intervals_api_key IS ?2
+                 AND ${INTERVALS_EFFECTIVE_ATHLETE_SQL} IS ?3
+                 AND intervals_oauth_access_token IS NULL
+                THEN intervals_events_synced_at ELSE NULL END,
+              intervals_activities_synced_at = CASE
+                WHEN ?4 = 1
+                 AND intervals_api_key IS ?2
+                 AND ${INTERVALS_EFFECTIVE_ATHLETE_SQL} IS ?3
+                 AND intervals_oauth_access_token IS NULL
+                THEN intervals_activities_synced_at ELSE NULL END,
+              intervals_events_sync_attempt = CASE
+                WHEN ?4 = 1
+                 AND intervals_api_key IS ?2
+                 AND ${INTERVALS_EFFECTIVE_ATHLETE_SQL} IS ?3
+                 AND intervals_oauth_access_token IS NULL
+                THEN intervals_events_sync_attempt ELSE 0 END,
+              intervals_activities_sync_attempt = CASE
+                WHEN ?4 = 1
+                 AND intervals_api_key IS ?2
+                 AND ${INTERVALS_EFFECTIVE_ATHLETE_SQL} IS ?3
+                 AND intervals_oauth_access_token IS NULL
+                THEN intervals_activities_sync_attempt ELSE 0 END,
+              intervals_protocol_write_seq = intervals_protocol_write_seq
+                + ${INTERVALS_SOURCE_FENCE_ENABLED_SQL}
+        WHERE id = ?1
+        RETURNING intervals_credential_generation AS credential_generation,
+                  intervals_activities_synced_at AS activity_sync_after`,
+    )
+    .bind(userId, connect ? apiKey : null, connect ? athleteId : null, connect ? 1 : 0)
+    .run<{ credential_generation: number; activity_sync_after: number | null }>();
+  if (!row) throw new Error('intervals_user_not_found');
+  return { connected: connect, ...row };
+}
+
+/**
+ * Store a user's intervals.icu OAuth credentials — the /auth/intervals/callback
+ * success path. Sets the bearer token + the `athlete.id` the token exchange
+ * returned (into the effective legacy-or-shadow athlete column selected in
+ * the same statement) and CLEARS any prior API key (the two schemes are
+ * mutually exclusive; Bearer wins).
+ * `refreshToken` / `expiresAt` are stored when present — the documented
+ * intervals.icu token response carries neither (long-lived tokens), so both
+ * are typically null.
+ */
+async function writeUserIntervalsOAuth(
+  db: D1Database,
+  userId: string,
+  accessToken: string,
+  refreshToken: string | null,
+  expiresAt: number | null,
+  athleteId: string,
+  expectedGeneration?: number,
+  completion?: { digest: string; sessionId: string },
+): Promise<{ credential_generation: number; activity_sync_after: number | null } | null> {
+  const statement = db
+    .prepare(
+      `UPDATE users
+          SET intervals_oauth_access_token = ?2,
+              intervals_oauth_refresh_token = ?3,
+              intervals_oauth_expires_at = ?4,
+              intervals_athlete_id = CASE
+                WHEN ${INTERVALS_SOURCE_FENCE_ENABLED_SQL} = 1 THEN NULL ELSE ?5 END,
+              intervals_cutover_athlete_id = CASE
+                WHEN ${INTERVALS_SOURCE_FENCE_ENABLED_SQL} = 1 THEN ?5 ELSE NULL END,
+              intervals_api_key = NULL,
+              intervals_auth_error_at = NULL,
+              intervals_credential_generation = CASE
+                WHEN intervals_oauth_access_token IS ?2
+                  AND ${INTERVALS_EFFECTIVE_ATHLETE_SQL} IS ?5
+                  AND intervals_api_key IS NULL
+                THEN intervals_credential_generation
+                ELSE intervals_credential_generation + 1 END,
+              intervals_events_synced_at = CASE
+                WHEN intervals_oauth_access_token IS ?2
+                  AND ${INTERVALS_EFFECTIVE_ATHLETE_SQL} IS ?5
+                  AND intervals_api_key IS NULL
+                THEN intervals_events_synced_at ELSE NULL END,
+              intervals_activities_synced_at = CASE
+                WHEN intervals_oauth_access_token IS ?2
+                  AND ${INTERVALS_EFFECTIVE_ATHLETE_SQL} IS ?5
+                  AND intervals_api_key IS NULL
+                THEN intervals_activities_synced_at ELSE NULL END,
+              intervals_events_sync_attempt = CASE
+                WHEN intervals_oauth_access_token IS ?2
+                  AND ${INTERVALS_EFFECTIVE_ATHLETE_SQL} IS ?5
+                  AND intervals_api_key IS NULL
+                THEN intervals_events_sync_attempt ELSE 0 END,
+              intervals_activities_sync_attempt = CASE
+                WHEN intervals_oauth_access_token IS ?2
+                  AND ${INTERVALS_EFFECTIVE_ATHLETE_SQL} IS ?5
+                  AND intervals_api_key IS NULL
+                THEN intervals_activities_sync_attempt ELSE 0 END,
+              intervals_protocol_write_seq = intervals_protocol_write_seq
+                + ${INTERVALS_SOURCE_FENCE_ENABLED_SQL}
+        WHERE id = ?1
+          AND (?6 IS NULL OR intervals_credential_generation = ?6)
+          AND (?7 IS NULL OR EXISTS (SELECT 1 FROM intervals_oauth_completions
+            WHERE completion_sha256=?7 AND user_id=?1 AND app_session_id=?8
+              AND expires_at>?9 AND credential_generation=?6))
+        RETURNING intervals_credential_generation AS credential_generation,
+                  intervals_activities_synced_at AS activity_sync_after`,
+    )
+    .bind(
+      userId,
+      accessToken,
+      refreshToken,
+      expiresAt,
+      athleteId,
+      expectedGeneration ?? null,
+      completion?.digest ?? null,
+      completion?.sessionId ?? null,
+      Date.now(),
+    );
+  const statements = [statement];
+  if (completion) {
+    statements.push(db.prepare('DELETE FROM intervals_oauth_completions WHERE completion_sha256=?1 AND changes()=1')
+      .bind(completion.digest));
+    statements.push(db.prepare(`INSERT INTO audit_log(id,user_id,actor,tool,args,result,created_at)
+      SELECT ?1,?2,'ios','set_intervals_creds','{"connected":true,"via":"oauth"}','connected',?3 WHERE changes()=1`)
+      .bind(uuid(),userId,Date.now()));
+  }
+  const [result] = await db.batch<{ credential_generation: number; activity_sync_after: number | null }>(statements);
+  return result?.results[0] ?? null;
+}
+
+export async function setUserIntervalsOAuth(
+  db: D1Database,
+  userId: string,
+  encryptionKey: string | undefined,
+  accessToken: string,
+  refreshToken: string | null,
+  expiresAt: number | null,
+  athleteId: string,
+  expectedGeneration?: number,
+): Promise<{ credential_generation: number; activity_sync_after: number | null } | null> {
+  const previous = await getStoredUserIntervalsCreds(db, userId);
+  return writeUserIntervalsOAuth(
+    db,
+    userId,
+    (await sealCredential(accessToken, encryptionKey, userId, 'intervals-access-token', previous.access_token))!,
+    await sealCredential(refreshToken, encryptionKey, userId, 'intervals-refresh-token', previous.refresh_token),
+    expiresAt,
+    athleteId,
+    expectedGeneration,
+  );
+}
+
+/**
+ * Mint a single-use OAuth `state` for the intervals.icu authorize→callback
+ * round-trip and map it to `userId`. The authenticated POST /auth/intervals/start
+ * calls this; the public GET /auth/intervals/callback resolves it back. The
+ * state doubles as CSRF protection (unguessable, single-use, short TTL).
+ */
+export async function createIntervalsOAuthState(
+  db: D1Database,
+  userId: string,
+  ttlMs = 10 * 60 * 1000,
+  appSessionId: string | null = null,
+): Promise<string> {
+  const state =
+    crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '');
+  const ts = now();
+  const account = await db.prepare(
+    'SELECT intervals_credential_generation AS generation FROM users WHERE id = ?1',
+  ).bind(userId).first<{ generation: number }>();
+  if (!account) throw new Error('intervals_user_not_found');
+  const inserted = await db
+    .prepare(
+      `INSERT INTO intervals_oauth_states (state, user_id, created_at, expires_at, credential_generation, app_session_id)
+       SELECT ?1, ?2, ?3, ?4, ?5, ?6 FROM users
+        WHERE id = ?2 AND intervals_credential_generation = ?5`,
+    )
+    .bind(state, userId, ts, ts + ttlMs, account.generation, appSessionId)
+    .run();
+  if (inserted.meta.changes !== 1) throw new Error('intervals_connection_changed');
+  return state;
+}
+
+/**
+ * Resolve + CONSUME an intervals.icu OAuth `state` (single-use): returns the
+ * mapped user_id, or null if the state is unknown or expired. Deletes the row
+ * on lookup regardless of validity and opportunistically sweeps stale rows,
+ * so a replayed callback can't reuse a state.
+ */
+export async function consumeIntervalsOAuthState(
+  db: D1Database,
+  state: string,
+): Promise<string | null> {
+  return (await consumeIntervalsOAuthAttempt(db, state))?.user_id ?? null;
+}
+
+/** Consume the state with the generation recorded when the attempt began.
+ * Migration 0047 also cancels pending states on credential changes. */
+export async function consumeIntervalsOAuthAttempt(
+  db: D1Database,
+  state: string,
+): Promise<{ user_id: string; credential_generation: number; app_session_id: string | null } | null> {
+  const ts = now();
+  // ATOMIC single-use: DELETE … RETURNING removes the row and yields its value
+  // in one statement, so two concurrent callbacks (browser preload, double-tap,
+  // replay) can't both observe the same valid state — only one DELETE returns
+  // the row, the other gets nothing.
+  const row = await db
+    .prepare(`DELETE FROM intervals_oauth_states WHERE state = ?1
+      RETURNING user_id, expires_at, credential_generation, app_session_id`)
+    .bind(state)
+    .first<{ user_id: string; expires_at: number; credential_generation: number | null; app_session_id: string | null }>();
+  // Best-effort sweep of any OTHER now-expired rows (kept out of the atomic
+  // statement above so it never affects the single-use result).
+  await db.prepare('DELETE FROM intervals_oauth_states WHERE expires_at < ?1').bind(ts).run();
+  if (!row || row.expires_at < ts || row.credential_generation === null) return null;
+  return { user_id: row.user_id, credential_generation: row.credential_generation, app_session_id: row.app_session_id };
+}
+
+export interface PendingIntervalsCredential {
+  accessToken: string; refreshToken: string | null; expiresAt: number | null; athleteId: string;
+}
+
+export async function createIntervalsOAuthCompletion(db: D1Database, userId: string, sessionId: string,
+  generation: number, credential: PendingIntervalsCredential, encryptionKey: string | undefined): Promise<string> {
+  const completion = randomSecret(), digest = await credentialDigest(completion);
+  const ciphertext = await sealCredential(JSON.stringify(credential), encryptionKey, userId, `intervals-completion:${digest}`);
+  const inserted = await db.batch([
+    db.prepare('DELETE FROM intervals_oauth_completions WHERE expires_at<=?1').bind(Date.now()),
+    db.prepare(`INSERT INTO intervals_oauth_completions(completion_sha256,user_id,app_session_id,credential_generation,credential_ciphertext,expires_at)
+      SELECT ?1,?2,?3,?4,?5,?6 FROM users WHERE id=?2 AND intervals_credential_generation=?4`)
+      .bind(digest,userId,sessionId,generation,ciphertext,Date.now()+10*60_000),
+  ]);
+  if (inserted[1]!.meta.changes !== 1) throw new Error('intervals_connection_changed');
+  return completion;
+}
+
+export async function finishIntervalsOAuth(db: D1Database, userId: string, sessionId: string,
+  completion: string, encryptionKey: string | undefined) {
+  if (!/^[A-Za-z0-9_-]{43}$/.test(completion)) return null;
+  const digest = await credentialDigest(completion);
+  const pending = await db.prepare(`SELECT credential_ciphertext,credential_generation FROM intervals_oauth_completions
+    WHERE completion_sha256=?1 AND user_id=?2 AND app_session_id=?3 AND expires_at>?4`)
+    .bind(digest,userId,sessionId,Date.now()).first<{ credential_ciphertext: string; credential_generation: number }>();
+  if (!pending) return null;
+  const credential: PendingIntervalsCredential = JSON.parse((await openCredential(pending.credential_ciphertext,
+    encryptionKey,userId,`intervals-completion:${digest}`))!);
+  const previous = await getStoredUserIntervalsCreds(db,userId);
+  return writeUserIntervalsOAuth(db,userId,
+    (await sealCredential(credential.accessToken,encryptionKey,userId,'intervals-access-token',previous.access_token))!,
+    await sealCredential(credential.refreshToken,encryptionKey,userId,'intervals-refresh-token',previous.refresh_token),
+    credential.expiresAt,credential.athleteId,pending.credential_generation,{ digest,sessionId });
+}
+
+// ---- groups + invites (M2) -----------------------------------------------
+//
+// Friends/family containers. The single-user invariant relaxes to multi-user-
+// with-invite-gating: a new Apple sub may sign in only when the bootstrap
+// path applies OR a valid invite code is supplied. The invite redemption +
+// user creation are made atomic in /auth/apple — see src/routes/auth.ts.
+//
+// Group writes are AUDITED (writeAudit) but DO NOT bump plans.version —
+// groups live outside the versioned plan-tree document. The audit_log trail
+// is the per-mutation provenance, same single-user substitute for scopes
+// that the plan-tree mutations use.
+
+/**
+ * Invite-code alphabet: 32 unambiguous chars (no 0/O, no 1/I/L).
+ * 6 chars from 32 = 32^6 ≈ 1.07 * 10^9 codes, plenty for friends-and-family.
+ */
+const INVITE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+const INVITE_CODE_LEN = 6;
+const DEFAULT_INVITE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+/**
+ * Generate a single 6-char code from the no-ambiguous alphabet using
+ * `crypto.getRandomValues`. Caller (`createInvite`) retries on PK collision
+ * — at 32^6 the birthday-paradox collision rate is vanishingly small until
+ * many millions of outstanding codes.
+ */
+function newInviteCode(): string {
+  const buf = new Uint8Array(INVITE_CODE_LEN);
+  crypto.getRandomValues(buf);
+  let out = '';
+  for (let i = 0; i < INVITE_CODE_LEN; i++) {
+    out += INVITE_ALPHABET[buf[i]! % INVITE_ALPHABET.length];
+  }
+  return out;
+}
+
+/**
+ * Account/setup snapshot. Coach access is derived from this member's OAuth
+ * grants; legacy grants without a user id belong only to the bootstrap owner.
+ * last_active is the most recent MCP write, not a provider or model identity.
+ * The claude alias keeps installed clients compatible during rollout.
+ */
+export interface CoachConnectionStatus {
+  is_owner: boolean;
+  connected: boolean;
+  last_active: number | null;
+}
+
+export interface MeProfile {
+  /** Stable caller identity for account-scoped browser drafts and reads. */
+  id: string;
+  display_name: string | null;
+  email: string | null;
+  intervals: IntervalsConnectionStatus;
+  coach: CoachConnectionStatus;
+  /** Legacy wire alias; describes all coach grants, regardless of client. */
+  claude: CoachConnectionStatus;
+  // Apple Health group-feed opt-in (migration 0028). Off by default; the iOS
+  // Apple Health detail toggle flips it via PATCH /api/me/health-sharing.
+  health: { sharing_in_group: boolean };
+}
+
+interface IntervalsStatusRow {
+  intervals_effective_athlete_id: string | null;
+  intervals_auth_error_at: number | null;
+  intervals_credential_generation: number;
+  intervals_activities_synced_at: number | null;
+}
+
+function intervalsStatus(row: IntervalsStatusRow | null): IntervalsConnectionStatus {
+  const connected = !!row?.intervals_effective_athlete_id;
+  return {
+    connected,
+    athlete_id: row?.intervals_effective_athlete_id ?? null,
+    needs_reauth: row?.intervals_auth_error_at != null,
+    credential_generation: row?.intervals_credential_generation ?? 0,
+    sync_pending: connected && row?.intervals_activities_synced_at == null,
+    last_synced_at: row?.intervals_activities_synced_at ?? null,
+  };
+}
+
+export async function getIntervalsConnectionStatus(db: D1Database, userId: string): Promise<IntervalsConnectionStatus> {
+  return intervalsStatus(await db.prepare(`SELECT
+    ${INTERVALS_EFFECTIVE_ATHLETE_SQL} AS intervals_effective_athlete_id,
+    intervals_auth_error_at, intervals_credential_generation, intervals_activities_synced_at
+    FROM users WHERE id = ?1`).bind(userId).first<IntervalsStatusRow>());
+}
+
+export interface TrainingProfileState {
+  profile: TrainingProfile | null;
+  version: number;
+  updated_at: number | null;
+}
+
+export async function getTrainingProfile(db: D1Database, userId: string): Promise<TrainingProfileState> {
+  const row = await db.prepare('SELECT document,version,updated_at FROM training_profiles WHERE user_id=?1')
+    .bind(userId).first<{ document: string; version: number; updated_at: number }>();
+  return row ? { profile: JSON.parse(row.document) as TrainingProfile, version: row.version, updated_at: row.updated_at }
+    : { profile: null, version: 0, updated_at: null };
+}
+
+/** Compare-and-swap plus identical desired-state retry, independent of plan versions. */
+export async function saveTrainingProfile(db: D1Database, userId: string, input: unknown, expectedVersion: number) {
+  const profile = parseTrainingProfile(input);
+  if (!profile || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) return { error: 'invalid_fields' } as const;
+  const document = JSON.stringify(profile);
+  const ts = now();
+  const results = await db.batch<{ document: string; version: number; updated_at: number }>([
+    db.prepare(`INSERT INTO training_profiles (user_id,document,version,updated_at)
+      SELECT ?1,?2,1,?3 WHERE ?4=0
+        AND EXISTS (SELECT 1 FROM users WHERE id=?1)
+        AND NOT EXISTS (SELECT 1 FROM account_deletion_intents WHERE user_id=?1)
+        AND NOT EXISTS (SELECT 1 FROM account_deletion_receipts WHERE user_id=?1)
+      ON CONFLICT(user_id) DO NOTHING`).bind(userId, document, ts, expectedVersion),
+    db.prepare(`UPDATE training_profiles SET document=?2,version=version+1,updated_at=MAX(updated_at+1,?3)
+      WHERE user_id=?1 AND version=?4 AND document<>?2
+        AND NOT EXISTS (SELECT 1 FROM account_deletion_intents WHERE user_id=?1)
+        AND NOT EXISTS (SELECT 1 FROM account_deletion_receipts WHERE user_id=?1)`).bind(userId, document, ts, expectedVersion),
+    db.prepare('SELECT document,version,updated_at FROM training_profiles WHERE user_id=?1').bind(userId),
+  ]);
+  const saved = results[2]?.results[0];
+  if (!saved || saved.document !== document) return { conflict: true } as const;
+  return { profile, version: saved.version, updated_at: saved.updated_at };
+}
+
+export async function getStarterWorkouts(db: D1Database, userId: string) {
+  const state = await getTrainingProfile(db, userId);
+  const catalog = await getExercises(db);
+  const workouts = state.profile ? starterWorkouts(state.profile).map(starter => ({
+    ...starter, exercises: starter.exercises.map(slot => {
+      const exercise = catalog.find(e => e.id === slot.exercise_id);
+      if (!exercise) throw new Error('starter_catalog_missing');
+      return { ...slot, name: exercise.name, unit: exercise.unit, load_mode: exercise.load_mode };
+    }),
+  })) : [];
+  const tree = await getPlanTree(db, userId);
+  const accepted = await db.prepare('SELECT 1 AS accepted FROM starter_workout_receipts WHERE user_id=?1')
+    .bind(userId).first();
+  return { profile_version: state.version, can_accept: !accepted && (!tree || tree.workouts.length === 0), workouts };
+}
+
+interface StarterReceipt {
+  starter_id: string; profile_version: number; plan_id: string; workout_id: string; version: number;
+}
+
+/** First-workout creation is atomic and never replaces or appends to an existing library. */
+export async function acceptStarterWorkout(db: D1Database, userId: string, starterId: string, profileVersion: number) {
+  const receipt = () => db.prepare(
+    'SELECT starter_id,profile_version,plan_id,starter_workout_id AS workout_id,version FROM starter_workout_receipts WHERE user_id=?1',
+  ).bind(userId).first<StarterReceipt>();
+  const replay = await receipt();
+  if (replay) return replay.starter_id === starterId && replay.profile_version === profileVersion
+    ? { ...replay, acknowledged: true as const } : { error: 'starter_already_accepted' } as const;
+  const state = await getTrainingProfile(db, userId);
+  if (!state.profile || state.version !== profileVersion) return { error: 'profile_changed' } as const;
+  const starter = starterWorkouts(state.profile).find(s => s.id === starterId);
+  if (!starter) return { error: 'starter_unavailable' } as const;
+  // Validate the whole recipe before creating even an empty plan.
+  const catalog = await getExercises(db);
+  if (starter.exercises.some(s => !catalog.some(e => e.id === s.exercise_id))) return { error: 'starter_unavailable' } as const;
+  const { plan } = await ensureActivePlan(db, userId, 'My Training', { actor: 'ios', operation: 'ensure_active_plan' });
+  const ts = now(), nonce = uuid(), workoutId = uuid();
+  const attribution: PlanWriteAttribution = { actor: 'ios', operation: 'accept_starter_workout',
+    args: { starter_id: starterId, profile_version: profileVersion }, reason: 'Member accepted a starter workout.' };
+  const guarded = `EXISTS (SELECT 1 FROM plans WHERE id=?1 AND user_id=?2 AND version=?3 AND plan_write_nonce=?4)`;
+  const statements = [
+    db.prepare(`UPDATE plans SET plan_write_nonce=?4,version=-version
+      WHERE id=?1 AND user_id=?2 AND status='active' AND version=?3 AND plan_write_nonce IS NULL
+        AND EXISTS (SELECT 1 FROM training_profiles WHERE user_id=?2 AND version=?5)
+        AND NOT EXISTS (SELECT 1 FROM starter_workout_receipts WHERE user_id=?2)
+        AND NOT EXISTS (SELECT 1 FROM workouts WHERE plan_id=?1)
+        AND NOT EXISTS (SELECT 1 FROM sessions WHERE user_id=?2 AND status='in_progress')
+        AND NOT EXISTS (SELECT 1 FROM account_deletion_intents WHERE user_id=?2)
+        AND NOT EXISTS (SELECT 1 FROM account_deletion_receipts WHERE user_id=?2)`)
+      .bind(plan.id, userId, plan.version, nonce, profileVersion),
+    preparePlanSnapshotInsert(db, { userId, planId: plan.id, version: plan.version, actor: 'system',
+      operation: 'baseline', createdAt: ts, ignoreExisting: true, writeNonce: nonce, databaseVersion: -plan.version }),
+    db.prepare(`INSERT INTO workouts (id,plan_id,name,order_index,notes,created_at,updated_at)
+      SELECT ?5,?1,?6,0,?7,?8,?8 WHERE ${guarded}`)
+      .bind(plan.id, userId, -plan.version, nonce, workoutId, starter.name, starter.explanation, ts),
+    ...starter.exercises.map((slot, index) => db.prepare(
+      `INSERT INTO template_exercises (id,workout_id,exercise_id,order_index,target_sets,target_reps,
+        target_weight,rest_seconds,cues,progression,created_at,updated_at)
+       SELECT ?5,?6,?7,?8,?9,?10,0,90,?11,?12,?13,?13 WHERE ${guarded}`,
+    ).bind(plan.id, userId, -plan.version, nonce, uuid(), workoutId, slot.exercise_id, index,
+      slot.sets, slot.reps, slot.cues, JSON.stringify({ type: 'manual', starting_load: 'choose_comfortable_load' }), ts)),
+    db.prepare(`INSERT INTO starter_workout_receipts
+      (user_id,starter_id,profile_version,plan_id,starter_workout_id,version,created_at)
+      SELECT ?2,?5,?6,?1,?7,?8,?9 WHERE ${guarded}`)
+      .bind(plan.id, userId, -plan.version, nonce, starterId, profileVersion, workoutId, plan.version + 1, ts),
+    ...preparePlanWriteFinish(db, plan, attribution, ts, nonce),
+  ];
+  const results = await runWorkoutWriteBatch(db, statements);
+  if ((results[0]?.meta.changes ?? 0) === 1) return {
+    acknowledged: true as const, starter_id: starterId, profile_version: profileVersion,
+    plan_id: plan.id, workout_id: workoutId, version: plan.version + 1,
+  };
+  const winner = await receipt();
+  if (winner?.starter_id === starterId && winner.profile_version === profileVersion) return { ...winner, acknowledged: true as const };
+  return { error: 'training_changed' } as const;
+}
+
+export async function getMeProfile(
+  db: D1Database,
+  userId: string,
+  ownerAppleSub: string | undefined,
+): Promise<MeProfile> {
+  const u = await db
+    .prepare(
+      `SELECT display_name, email,
+              ${INTERVALS_EFFECTIVE_ATHLETE_SQL} AS intervals_effective_athlete_id,
+              intervals_auth_error_at, share_health_activities,
+              intervals_credential_generation, intervals_activities_synced_at
+         FROM users WHERE id = ?1`,
+    )
+    .bind(userId)
+    .first<{
+      display_name: string | null;
+      email: string | null;
+      intervals_effective_athlete_id: string | null;
+      intervals_auth_error_at: number | null;
+      intervals_credential_generation: number;
+      intervals_activities_synced_at: number | null;
+      share_health_activities: number | null;
+    }>();
+
+  // A durable refresh grant links this account to an AI app. The owner also
+  // matches grants issued before per-user OAuth was introduced.
+  const owner = await findOwnerRow(db, ownerAppleSub);
+  const isOwner = !!owner && owner.id === userId;
+
+  const grant = await db
+    .prepare(
+      'SELECT 1 AS x FROM oauth_tokens WHERE refresh_token IS NOT NULL AND (user_id = ?1' +
+        (isOwner ? ' OR user_id IS NULL' : '') +
+        ') LIMIT 1',
+    )
+    .bind(userId)
+    .first<{ x: number }>();
+  const coachConnected = !!grant;
+  const lastMcp = await db
+    .prepare("SELECT MAX(created_at) AS t FROM audit_log WHERE user_id = ?1 AND actor = 'mcp'")
+    .bind(userId)
+    .first<{ t: number | null }>();
+  const lastActive = lastMcp?.t ?? null;
+  const coach: CoachConnectionStatus = {
+    is_owner: isOwner,
+    connected: coachConnected,
+    last_active: lastActive,
+  };
+
+  return {
+    id: userId,
+    display_name: u?.display_name ?? null,
+    email: u?.email ?? null,
+    intervals: intervalsStatus(u),
+    coach,
+    claude: coach,
+    health: {
+      // Whether THIS user's Apple Health activities are shared into the group
+      // feed (opt-in, default off — migration 0028). Drives the iOS detail
+      // toggle; the gate itself lives in the group-surface queries.
+      sharing_in_group: !!u?.share_health_activities,
+    },
+  };
+}
+
+/**
+ * Portable, caller-scoped snapshot of authoritative account and training data.
+ * This projection is intentionally not mounted on a network route until the
+ * sensitive export surface receives explicit product/security authorization.
+ * Secret material (intervals credentials, MCP passphrase hashes, OAuth tokens,
+ * and group-invite capabilities) is deliberately excluded; connection metadata
+ * and the Apple subject remain because they are the user's own account data.
+ * Shared group exports contain only the caller's membership row and group name,
+ * never another member's profile or activity.
+ */
+export async function exportUserData(
+  db: D1Database,
+  userId: string,
+): Promise<Record<string, unknown> | null> {
+  // D1 batches are transactional, including read-only batches. Reading the
+  // complete projection through one batch keeps the account, plan tree, logs,
+  // and memberships on one coherent database snapshot while writes continue.
+  const projection = await db.batch<Record<string, unknown>>([
+    db
+      .prepare(
+        `SELECT id, apple_sub, email, display_name, created_at, timezone,
+                ${INTERVALS_EFFECTIVE_ATHLETE_SQL} AS intervals_athlete_id,
+                intervals_auth_error_at,
+                share_health_activities
+           FROM users WHERE id = ?1`,
+      )
+      .bind(userId),
+    db
+      .prepare('SELECT * FROM plans WHERE user_id = ?1 ORDER BY created_at, id')
+      .bind(userId),
+    db
+      .prepare(
+        `SELECT d.* FROM workouts d
+         JOIN plans p ON p.id = d.plan_id
+         WHERE p.user_id = ?1
+         ORDER BY d.plan_id, d.order_index, d.created_at, d.id`,
+      )
+      .bind(userId),
+    db
+      .prepare(
+        `SELECT te.* FROM template_exercises te
+         JOIN workouts d ON d.id = te.workout_id
+         JOIN plans p ON p.id = d.plan_id
+         WHERE p.user_id = ?1
+         ORDER BY te.workout_id, te.order_index, te.created_at, te.id`,
+      )
+      .bind(userId),
+    db
+      .prepare('SELECT * FROM sessions WHERE user_id = ?1 ORDER BY date, created_at, id')
+      .bind(userId),
+    db
+      .prepare(
+        `SELECT sl.* FROM set_logs sl
+         JOIN sessions s ON s.id = sl.session_id
+         WHERE s.user_id = ?1
+         ORDER BY sl.logged_at, sl.id`,
+      )
+      .bind(userId),
+    db
+      .prepare(
+        `SELECT e.* FROM exercises e
+         WHERE e.id IN (
+           SELECT te.exercise_id FROM template_exercises te
+           JOIN workouts d ON d.id = te.workout_id
+           JOIN plans p ON p.id = d.plan_id
+           WHERE p.user_id = ?1
+           UNION
+           SELECT sl.exercise_id FROM set_logs sl
+           JOIN sessions s ON s.id = sl.session_id
+           WHERE s.user_id = ?1
+         )
+         ORDER BY e.name, e.id`,
+      )
+      .bind(userId),
+    db
+      .prepare(
+        `SELECT sa.* FROM session_aliases sa
+         JOIN sessions s ON s.id = sa.canonical_session_id
+         WHERE s.user_id = ?1
+         ORDER BY sa.alias_session_id`,
+      )
+      .bind(userId),
+    db
+      .prepare(
+        `SELECT sle.* FROM session_load_exports sle
+         JOIN sessions s ON s.id = sle.session_id
+         WHERE s.user_id = ?1
+         ORDER BY sle.updated_at, sle.session_id`,
+      )
+      .bind(userId),
+    db
+      .prepare('SELECT * FROM notes WHERE user_id = ?1 ORDER BY created_at, id')
+      .bind(userId),
+    db
+      .prepare('SELECT * FROM audit_log WHERE user_id = ?1 ORDER BY created_at, id')
+      .bind(userId),
+    db
+      .prepare('SELECT * FROM external_events WHERE user_id = ?1 ORDER BY date, id')
+      .bind(userId),
+    db
+      .prepare(
+        'SELECT * FROM external_activities WHERE user_id = ?1 ORDER BY date, id',
+      )
+      .bind(userId),
+    db
+      .prepare(
+        'SELECT * FROM activities WHERE user_id = ?1 ORDER BY date, logged_at, id',
+      )
+      .bind(userId),
+    db
+      .prepare(
+        `SELECT id,user_id,plan_id,version,document,actor,operation,reason,created_at
+           FROM plan_snapshots WHERE user_id=?1 ORDER BY plan_id,version`,
+      )
+      .bind(userId),
+    db
+      .prepare(
+        `SELECT gm.group_id, gm.display_name, gm.joined_at,
+                g.created_by = ?1 AS owns_group,
+                CASE WHEN g.created_by <> ?1 AND (
+                  NOT EXISTS (SELECT 1 FROM group_members creator
+                    WHERE creator.group_id = g.id AND creator.user_id = g.created_by)
+                  OR EXISTS (SELECT 1 FROM group_sharing_restrictions r
+                    WHERE r.user_id = g.created_by AND r.active = 1)
+                  OR EXISTS (SELECT 1 FROM group_member_blocks b WHERE b.active = 1 AND (
+                    (b.blocker_id = ?1 AND b.blocked_id = g.created_by)
+                    OR (b.blocker_id = g.created_by AND b.blocked_id = ?1)))
+                ) THEN 'Private group' ELSE g.name END AS group_name
+           FROM group_members gm
+           JOIN groups g ON g.id = gm.group_id
+          WHERE gm.user_id = ?1
+          ORDER BY gm.joined_at, gm.group_id`,
+      )
+      .bind(userId),
+    db
+      .prepare('SELECT blocked_id AS user_id, created_at FROM group_member_blocks WHERE blocker_id = ?1 AND active = 1 ORDER BY created_at, blocked_id')
+      .bind(userId),
+    db
+      .prepare('SELECT active, reason, updated_at FROM group_sharing_restrictions WHERE user_id = ?1')
+      .bind(userId),
+    db.prepare('SELECT document,version,updated_at FROM training_profiles WHERE user_id=?1').bind(userId),
+    db.prepare('SELECT starter_id,profile_version,plan_id,starter_workout_id AS workout_id,version,created_at FROM starter_workout_receipts WHERE user_id=?1').bind(userId),
+    db.prepare('SELECT * FROM freestyle_workout_receipts WHERE user_id=?1').bind(userId),
+    db.prepare('SELECT id,sport,metric,value,effective_date,source,created_at,deleted_at FROM athlete_thresholds WHERE user_id=?1 ORDER BY created_at,id').bind(userId),
+    db.prepare('SELECT activity_id,point_count,route,created_at FROM activity_routes WHERE user_id=?1 ORDER BY created_at,activity_id').bind(userId),
+    db.prepare('SELECT activity_id,point_count,series,created_at FROM activity_heart_rates WHERE user_id=?1 ORDER BY created_at,activity_id').bind(userId),
+    db.prepare('SELECT activity_id,lap_count,laps,created_at FROM activity_laps WHERE user_id=?1 ORDER BY created_at,activity_id').bind(userId),
+    db.prepare(`SELECT date,source,external_id,recovery_score,hrv_rmssd_ms,resting_hr,spo2_pct,skin_temp_c,calibrating,
+        sleep_start_utc_ms,sleep_end_utc_ms,sleep_ms,in_bed_ms,sleep_performance_pct,sleep_efficiency_pct,
+        respiratory_rate,day_strain,sleep_id,synced_at FROM daily_recovery WHERE user_id=?1 ORDER BY date,external_id`).bind(userId),
+    db.prepare('SELECT activity_id,location,pool_length_m,pool_unit,length_count,detail,created_at FROM activity_swims WHERE user_id=?1 ORDER BY created_at,activity_id').bind(userId),
+    db.prepare('SELECT activity_id,point_count,series,created_at FROM activity_power_series WHERE user_id=?1 ORDER BY created_at,activity_id').bind(userId),
+    db.prepare('SELECT activity_id,pause_count,fix_count,diagnostics,created_at FROM recording_diagnostics WHERE user_id=?1 ORDER BY created_at,activity_id').bind(userId),
+    db.prepare(`SELECT r.id,r.kind,r.message,r.contact,r.activity_id,r.activity_access_until,r.context,r.created_at,
+        s.content_type AS screenshot_type, s.bytes AS screenshot
+        FROM problem_reports r LEFT JOIN problem_report_screenshots s ON s.report_id = r.id
+        WHERE r.user_id=?1 ORDER BY r.created_at,r.id`).bind(userId),
+    db.prepare('SELECT client,build,os_version,first_seen_at,last_seen_at FROM member_app_use WHERE user_id=?1 ORDER BY client,first_seen_at,build').bind(userId),
+    db.prepare('SELECT day,client FROM member_active_days WHERE user_id=?1 ORDER BY day,client').bind(userId),
+  ]);
+  const rowsAt = (index: number): Record<string, unknown>[] =>
+    projection[index]?.results ?? [];
+  const account = rowsAt(0)[0] ?? null;
+  if (!account) return null;
+  const plans = rowsAt(1);
+  const days = rowsAt(2);
+  const templateExercises = rowsAt(3);
+  const sessions = rowsAt(4);
+  const sets = rowsAt(5);
+  const exercises = rowsAt(6);
+  const aliases = rowsAt(7);
+  const loadExports = rowsAt(8);
+  const notes = rowsAt(9);
+  const audit = rowsAt(10);
+  const events = rowsAt(11);
+  const externalActivities = rowsAt(12);
+  const activities = rowsAt(13);
+  const planSnapshots = rowsAt(14);
+  const memberships = rowsAt(15).map(({ owns_group, ...row }) =>
+    owns_group === 1 ? row : { ...row, group_name: sharedText(row.group_name as string, 'Private group') },
+  );
+
+  const auditRows = audit.map((row) => {
+    if (row.tool !== 'create_invite' && row.tool !== 'redeem_invite') {
+      return row;
+    }
+    if (typeof row.args !== 'string') return { ...row, args: '{}' };
+    try {
+      const args = JSON.parse(row.args) as unknown;
+      if (args === null || Array.isArray(args) || typeof args !== 'object') {
+        return { ...row, args: '{}' };
+      }
+      delete (args as Record<string, unknown>).code;
+      return { ...row, args: JSON.stringify(args) };
+    } catch {
+      // Known invite audit rows fail closed: malformed historical arguments
+      // must not bypass capability redaction.
+      return { ...row, args: '{}' };
+    }
+  });
+  return {
+    schema_version: 3,
+    exported_at: now(),
+    account,
+    training: {
+      plans,
+      workouts: days,
+      template_exercises: templateExercises,
+      exercises,
+      sessions,
+      set_logs: sets,
+      session_aliases: aliases,
+      session_load_exports: loadExports,
+      notes,
+      audit_log: auditRows,
+      external_events: events,
+      external_activities: externalActivities.map(withActivityAttribution),
+      activities,
+      plan_snapshots: planSnapshots,
+      training_profile: rowsAt(18)[0] ?? null,
+      starter_workout_receipts: rowsAt(19),
+      freestyle_workout_receipts: rowsAt(20),
+      athlete_thresholds: rowsAt(21),
+      // Recorded runs' GPS routes in src/activityRoute.ts's encoding.
+      activity_routes: rowsAt(22).map((row) => ({
+        ...row,
+        route: typeof row.route === 'string' ? parseStoredRoute(row.route) : null,
+      })),
+      // Runs' heart-rate series in src/heartRateSeries.ts's encoding.
+      activity_heart_rates: rowsAt(23).map((row) => ({
+        ...row,
+        series: typeof row.series === 'string' ? parseStoredHeartRate(row.series) : null,
+      })),
+      // Planned runs' laps in src/runLaps.ts's shape (planned-runs P9).
+      activity_laps: rowsAt(24).map((row) => ({
+        ...row,
+        laps: typeof row.laps === 'string' ? parseRunLaps(row.laps) : null,
+      })),
+      // WHOOP's daily recovery and sleep (migration 0070), private to the member.
+      daily_recovery: rowsAt(25),
+      // Swims' pool, lengths and strokes in src/swimDetail.ts's shape (migration 0072).
+      activity_swims: rowsAt(26).map((row) => ({
+        ...row,
+        detail: typeof row.detail === 'string' ? parseStoredSwimDetail(row.detail) : null,
+      })),
+      // Rides' power and cadence in src/powerSeries.ts's encoding (migration 0074).
+      activity_power_series: rowsAt(27).map((row) => ({
+        ...row,
+        series: typeof row.series === 'string' ? parseStoredPowerSeries(row.series) : null,
+      })),
+      // Recorded runs' pauses and GPS speed readings in
+      // src/recordingDiagnostics.ts's shape (migration 0076).
+      recording_diagnostics: rowsAt(28).map((row) => ({
+        ...row,
+        diagnostics: typeof row.diagnostics === 'string' ? parseRecordingDiagnostics(row.diagnostics) : null,
+      })),
+      // Problems the member reported from the app (migration 0077), with
+      // the screenshot as base64.
+      problem_reports: rowsAt(29).map(({ screenshot, screenshot_type, context, ...row }) => ({
+        ...row,
+        context: parseStoredContext(context),
+        screenshot: screenshot == null ? null : {
+          content_type: screenshot_type,
+          base64: bytesToBase64(blobBytes(screenshot as ArrayBuffer | number[] | Uint8Array)),
+        },
+      })),
+    },
+    group_memberships: memberships,
+    group_safety: {
+      blocks: rowsAt(16),
+      sharing_restriction: rowsAt(17)[0] ?? null,
+    },
+    // Which app builds and clients the member used, and on which days
+    // (migration 0078).
+    app_use: {
+      builds: rowsAt(30),
+      active_days: rowsAt(31),
+    },
+  };
+}
+
+export async function setUserDisplayName(
+  db: D1Database,
+  userId: string,
+  displayName: string,
+): Promise<boolean> {
+  const result = await db
+    .prepare('UPDATE users SET display_name = ?2 WHERE id = ?1')
+    .bind(userId, displayName)
+    .run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
+/**
+ * Set this user's "share my Apple Health activities in the group feed" opt-in
+ * (migration 0028). Off by default; the iOS Apple Health detail toggle calls
+ * PATCH /api/me/health-sharing to flip it. When off, the group feed/stats/series
+ * queries exclude this user's source='healthkit' rows.
+ */
+export async function setHealthActivitySharing(
+  db: D1Database,
+  userId: string,
+  enabled: boolean,
+): Promise<{ sharing_in_group: boolean }> {
+  await db
+    .prepare('UPDATE users SET share_health_activities = ?2 WHERE id = ?1')
+    .bind(userId, enabled ? 1 : 0)
+    .run();
+  return { sharing_in_group: enabled };
+}
+
+/**
+ * Create a group and add the creator as the first member. Returns the new
+ * group row (without the auto-member — read it back via listGroupsForUser
+ * if you need members hydrated). Audited as 'create_group' actor='ios'.
+ */
+export async function createGroup(
+  db: D1Database,
+  userId: string,
+  name: string,
+): Promise<Group> {
+  const id = uuid();
+  const ts = now();
+  const group: Group = { id, name, created_by: userId, created_at: ts };
+  // Use a batch so the membership row lands with the group row — D1 batches
+  // run in a single transaction (an atomicity guarantee documented by
+  // Cloudflare). If either statement fails the group is never visible.
+  await db.batch([
+    db
+      .prepare('INSERT INTO groups (id,name,created_by,created_at) VALUES (?1,?2,?3,?4)')
+      .bind(id, name, userId, ts),
+    db
+      .prepare(
+        'INSERT INTO group_members (group_id,user_id,display_name,joined_at) VALUES (?1,?2,?3,?4)',
+      )
+      .bind(id, userId, null, ts),
+  ]);
+  await writeAudit(
+    db,
+    userId,
+    'create_group',
+    { group_id: id, name },
+    'created',
+    'ios',
+  );
+  return group;
+}
+
+/** True iff `groupId` names a real group. The 404-vs-403 discriminator the
+ *  group routes share: membership answers "may you see this", this answers
+ *  "is there anything here at all". */
+export async function groupExists(db: D1Database, groupId: string): Promise<boolean> {
+  const r = await db
+    .prepare('SELECT 1 AS x FROM groups WHERE id = ?1')
+    .bind(groupId)
+    .first<{ x: number }>();
+  return !!r;
+}
+
+/** True iff `userId` is currently a member of `groupId`. */
+export async function isGroupMember(
+  db: D1Database,
+  userId: string,
+  groupId: string,
+): Promise<boolean> {
+  const r = await db
+    .prepare('SELECT 1 AS x FROM group_members WHERE group_id = ?1 AND user_id = ?2')
+    .bind(groupId, userId)
+    .first<{ x: number }>();
+  return !!r;
+}
+
+interface VisibleGroupMember {
+  user_id: string;
+  per_group_name: string | null;
+  global_name: string | null;
+  email: string | null;
+  timezone: string | null;
+  joined_at: number;
+}
+
+// One visibility rule for rosters, REST/MCP feeds, stats and activity series.
+// Filtering before activity reads keeps pagination and totals consistent.
+async function visibleGroupMembers(db: D1Database, groupId: string, callerUserId: string): Promise<VisibleGroupMember[]> {
+  const rows = await db.prepare(`
+    SELECT gm.user_id, gm.display_name AS per_group_name, gm.joined_at,
+           u.display_name AS global_name, u.email, u.timezone
+      FROM group_members gm JOIN users u ON u.id = gm.user_id
+     WHERE gm.group_id = ?1
+       AND EXISTS (SELECT 1 FROM group_members viewer WHERE viewer.group_id = ?1 AND viewer.user_id = ?2)
+       AND (gm.user_id = ?2 OR (
+         NOT EXISTS (SELECT 1 FROM group_sharing_restrictions r WHERE r.user_id = gm.user_id AND r.active = 1)
+         AND NOT EXISTS (SELECT 1 FROM group_member_blocks b WHERE b.active = 1 AND
+           ((b.blocker_id = ?2 AND b.blocked_id = gm.user_id) OR
+            (b.blocked_id = ?2 AND b.blocker_id = gm.user_id)))
+       ))
+     ORDER BY gm.joined_at, gm.user_id`).bind(groupId, callerUserId).all<VisibleGroupMember>();
+  return rows.results;
+}
+
+export async function listGroupBlocks(db: D1Database, userId: string) {
+  const rows = await db.prepare(`
+    SELECT blocked_id AS user_id, created_at FROM group_member_blocks
+     WHERE blocker_id = ?1 AND active = 1 ORDER BY created_at, blocked_id
+  `).bind(userId).all<{ user_id: string; created_at: number }>();
+  return rows.results;
+}
+
+export async function setGroupMemberBlock(db: D1Database, userId: string, targetId: string, active: boolean): Promise<boolean> {
+  if (userId === targetId) return false;
+  if (!active) {
+    // Only the block's owner can undo it; retry and leaving the group are safe.
+    await db.prepare('UPDATE group_member_blocks SET active = 0 WHERE blocker_id = ?1 AND blocked_id = ?2')
+      .bind(userId, targetId).run();
+    return true;
+  }
+  const result = await db.prepare(`
+    INSERT INTO group_member_blocks (blocker_id, blocked_id, created_at, active)
+    SELECT ?1, ?2, ?3, 1
+     WHERE EXISTS (SELECT 1 FROM group_members a JOIN group_members b ON a.group_id = b.group_id
+                    WHERE a.user_id = ?1 AND b.user_id = ?2)
+       AND NOT EXISTS (SELECT 1 FROM account_deletion_intents WHERE user_id IN (?1, ?2))
+    ON CONFLICT (blocker_id, blocked_id) DO UPDATE SET active = 1
+  `).bind(userId, targetId, now()).run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
+// Operator authority requires the explicitly configured Apple identity. Never
+// promote the earliest account or a group creator into platform moderation.
+export async function isGroupSafetyOperator(db: D1Database, userId: string, ownerAppleSub: string | undefined): Promise<boolean> {
+  if (!ownerAppleSub) return false;
+  const row = await db.prepare(`SELECT 1 AS allowed FROM users
+    WHERE id = ?1 AND apple_sub = ?2
+      AND NOT EXISTS (SELECT 1 FROM owner_deletion_tombstone WHERE singleton = 1)
+      AND NOT EXISTS (SELECT 1 FROM account_deletion_intents WHERE user_id = ?1)
+  `).bind(userId, ownerAppleSub).first();
+  return row !== null;
+}
+
+export async function getGroupSharingRestriction(db: D1Database, userId: string) {
+  return db.prepare('SELECT active, reason, updated_at FROM group_sharing_restrictions WHERE user_id = ?1')
+    .bind(userId).first<{ active: number; reason: GroupReportReason; updated_at: number }>();
+}
+
+export async function setGroupSharingRestriction(
+  db: D1Database, operatorId: string, ownerAppleSub: string | undefined,
+  targetId: string, active: boolean, reason: GroupReportReason,
+): Promise<boolean> {
+  if (!ownerAppleSub) return false;
+  const ts = now();
+  // Restriction and audit commit together. Authority is rechecked at the write,
+  // including account deletion; no report content is copied into the audit.
+  const [result] = await db.batch([
+    db.prepare(`INSERT INTO group_sharing_restrictions (user_id, active, reason, updated_at)
+      SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM users WHERE id = ?1)
+        AND EXISTS (SELECT 1 FROM users WHERE id = ?5 AND apple_sub = ?6)
+        AND NOT EXISTS (SELECT 1 FROM owner_deletion_tombstone WHERE singleton = 1)
+        AND NOT EXISTS (SELECT 1 FROM account_deletion_intents WHERE user_id IN (?1, ?5))
+      ON CONFLICT (user_id) DO UPDATE SET active = excluded.active, reason = excluded.reason, updated_at = excluded.updated_at
+    `).bind(targetId, active ? 1 : 0, reason, ts, operatorId, ownerAppleSub),
+    db.prepare(`INSERT INTO audit_log (id, user_id, actor, tool, args, result, created_at)
+      SELECT ?1, ?2, 'ios', 'set_group_sharing_restriction', ?3, ?4, ?5 WHERE changes() = 1
+    `).bind(uuid(), operatorId, JSON.stringify({ user_id: targetId, reason }), active ? 'restricted' : 'restored', ts),
+  ]);
+  return (result?.meta.changes ?? 0) > 0;
+}
+
+async function hydrateGroup(
+  db: D1Database,
+  group: Group,
+  callerUserId: string,
+): Promise<Group & { members: ResolvedGroupMember[] }> {
+  const rows = await visibleGroupMembers(db, group.id, callerUserId);
+  const members: ResolvedGroupMember[] = rows.map((row) => ({
+    group_id: group.id,
+    user_id: row.user_id,
+    display_name: sharedText(row.per_group_name, 'Member'),
+    joined_at: row.joined_at,
+    effective_display_name: sharedText(row.per_group_name ?? row.global_name, 'Member'),
+  }));
+  const creatorVisible = rows.some((row) => row.user_id === group.created_by);
+  // Retain the existing string wire shape for older clients; an unavailable
+  // creator has no report/block target and contributes no shared group name.
+  return { ...group,
+    created_by: creatorVisible ? group.created_by : '',
+    name: creatorVisible ? sharedText(group.name, 'Private group')! : 'Private group',
+    members };
+}
+
+/**
+ * List groups the user belongs to, with members hydrated. Stable ordering
+ * (created_at, then id) so the iOS list isn't shuffled across reads.
+ */
+export async function listGroupsForUser(
+  db: D1Database,
+  userId: string,
+): Promise<Array<Group & { members: ResolvedGroupMember[] }>> {
+  const r = await db
+    .prepare(
+      `SELECT g.*, CASE WHEN EXISTS (SELECT 1 FROM group_sharing_restrictions r WHERE r.user_id = g.created_by AND r.active = 1) THEN 'Private group' ELSE g.name END AS name FROM groups g
+         JOIN group_members gm ON gm.group_id = g.id
+        WHERE gm.user_id = ?1
+        ORDER BY g.created_at, g.id`,
+    )
+    .bind(userId)
+    .all<Group>();
+  const out: Array<Group & { members: ResolvedGroupMember[] }> = [];
+  for (const g of r.results) {
+    out.push(await hydrateGroup(db, g, userId));
+  }
+  return out;
+}
+
+/** Read a group + its members. Returns null if the group does not exist. */
+export async function getGroupWithMembers(
+  db: D1Database,
+  groupId: string,
+  callerUserId: string,
+): Promise<(Group & { members: ResolvedGroupMember[] }) | null> {
+  const g = await db
+    .prepare("SELECT g.*, CASE WHEN EXISTS (SELECT 1 FROM group_sharing_restrictions r WHERE r.user_id = g.created_by AND r.active = 1) THEN 'Private group' ELSE g.name END AS name FROM groups g WHERE id = ?1")
+    .bind(groupId)
+    .first<Group>();
+  if (!g) return null;
+  return hydrateGroup(db, g, callerUserId);
+}
+
+/**
+ * Create a new invite code for a group. Caller MUST have already verified
+ * `isGroupMember(db, userId, groupId)` — this function does not enforce
+ * authorization (the REST handler does). `expiresAtMs` semantics:
+ *   undefined → default = created_at + 30 days
+ *   null      → never expires
+ *   number    → exact epoch-ms expiry (caller-provided)
+ * Retries up to 5x on PK collision (32^6 alphabet; the retry is paranoia).
+ * Audited as 'create_invite' actor='ios'.
+ */
+export async function createInvite(
+  db: D1Database,
+  userId: string,
+  groupId: string,
+  expiresAtMs?: number | null,
+): Promise<GroupInvite> {
+  const ts = now();
+  const expires =
+    expiresAtMs === undefined ? ts + DEFAULT_INVITE_TTL_MS : expiresAtMs;
+  let code = '';
+  let lastErr: unknown = null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    code = newInviteCode();
+    try {
+      await db
+        .prepare(
+          `INSERT INTO group_invites
+             (code,group_id,created_by,created_at,expires_at,used_at,used_by)
+           VALUES (?1,?2,?3,?4,?5,NULL,NULL)`,
+        )
+        .bind(code, groupId, userId, ts, expires)
+        .run();
+      lastErr = null;
+      break;
+    } catch (e) {
+      // PK collision on `code` → regenerate. Any other error rethrows below.
+      lastErr = e;
+      const msg = (e as Error).message ?? '';
+      if (!/UNIQUE|constraint/i.test(msg)) throw e;
+    }
+  }
+  if (lastErr) throw lastErr;
+  const invite: GroupInvite = {
+    code,
+    group_id: groupId,
+    created_by: userId,
+    created_at: ts,
+    expires_at: expires,
+    used_at: null,
+    used_by: null,
+  };
+  await writeAudit(
+    db,
+    userId,
+    'create_invite',
+    { group_id: groupId, expires_at: expires },
+    'created',
+    'ios',
+  );
+  return invite;
+}
+
+/**
+ * Read-only invite lookup (no consumption). Returns the row regardless
+ * of used/expired state; the caller (redeemInvite) makes the
+ * accept/reject call.
+ */
+export async function getInviteForRedemption(
+  db: D1Database,
+  code: string,
+): Promise<GroupInvite | null> {
+  const r = await db
+    .prepare('SELECT * FROM group_invites WHERE code = ?1')
+    .bind(code)
+    .first<GroupInvite>();
+  return r ?? null;
+}
+
+/**
+ * Public, read-only preview of an invite code — the data behind both the
+ * Universal-Link landing page (`GET /join/:code`) and the in-app join-confirm
+ * sheet (`GET /api/groups/invite/:code`). Returns the group NAME so the
+ * invitee sees *what* they're joining, plus a status the caller renders:
+ *   valid   — joinable now
+ *   used    — already redeemed (codes are single-use)
+ *   expired — past expires_at
+ *   unknown — no such code, or the group is gone
+ *
+ * Leaks nothing privileged: the only data exposed is the group name, keyed by
+ * a code the caller already holds. The code IS the join capability, so anyone
+ * who can call this could already redeem it. Does NOT consume the code.
+ */
+export async function getInvitePreview(
+  db: D1Database,
+  code: string,
+): Promise<{ status: 'valid' | 'used' | 'expired' | 'unknown'; group_name: string | null }> {
+  // Normalize to the stored form (codes are always uppercase) so preview is
+  // case-insensitive and identical across both callers — the public /join
+  // landing page and the authenticated /api/groups/invite/:code route.
+  const invite = await getInviteForRedemption(db, code.trim().toUpperCase());
+  if (!invite) return { status: 'unknown', group_name: null };
+  const group = await db
+    .prepare("SELECT CASE WHEN EXISTS (SELECT 1 FROM group_sharing_restrictions r WHERE r.user_id = g.created_by AND r.active = 1) THEN 'Private group' ELSE g.name END AS name FROM groups g WHERE id = ?1")
+    .bind(invite.group_id)
+    .first<{ name: string }>();
+  const group_name = sharedText(group?.name ?? null, 'Private group');
+  if (group_name == null) return { status: 'unknown', group_name: null };
+  if (invite.used_at != null) return { status: 'used', group_name };
+  if (invite.expires_at != null && invite.expires_at < now()) {
+    return { status: 'expired', group_name };
+  }
+  return { status: 'valid', group_name };
+}
+
+/**
+ * Redeem an invite as `userId`. Validates, claims the code, inserts the
+ * membership, and writes the success audit. The three writes share one D1
+ * transaction, so account deletion or another redemption cannot land between
+ * an invite claim and its membership/audit. The conditional UPDATE means at
+ * most one redeemer wins; a loser is mapped back to the current public error.
+ *
+ * `already_member` is a soft success-ish case: the user is *already* in
+ * the group, the invite is NOT consumed, and the iOS client can show
+ * "you're already in this group" without burning the code.
+ *
+ * Audited as 'redeem_invite' actor='ios' on success.
+ */
+export async function redeemInvite(
+  db: D1Database,
+  code: string,
+  userId: string,
+): Promise<
+  | { ok: true; group_id: string }
+  | { error: 'unknown' | 'used' | 'expired' | 'already_member' }
+> {
+  const invite = await getInviteForRedemption(db, code);
+  if (!invite) return { error: 'unknown' };
+  if (invite.used_at != null) return { error: 'used' };
+  if (invite.expires_at != null && invite.expires_at < now()) {
+    return { error: 'expired' };
+  }
+  if (await isGroupMember(db, userId, invite.group_id)) {
+    // Already in — do NOT consume the code. The invite stays alive for
+    // someone else to use; the redeemer just learns they're already in.
+    return { error: 'already_member' };
+  }
+  const ts = now();
+  const auditId = uuid();
+  const auditArgs = JSON.stringify({ group_id: invite.group_id });
+  const [claim] = await db.batch([
+    // Repeat every mutable validation inside the transaction. In particular,
+    // requiring a live principal with no deletion intent prevents a deletion
+    // that won the database write lock first from consuming the invite, even
+    // while provider revocation intentionally keeps the users row present.
+    db
+      .prepare(
+        `UPDATE group_invites
+            SET used_at = ?2, used_by = ?3
+          WHERE code = ?1
+            AND used_at IS NULL
+            AND (expires_at IS NULL OR expires_at >= ?2)
+            AND EXISTS (SELECT 1 FROM users WHERE id = ?3)
+            AND NOT EXISTS (
+              SELECT 1 FROM account_deletion_intents WHERE user_id = ?3
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM account_deletion_receipts WHERE user_id = ?3
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM group_members gm
+               WHERE gm.group_id = group_invites.group_id
+                 AND gm.user_id = ?3
+            )`,
+      )
+      .bind(code, ts, userId),
+    // changes() observes the immediately preceding conditional UPDATE on this
+    // SQLite connection. A losing batch creates neither an audit attempt nor a
+    // membership; the unique audit id then gates the final INSERT.
+    db
+      .prepare(
+        `INSERT INTO audit_log
+           (id,user_id,actor,tool,args,result,created_at)
+         SELECT ?1,?2,'ios','redeem_invite',?3,'joined',?4
+          WHERE changes() = 1`,
+      )
+      .bind(auditId, userId, auditArgs, ts),
+    db
+      .prepare(
+        `INSERT INTO group_members (group_id,user_id,display_name,joined_at)
+         SELECT group_id,?2,NULL,?3 FROM group_invites
+          WHERE code = ?1
+            AND EXISTS (SELECT 1 FROM audit_log WHERE id = ?4)`,
+      )
+      .bind(code, userId, ts, auditId),
+  ]);
+  if ((claim?.meta.changes ?? 0) !== 1) {
+    const current = await getInviteForRedemption(db, code);
+    if (!current) return { error: 'unknown' };
+    if (current.used_at != null) return { error: 'used' };
+    if (current.expires_at != null && current.expires_at < now()) {
+      return { error: 'expired' };
+    }
+    if (await isGroupMember(db, userId, current.group_id)) {
+      return { error: 'already_member' };
+    }
+    // The only remaining expected case is a principal deleted before this
+    // transaction obtained the write lock. Do not disclose that lifecycle
+    // state through the invite surface.
+    return { error: 'unknown' };
+  }
+  return { ok: true, group_id: invite.group_id };
+}
+
+/**
+ * Remove the caller from a group. Idempotent — returns true if a row was
+ * actually deleted, false if the caller was not a member (the REST handler
+ * still returns 200 either way per spec). Last member leaving does NOT
+ * delete the group; orphan groups are tolerated (cleanup deferred).
+ */
+export async function leaveGroup(
+  db: D1Database,
+  userId: string,
+  groupId: string,
+): Promise<boolean> {
+  const res = await db
+    .prepare('DELETE FROM group_members WHERE group_id = ?1 AND user_id = ?2')
+    .bind(groupId, userId)
+    .run();
+  const removed = (res.meta?.changes ?? 0) > 0;
+  if (removed) {
+    await writeAudit(
+      db,
+      userId,
+      'leave_group',
+      { group_id: groupId },
+      'left',
+      'ios',
+    );
+  }
+  return removed;
+}
+
+/**
+ * Set or clear the caller's per-group nickname override. NULL = clear
+ * (fall back to users.display_name on read). Returns true if a row was
+ * updated, false if the caller is not a member of the group.
+ * Audited as 'set_group_display_name' actor='ios'.
+ */
+export async function setGroupDisplayName(
+  db: D1Database,
+  userId: string,
+  groupId: string,
+  displayName: string | null,
+): Promise<boolean> {
+  const res = await db
+    .prepare(
+      'UPDATE group_members SET display_name = ?3 WHERE group_id = ?1 AND user_id = ?2',
+    )
+    .bind(groupId, userId, displayName)
+    .run();
+  const ok = (res.meta?.changes ?? 0) > 0;
+  if (ok) {
+    await writeAudit(
+      db,
+      userId,
+      'set_group_display_name',
+      { group_id: groupId, display_name: displayName },
+      displayName == null ? 'cleared' : 'set',
+      'ios',
+    );
+  }
+  return ok;
+}
+
+/** Count rows in the users table. Used by /auth/apple to detect the fresh-install bootstrap path. */
+export async function countUsers(db: D1Database): Promise<number> {
+  const r = await db
+    .prepare('SELECT COUNT(*) AS c FROM users')
+    .first<{ c: number }>();
+  return r?.c ?? 0;
+}
+
+// ---- plan tree -----------------------------------------------------------
+
+export async function getActivePlan(
+  db: D1Database,
+  userId: string,
+): Promise<PlanRow | null> {
+  return db
+    .prepare("SELECT * FROM plans WHERE user_id = ?1 AND status = 'active'")
+    .bind(userId)
+    .first<PlanRow>();
+}
+
+export async function getPlanTree(
+  db: D1Database,
+  userId: string,
+): Promise<PlanTree | null> {
+  const plan = await getActivePlan(db, userId);
+  if (!plan) return null;
+  return loadPlanTree(db, plan);
+}
+
+/**
+ * Load workouts and slots for the plan row the caller already holds. This
+ * avoids repeating plan selection; the independent reads are not an atomic
+ * snapshot. Version claims still happen at the write boundary.
+ */
+async function loadPlanTree(db: D1Database, plan: PlanRow): Promise<PlanTree> {
+  const days = await db
+    .prepare('SELECT * FROM workouts WHERE plan_id = ?1 ORDER BY order_index, created_at, id')
+    .bind(plan.id)
+    .all<WorkoutRow>();
+  const dayIds = days.results.map((d) => d.id);
+  let exercises: EnrichedTemplateExercise[] = [];
+  if (dayIds.length) {
+    const placeholders = dayIds.map((_, i) => `?${i + 1}`).join(',');
+    const res = await db
+      .prepare(
+        `SELECT te.*, e.name AS exercise_name, e.unit AS exercise_unit,
+                e.primary_muscle AS exercise_muscle, e.modality AS exercise_modality,
+                e.laterality AS exercise_laterality, e.load_mode AS exercise_load_mode,
+                e.demo_slug AS exercise_demo_slug
+         FROM template_exercises te
+         JOIN exercises e ON e.id = te.exercise_id
+         WHERE te.workout_id IN (${placeholders}) ORDER BY te.order_index, te.created_at, te.id`,
+      )
+      .bind(...dayIds)
+      .all<EnrichedTemplateExercise>();
+    exercises = res.results;
+  }
+  return {
+    ...plan,
+    workouts: days.results.map((d) => ({
+      ...d,
+      exercises: exercises.filter((e) => e.workout_id === d.id),
+    })),
+  };
+}
+
+export interface PlanSnapshotRow {
+  id: string;
+  user_id: string;
+  plan_id: string;
+  version: number;
+  document: string;
+  actor: string;
+  operation: string;
+  reason: string | null;
+  created_at: number;
+}
+
+export interface PlanWriteAttribution {
+  receiptID?: string;
+  /** 'ios' and 'web' are the member's own edits from the app or the web app. */
+  actor: 'mcp' | 'ios' | 'web' | 'system';
+  operation: string;
+  args?: unknown;
+  reason?: string | null;
+  note?: string | null;
+  noteAuthor?: 'coach' | 'nick';
+  result?: unknown;
+}
+
+/** Includes legacy null-workout runners and durable logged-slot evidence. */
+function workoutSessionReferenceSQL(alias: string, workout: string, plan: string): string {
+  return `(${alias}.workout_id=${workout}
+    OR (${alias}.kind='planned' AND ${alias}.plan_id=${plan} AND ${alias}.workout_id IS NULL AND EXISTS (
+      SELECT 1 FROM plans p WHERE p.id=${plan}
+        AND json_extract(p.meta, '$.schedule.week.' || CASE strftime('%w',${alias}.date)
+          WHEN '0' THEN 'sun' WHEN '1' THEN 'mon' WHEN '2' THEN 'tue' WHEN '3' THEN 'wed'
+          WHEN '4' THEN 'thu' WHEN '5' THEN 'fri' ELSE 'sat' END)=${workout}
+    )) OR EXISTS (SELECT 1 FROM set_logs l JOIN template_exercises te ON te.id=l.template_exercise_id
+      WHERE l.session_id=${alias}.id AND l.deleted_at IS NULL AND te.workout_id=${workout}))`;
+}
+
+function prepareArchiveAssignments(db: D1Database, plan: PlanRow, workoutId: string, ts: number, nonce: string) {
+  return db.prepare(`UPDATE sessions SET workout_id=NULL,status='skipped',
+      attempt=attempt+1,updated_at=MAX(updated_at+1,?4)
+    WHERE user_id=?2 AND status='planned' AND ${workoutSessionReferenceSQL('sessions', '?3', '?1')}
+      AND EXISTS (SELECT 1 FROM plans WHERE id=?1 AND user_id=?2 AND version=-?5 AND plan_write_nonce=?6)`)
+    .bind(plan.id, plan.user_id, workoutId, ts, plan.version, nonce);
+}
+
+async function workoutIsActive(db: D1Database, plan: PlanRow, workoutId: string): Promise<boolean> {
+  return !!await db.prepare(`SELECT 1 FROM sessions s WHERE s.user_id=?2
+    AND s.status='in_progress' AND ${workoutSessionReferenceSQL('s', '?3', '?1')} LIMIT 1`)
+    .bind(plan.id, plan.user_id, workoutId).first();
+}
+
+/** A reused date may keep its original plan_id while targeting newer slots. */
+function sessionReferencesPlanSQL(alias: string, plan: string): string {
+  return `(${alias}.plan_id=${plan} OR EXISTS (
+    SELECT 1 FROM workouts w WHERE w.plan_id=${plan} AND (
+      ${alias}.workout_id=w.id OR EXISTS (
+        SELECT 1 FROM set_logs l JOIN template_exercises te ON te.id=l.template_exercise_id
+        WHERE l.session_id=${alias}.id AND l.deleted_at IS NULL AND te.workout_id=w.id
+      )
+    )
+  ))`;
+}
+
+/**
+ * SQL serializer for the writable plan document. Keeping this as an INSERT
+ * statement lets a plan writer append it to the same D1 batch as its CAS,
+ * so a snapshot can never describe a later post-commit read.
+ */
+export function preparePlanSnapshotInsert(
+  db: D1Database,
+  input: {
+    userId: string;
+    planId: string;
+    version?: number;
+    actor: string;
+    operation: string;
+    reason?: string | null;
+    createdAt: number;
+    ignoreExisting?: boolean;
+    writeNonce?: string;
+    databaseVersion?: number;
+  },
+): D1PreparedStatement {
+  const insert = input.ignoreExisting ? 'INSERT OR IGNORE' : 'INSERT';
+  return db.prepare(
+    `${insert} INTO plan_snapshots
+       (id,user_id,plan_id,version,document,actor,operation,reason,created_at)
+     SELECT ?1,p.user_id,p.id,COALESCE(?4,p.version),
+       json_object(
+         'schema_version',2,
+         'plan',json_object('name',p.name,'meta',p.meta),
+         'workouts',json(COALESCE((
+           SELECT json_group_array(json(day_document)) FROM (
+             SELECT json_object(
+               'id',d.id,'name',d.name,'day_label',d.day_label,
+               'order_index',d.order_index,'notes',d.notes,'tags',d.tags,'archived_at',d.archived_at,
+               'one_time_date',d.one_time_date,
+               'exercises',json(COALESCE((
+                 SELECT json_group_array(json(slot_document)) FROM (
+                   SELECT json_object(
+                     'id',te.id,'exercise_id',te.exercise_id,
+                     'order_index',te.order_index,'target_sets',te.target_sets,
+                     'target_reps',te.target_reps,'target_reps_max',te.target_reps_max,
+                     'target_rpe',te.target_rpe,'rest_seconds',te.rest_seconds,
+                     'target_weight',te.target_weight,'target_weight_unit',te.target_weight_unit,
+                     'target_duration_s',te.target_duration_s,
+                     'progression',te.progression,'cues',te.cues,'is_warmup',te.is_warmup,
+                     'group_id',te.group_id,'group_rest_seconds',te.group_rest_seconds,
+                     'group_transition_seconds',te.group_transition_seconds,
+                     'run_steps',te.run_steps
+                   ) AS slot_document
+                   FROM template_exercises te
+                   WHERE te.workout_id=d.id
+                   ORDER BY te.order_index,te.created_at,te.id
+                 )), '[]'))
+             ) AS day_document
+             FROM workouts d
+             WHERE d.plan_id=p.id
+             ORDER BY d.order_index,d.created_at,d.id
+           )
+         ), '[]'))
+       ),?5,?6,?7,?8
+     FROM plans p
+     WHERE p.id=?2 AND p.user_id=?3 AND (?4 IS NULL OR p.version=?10)
+       AND (?9 IS NULL OR p.plan_write_nonce=?9)`,
+  ).bind(
+    uuid(), input.planId, input.userId, input.version ?? null, input.actor,
+    input.operation, input.reason ?? null, input.createdAt, input.writeNonce ?? null,
+    input.databaseVersion ?? input.version ?? null,
+  );
+}
+
+export function preparePlanWriteStart(
+  db: D1Database,
+  plan: PlanRow,
+  attribution: PlanWriteAttribution,
+  ts: number,
+  nonce: string,
+  rejectActiveWorkout = false,
+  rejectWorkoutIds: readonly string[] = [],
+  guard?: { sql: string; json: string },
+): D1PreparedStatement[] {
+  return [
+    db.prepare(
+      `UPDATE plans SET plan_write_nonce=?4,version=-version
+        WHERE id=?1 AND user_id=?2 AND status='active' AND version=?3
+          AND plan_write_nonce IS NULL AND (${guard?.sql ?? '?7 IS NULL'})
+          AND EXISTS (SELECT 1 FROM users u WHERE u.id=?2)
+          AND NOT EXISTS (SELECT 1 FROM account_deletion_intents i WHERE i.user_id=?2)
+          AND NOT EXISTS (SELECT 1 FROM account_deletion_receipts r WHERE r.user_id=?2)
+          AND (?6='[]' OR NOT EXISTS (
+            SELECT 1 FROM sessions s WHERE s.user_id=?2 AND s.status='in_progress'
+              AND EXISTS (SELECT 1 FROM json_each(?6) archive_target
+                WHERE ${workoutSessionReferenceSQL('s', 'archive_target.value', '?1')})
+          ))
+          AND (?5=0 OR NOT EXISTS (
+            SELECT 1 FROM sessions s WHERE s.user_id=?2 AND s.status='in_progress'
+              AND ${sessionReferencesPlanSQL('s', '?1')}
+          ))`,
+    ).bind(plan.id, plan.user_id, plan.version, nonce, rejectActiveWorkout ? 1 : 0, JSON.stringify(rejectWorkoutIds), guard?.json ?? null),
+    preparePlanSnapshotInsert(db, {
+      userId: plan.user_id, planId: plan.id, version: plan.version,
+      actor: 'system', operation: 'baseline', reason: 'First captured version',
+      createdAt: ts, ignoreExisting: true, writeNonce: nonce,
+      databaseVersion: -plan.version,
+    }),
+  ];
+}
+
+export function preparePlanWriteFinish(
+  db: D1Database,
+  plan: PlanRow,
+  attribution: PlanWriteAttribution,
+  ts: number,
+  nonce: string,
+): D1PreparedStatement[] {
+  const nextVersion = plan.version + 1;
+  const statements: D1PreparedStatement[] = [
+    db.prepare(
+      `UPDATE plans SET version=?6,updated_at=?5
+        WHERE id=?1 AND user_id=?2 AND version=-?3 AND plan_write_nonce=?4
+        RETURNING version`,
+    ).bind(plan.id, plan.user_id, plan.version, nonce, ts, nextVersion),
+    db.prepare(
+      `INSERT INTO audit_log (id,user_id,actor,tool,args,result,created_at)
+       SELECT ?5,p.user_id,?6,?7,?8,?9,?10 FROM plans p
+        WHERE p.id=?1 AND p.user_id=?2 AND p.version=?3 AND p.plan_write_nonce=?4`,
+    ).bind(plan.id, plan.user_id, nextVersion, nonce, attribution.receiptID ?? uuid(), attribution.actor,
+      attribution.operation, JSON.stringify(attribution.args ?? {}),
+      typeof attribution.result === 'string'
+        ? attribution.result
+        : JSON.stringify(attribution.result ?? { plan_id: plan.id, version: nextVersion }), ts),
+  ];
+  if (attribution.note) {
+    statements.push(db.prepare(
+      `INSERT INTO notes (id,user_id,scope,ref_id,author,body,created_at)
+       SELECT ?5,p.user_id,'plan',p.id,?6,?7,?8 FROM plans p
+        WHERE p.id=?1 AND p.user_id=?2 AND p.version=?3 AND p.plan_write_nonce=?4`,
+    ).bind(plan.id, plan.user_id, nextVersion, nonce, uuid(),
+      attribution.noteAuthor ?? (attribution.actor === 'mcp' ? 'coach' : 'nick'),
+      attribution.note, ts));
+  }
+  statements.push(
+    preparePlanSnapshotInsert(db, {
+      userId: plan.user_id, planId: plan.id, version: nextVersion,
+      actor: attribution.actor, operation: attribution.operation,
+      reason: attribution.reason ?? attribution.note ?? null, createdAt: ts,
+      writeNonce: nonce,
+    }),
+    db.prepare(
+      `UPDATE plans SET plan_write_nonce=NULL
+        WHERE id=?1 AND user_id=?2 AND version=?3 AND plan_write_nonce=?4`,
+    ).bind(plan.id, plan.user_id, nextVersion, nonce),
+  );
+  return statements;
+}
+
+export async function getPlanSnapshot(
+  db: D1Database,
+  userId: string,
+  planId: string,
+  version: number,
+): Promise<(PlanSnapshotRow & { parsed: PlanSnapshotDocument }) | null> {
+  const row = await db.prepare(
+    'SELECT * FROM plan_snapshots WHERE user_id=?1 AND plan_id=?2 AND version=?3',
+  ).bind(userId, planId, version).first<PlanSnapshotRow>();
+  return row ? { ...row, parsed: parsePlanSnapshot(row.document) } : null;
+}
+
+async function materializeSnapshotPlan(
+  db: D1Database,
+  base: PlanRow,
+  version: number,
+  updatedAt: number,
+  document: PlanSnapshotDocument,
+): Promise<PlanTree> {
+  const catalog = new Map((await getExercises(db)).map((exercise) => [exercise.id, exercise]));
+  return {
+    ...base, name: document.plan.name, meta: document.plan.meta, version, updated_at: updatedAt,
+    workouts: document.workouts.map((day) => ({
+      ...day, plan_id: base.id, created_at: updatedAt, updated_at: updatedAt,
+      exercises: day.exercises.map((slot) => {
+        const exercise = catalog.get(slot.exercise_id);
+        if (!exercise) throw new Error('snapshot_exercise_missing');
+        return {
+          ...slot, workout_id: day.id, created_at: updatedAt, updated_at: updatedAt,
+          exercise_name: exercise.name, exercise_unit: exercise.unit,
+          exercise_muscle: exercise.primary_muscle, exercise_modality: exercise.modality,
+          exercise_laterality: exercise.laterality, exercise_load_mode: exercise.load_mode,
+          exercise_demo_slug: exercise.demo_slug,
+        };
+      }),
+    })),
+  };
+}
+
+async function readCommittedSnapshotPlan(
+  db: D1Database,
+  base: PlanRow,
+  version: number,
+  updatedAt: number,
+): Promise<PlanTree | null> {
+  try {
+    const snapshot = await getPlanSnapshot(db, base.user_id, base.id, version);
+    return snapshot
+      ? await materializeSnapshotPlan(db, base, version, updatedAt, snapshot.parsed)
+      : null;
+  } catch {
+    // The mutation is already committed. A refresh failure must preserve its
+    // acknowledgement so callers do not retry and create another version.
+    return null;
+  }
+}
+
+export async function listPlanHistory(
+  db: D1Database,
+  userId: string,
+  limit = 30,
+  beforeVersion?: number,
+) {
+  const plan = await getActivePlan(db, userId);
+  if (!plan) return { error: 'no_active_plan' as const };
+  const capped = Math.max(1, Math.min(100, Math.floor(limit)));
+  const rows = await db.prepare(
+    `SELECT * FROM plan_snapshots
+      WHERE user_id=?1 AND plan_id=?2 AND (?3 IS NULL OR version < ?3) AND version <= ?5
+      ORDER BY version DESC LIMIT ?4`,
+  ).bind(userId, plan.id, beforeVersion ?? null, capped + 1, plan.version).all<PlanSnapshotRow>();
+  const visible = rows.results.slice(0, capped);
+  const exerciseNames = new Map((await getExercises(db)).map((exercise) => [exercise.id, exercise.name]));
+  const items = await Promise.all(visible.map(async (row) => {
+    const prior = await db.prepare(
+      `SELECT version, document FROM plan_snapshots
+        WHERE user_id=?1 AND plan_id=?2 AND version < ?3
+        ORDER BY version DESC LIMIT 1`,
+    ).bind(userId, plan.id, row.version).first<{ version: number; document: string }>();
+    const comparison = prior
+      ? comparePlanSnapshots(parsePlanSnapshot(prior.document), parsePlanSnapshot(row.document), { exerciseNames })
+      : null;
+    return {
+      version: row.version, actor: row.actor, operation: row.operation,
+      reason: row.reason, created_at: row.created_at, summary: comparison?.summary ?? null,
+      previous_version: prior?.version ?? null,
+      affected: comparison ? [...new Set(comparison.changes.map((change) =>
+        change.kind === 'plan'
+          ? (change.path === 'name' ? 'Training plan name' : 'Training context')
+          : change.path))] : [],
+    };
+  }));
+  return {
+    plan_id: plan.id,
+    current_version: plan.version,
+    items,
+    next_before_version: rows.results.length > capped ? visible.at(-1)?.version ?? null : null,
+  };
+}
+
+export async function comparePlanVersions(
+  db: D1Database,
+  userId: string,
+  fromVersion: number,
+  toVersion?: number,
+) {
+  const plan = await getActivePlan(db, userId);
+  if (!plan) return { error: 'no_active_plan' as const };
+  const from = await getPlanSnapshot(db, userId, plan.id, fromVersion);
+  if (!from) return { error: 'snapshot_not_found' as const };
+  let toDocument: PlanSnapshotDocument | undefined;
+  let resolvedTo = toVersion ?? plan.version;
+  if (toVersion == null || toVersion === plan.version) {
+    const captured = await getPlanSnapshot(db, userId, plan.id, plan.version);
+    if (captured) {
+      toDocument = captured.parsed;
+    } else {
+      // A pre-0040 plan has no captured current snapshot. Bound the legacy
+      // fallback by the version before and after the multi-query tree read so
+      // comparison content is never labeled with a different version.
+      let stableTree: PlanTree | null = null;
+      for (let attempt = 0; attempt < 3 && !stableTree; attempt++) {
+        const before = await getActivePlan(db, userId);
+        const tree = await getPlanTree(db, userId);
+        const after = await getActivePlan(db, userId);
+        if (before && tree && after && before.id === after.id &&
+            before.version === tree.version && tree.version === after.version) {
+          stableTree = tree;
+          resolvedTo = tree.version;
+        } else if (after) {
+          const afterSnapshot = await getPlanSnapshot(db, userId, after.id, after.version);
+          if (afterSnapshot) {
+            toDocument = afterSnapshot.parsed;
+            resolvedTo = after.version;
+            break;
+          }
+        }
+      }
+      if (!toDocument && !stableTree) return { error: 'plan_changed' as const };
+      if (stableTree) toDocument = serializePlanSnapshot(stableTree);
+    }
+  } else {
+    const to = await getPlanSnapshot(db, userId, plan.id, toVersion);
+    if (!to) return { error: 'snapshot_not_found' as const };
+    toDocument = to.parsed;
+  }
+  if (!toDocument) return { error: 'plan_changed' as const };
+  const exerciseNames = new Map((await getExercises(db)).map((exercise) => [exercise.id, exercise.name]));
+  return {
+    plan_id: plan.id, from_version: fromVersion, to_version: resolvedTo,
+    ...comparePlanSnapshots(from.parsed, toDocument, { exerciseNames }),
+  };
+}
+
+export async function restorePlanSnapshot(
+  db: D1Database,
+  userId: string,
+  input: {
+    plan_id: string;
+    snapshot_version: number;
+    expected_version: number;
+    actor: 'mcp' | 'ios' | 'web';
+    reason?: string | null;
+  },
+): Promise<
+  | { ok: true; plan_id: string; restored_from_version: number; version: number; plan: PlanTree }
+  | { ok: true; acknowledged: true; refresh_required: true; plan_id: string; restored_from_version: number; version: number }
+  | { conflict: true; current_plan_id: string; current_version: number }
+  | { error: 'snapshot_not_found' | 'active_workout' | 'no_active_plan' }
+  | PrescriptionValidationError | GroupConflict
+> {
+  const plan = await getActivePlan(db, userId);
+  if (!plan) return { error: 'no_active_plan' };
+  if (plan.id !== input.plan_id || plan.version !== input.expected_version) {
+    return { conflict: true, current_plan_id: plan.id, current_version: plan.version };
+  }
+  const snapshot = await getPlanSnapshot(db, userId, plan.id, input.snapshot_version);
+  if (!snapshot) return { error: 'snapshot_not_found' };
+  const modalities = new Map((await getExercises(db)).map((exercise) => [exercise.id, exercise.modality]));
+  const invalidFields = new Set<string>();
+  for (const day of snapshot.parsed.workouts) for (const slot of day.exercises) {
+    let progression: unknown = null;
+    try { progression = slot.progression == null ? null : JSON.parse(slot.progression); }
+    catch { invalidFields.add(`${day.day_label ?? day.name}/${slot.exercise_id}.progression`); }
+    const invalid = validateExercisePrescription({ ...slot, progression }, {
+      modality: modalities.get(slot.exercise_id),
+    });
+    for (const field of invalid?.fields ?? []) {
+      invalidFields.add(`${day.day_label ?? day.name}/${slot.exercise_id}.${field}`);
+    }
+  }
+  if (invalidFields.size > 0) {
+    return { error: 'invalid_fields', fields: [...invalidFields].sort() };
+  }
+  const groupInvalid = validatePlanExerciseGroups(snapshot.parsed.workouts);
+  if (groupInvalid) return groupInvalid;
+  const active = await db.prepare(
+    `SELECT 1 FROM sessions s
+      WHERE s.user_id=?1 AND s.status='in_progress' AND ${sessionReferencesPlanSQL('s', '?2')} LIMIT 1`,
+  ).bind(userId, plan.id).first();
+  if (active) return { error: 'active_workout' };
+
+  const current = await getPlanTree(db, userId);
+  if (!current) return { error: 'no_active_plan' };
+  const target = snapshot.parsed;
+  const targetDayIds = new Set(target.workouts.map((day) => day.id));
+  const targetSlots = target.workouts.flatMap((day) =>
+    day.exercises.map((slot) => ({ ...slot, workout_id: day.id })),
+  );
+  const targetSlotIds = new Set(targetSlots.map((slot) => slot.id));
+  const ts = now();
+  const nonce = uuid();
+  // Each statement binds the nonce at its own next free placeholder, so the
+  // fence value rides the positional list like every other fence site.
+  const guarded = (nonceParam: number) =>
+    `EXISTS (SELECT 1 FROM plans WHERE id=?1 AND user_id=?2 AND status='active' AND version=?3 AND plan_write_nonce=?${nonceParam})`;
+  const statements: D1PreparedStatement[] = [
+    ...preparePlanWriteStart(db, plan, {
+      actor: input.actor, operation: 'restore_plan', args: input,
+      reason: input.reason,
+      note: input.reason ?? `Restored plan version ${input.snapshot_version}.`,
+    }, ts, nonce, true),
+  ];
+  for (const day of target.workouts) {
+    if (day.archived_at != null) statements.push(prepareArchiveAssignments(db, plan, day.id, ts, nonce));
+    statements.push(db.prepare(
+      `INSERT OR IGNORE INTO workouts
+       (id,plan_id,name,day_label,order_index,notes,created_at,updated_at)
+       SELECT ?4,?1,?5,?6,?7,?8,?9,?9 WHERE ${guarded(10)}`,
+    ).bind(plan.id, userId, -plan.version, day.id, day.name, day.day_label,
+      day.order_index, day.notes, ts, nonce));
+    statements.push(db.prepare(
+      `UPDATE workouts SET name=?5,day_label=?6,order_index=?7,notes=?8,updated_at=?9
+       WHERE id=?4 AND plan_id=?1 AND ${guarded(10)}`,
+    ).bind(plan.id, userId, -plan.version, day.id, day.name, day.day_label,
+      day.order_index, day.notes, ts, nonce));
+  }
+  for (const day of target.workouts) statements.push(db.prepare(
+    `UPDATE workouts SET tags=?4,archived_at=?5,one_time_date=?8 WHERE id=?6 AND plan_id=?1 AND ${guarded(7)}`,
+  ).bind(plan.id, userId, -plan.version, day.tags ?? '[]', day.archived_at ?? null, day.id, nonce,
+    day.one_time_date ?? null));
+  for (const slot of targetSlots) {
+    statements.push(db.prepare(
+      `INSERT OR IGNORE INTO template_exercises
+       (id,workout_id,exercise_id,order_index,target_sets,target_reps,target_reps_max,
+        target_rpe,rest_seconds,target_weight,target_duration_s,progression,cues,is_warmup,
+        created_at,updated_at,group_id,group_rest_seconds,group_transition_seconds,target_weight_unit,run_steps)
+       SELECT ?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?18,?19,?20,?21,?23,?24
+       WHERE ${guarded(22)}`,
+    ).bind(plan.id, userId, -plan.version, slot.id, slot.workout_id,
+      slot.exercise_id, slot.order_index, slot.target_sets, slot.target_reps,
+      slot.target_reps_max, slot.target_rpe, slot.rest_seconds, slot.target_weight,
+      slot.target_duration_s, slot.progression, slot.cues, slot.is_warmup, ts,
+      slot.group_id ?? null, slot.group_rest_seconds ?? null, slot.group_transition_seconds ?? null,
+      nonce, slot.target_weight_unit ?? 'lb', slot.run_steps ?? null));
+    statements.push(db.prepare(
+      `UPDATE template_exercises SET workout_id=?5,exercise_id=?6,order_index=?7,
+       target_sets=?8,target_reps=?9,target_reps_max=?10,target_rpe=?11,
+       rest_seconds=?12,target_weight=?13,target_duration_s=?14,progression=?15,
+       cues=?16,is_warmup=?17,updated_at=?18,group_id=?19,group_rest_seconds=?20,
+       group_transition_seconds=?21,target_weight_unit=?23,run_steps=?24 WHERE id=?4 AND ${guarded(22)}`,
+    ).bind(plan.id, userId, -plan.version, slot.id, slot.workout_id,
+      slot.exercise_id, slot.order_index, slot.target_sets, slot.target_reps,
+      slot.target_reps_max, slot.target_rpe, slot.rest_seconds, slot.target_weight,
+      slot.target_duration_s, slot.progression, slot.cues, slot.is_warmup, ts,
+      slot.group_id ?? null, slot.group_rest_seconds ?? null, slot.group_transition_seconds ?? null,
+      nonce, slot.target_weight_unit ?? 'lb', slot.run_steps ?? null));
+  }
+  for (const day of current.workouts) {
+    for (const slot of day.exercises) if (!targetSlotIds.has(slot.id)) {
+      statements.push(
+        db.prepare(`UPDATE set_logs SET template_exercise_id=NULL,updated_at=MAX(updated_at+1,?4) WHERE template_exercise_id=?5 AND ${guarded(6)}`)
+          .bind(plan.id, userId, -plan.version, ts, slot.id, nonce),
+        db.prepare(`DELETE FROM template_exercises WHERE id=?4 AND ${guarded(5)}`)
+          .bind(plan.id, userId, -plan.version, slot.id, nonce),
+      );
+    }
+    if (!targetDayIds.has(day.id)) {
+      statements.push(
+        prepareArchiveAssignments(db, plan, day.id, ts, nonce),
+        db.prepare(`UPDATE sessions SET workout_id=NULL,updated_at=?4 WHERE workout_id=?5 AND user_id=?2 AND ${guarded(6)}`)
+          .bind(plan.id, userId, -plan.version, ts, day.id, nonce),
+        db.prepare(`DELETE FROM workouts WHERE id=?4 AND plan_id=?1 AND ${guarded(5)}`)
+          .bind(plan.id, userId, -plan.version, day.id, nonce),
+      );
+    }
+  }
+  const restoreMeta = parsePlanMeta(target.plan.meta);
+  const restoreSchedule = scrubSchedule(restoreMeta.schedule,
+    new Set(target.workouts.filter(day => day.archived_at == null).map(day => day.id)));
+  const restoredMeta = restoreSchedule == null
+    ? target.plan.meta : serializePlanMeta(restoreMeta, restoreSchedule);
+  statements.push(db.prepare(
+    `UPDATE plans SET name=?4,meta=?5,updated_at=?6
+     WHERE id=?1 AND user_id=?2 AND status='active' AND version=?3 AND plan_write_nonce=?7`,
+  ).bind(plan.id, userId, -plan.version, target.plan.name, restoredMeta, ts, nonce));
+  const documentUpdateIndex = statements.length - 1;
+  const versionResultIndex = statements.length;
+  statements.push(...preparePlanWriteFinish(db, plan, {
+    actor: input.actor, operation: 'restore_plan', args: input,
+    reason: input.reason,
+    note: input.reason ?? `Restored plan version ${input.snapshot_version}.`,
+  }, ts, nonce));
+  const results = await runWorkoutWriteBatch(db, statements);
+  if ((results[0]?.meta.changes ?? 0) !== 1 || (results[documentUpdateIndex]?.meta.changes ?? 0) !== 1 || !results[versionResultIndex]?.results[0]) {
+    const nowActive = await db.prepare(
+      `SELECT 1 FROM sessions s WHERE s.user_id=?1 AND s.status='in_progress'
+        AND ${sessionReferencesPlanSQL('s', '?2')} LIMIT 1`,
+    ).bind(userId, plan.id).first();
+    if (nowActive) return { error: 'active_workout' };
+    const latest = await getActivePlan(db, userId);
+    return {
+      conflict: true,
+      current_plan_id: latest?.id ?? plan.id,
+      current_version: latest?.version ?? plan.version,
+    };
+  }
+  const restoredVersion = plan.version + 1;
+  const committedPlan = await readCommittedSnapshotPlan(db, plan, restoredVersion, ts);
+  if (!committedPlan) {
+    return {
+      ok: true, acknowledged: true, refresh_required: true, plan_id: plan.id,
+      restored_from_version: input.snapshot_version, version: restoredVersion,
+    };
+  }
+  return {
+    ok: true, plan_id: plan.id, restored_from_version: input.snapshot_version,
+    version: restoredVersion, plan: committedPlan,
+  };
+}
+
+export async function createPlan(
+  db: D1Database,
+  userId: string,
+  name: string,
+  meta: unknown = null,
+  attribution: PlanWriteAttribution = { actor: 'system', operation: 'create_plan' },
+): Promise<PlanRow> {
+  const ts = now();
+  const planId = uuid();
+  const serializedMeta = meta == null ? null : JSON.stringify(meta);
+  // Archive + replace in one D1 transaction. This also serializes against
+  // ensureActivePlan's conflict-safe insert: an ensure cannot land between
+  // these statements and make the replacement violate ux_one_active_plan.
+  // Allocate from every prior plan inside that transaction so replacement
+  // never moves the per-user sync cursor backward or repeats it.
+  const results = await db.batch<PlanRow>([
+    db
+      .prepare(
+        "UPDATE plans SET status = 'archived', updated_at = ?2 WHERE user_id = ?1 AND status = 'active'",
+      )
+      .bind(userId, ts),
+    db
+      .prepare(
+        `INSERT INTO plans
+           (id,user_id,name,status,version,meta,created_at,updated_at)
+         SELECT ?1,?2,?3,'active',COALESCE(MAX(version),0)+1,?4,?5,?5
+           FROM plans
+          WHERE user_id=?2
+         RETURNING *`,
+      )
+      .bind(planId, userId, name, serializedMeta, ts),
+    preparePlanSnapshotInsert(db, {
+      userId, planId, actor: attribution.actor, operation: attribution.operation,
+      reason: attribution.reason ?? attribution.note ?? null, createdAt: ts,
+    }),
+    db.prepare(
+      `INSERT INTO audit_log (id,user_id,actor,tool,args,result,created_at)
+       SELECT ?1,?2,?3,?4,?5,?6,?7 WHERE EXISTS
+       (SELECT 1 FROM plans WHERE id=?8 AND user_id=?2)`,
+    ).bind(uuid(), userId, attribution.actor, attribution.operation,
+      JSON.stringify(attribution.args ?? {}), JSON.stringify({ plan_id: planId }), ts, planId),
+  ]);
+  const plan = results[1]?.results[0];
+  if (!plan) throw new Error('active_plan_replace_missing_result');
+  return plan;
+}
+
+/**
+ * Idempotent app bootstrap for manual authoring. Unlike `createPlan`, this
+ * never archives or replaces an active plan. The partial unique index on
+ * plans(user_id) serializes concurrent app/coach creation; a losing caller
+ * simply returns the winner.
+ */
+export async function ensureActivePlan(
+  db: D1Database,
+  userId: string,
+  name: string,
+  attribution: PlanWriteAttribution = { actor: 'system', operation: 'ensure_active_plan' },
+): Promise<{ plan: PlanRow; created: boolean }> {
+  const existing = await getActivePlan(db, userId);
+  if (existing) return { plan: existing, created: false };
+
+  const ts = now();
+  const candidateId = uuid();
+  const candidateInsert = db.prepare(
+      `INSERT INTO plans
+         (id,user_id,name,status,version,meta,created_at,updated_at)
+       SELECT ?1,?2,?3,'active',COALESCE(MAX(version),0)+1,NULL,?4,?4
+         FROM plans
+        WHERE user_id=?2
+       ON CONFLICT DO NOTHING
+       RETURNING *`,
+    )
+    .bind(candidateId, userId, name, ts);
+  const results = await db.batch<PlanRow>([
+    candidateInsert,
+    preparePlanSnapshotInsert(db, {
+      userId, planId: candidateId, actor: attribution.actor,
+      operation: attribution.operation, reason: attribution.reason ?? null, createdAt: ts,
+    }),
+    db.prepare(
+      `INSERT INTO audit_log (id,user_id,actor,tool,args,result,created_at)
+       SELECT ?1,?2,?3,?4,?5,?6,?7 WHERE EXISTS
+       (SELECT 1 FROM plans WHERE id=?8 AND user_id=?2)`,
+    ).bind(uuid(), userId, attribution.actor, attribution.operation,
+      JSON.stringify(attribution.args ?? {}), JSON.stringify({ plan_id: candidateId }), ts, candidateId),
+  ]);
+  const created = results[0]?.results[0];
+  if (created) {
+    return { plan: created, created: true };
+  }
+
+  const winner = await getActivePlan(db, userId);
+  if (!winner) throw new Error('active_plan_create_conflict_without_winner');
+  return { plan: winner, created: false };
+}
+
+/**
+ * The first workout in a plan whose `day_label` or `name` equals `ref`.
+ *
+ * The MCP write tools accept a natural-language day reference; an explicit
+ * workout id is resolved by the caller before this. There is deliberately no
+ * ORDER BY, so a duplicated label or name resolves exactly as the inline
+ * queries this replaced did.
+ */
+export async function findWorkoutByRef(
+  db: D1Database,
+  planId: string,
+  ref: string,
+  includeArchived = false,
+): Promise<string | null> {
+  const row = await db
+    .prepare(
+      // A label or name means a reusable workout; a one-time workout, which
+      // shares its source's name, is reached only by its id (workout-library P3).
+      `SELECT id FROM workouts WHERE plan_id = ?1
+        AND (id = ?2 OR (one_time_date IS NULL AND (day_label = ?2 OR name = ?2)))
+        AND (?3=1 OR archived_at IS NULL)
+        ORDER BY id = ?2 DESC, archived_at IS NOT NULL, order_index, created_at, id LIMIT 1`,
+    )
+    .bind(planId, ref, includeArchived ? 1 : 0)
+    .first<{ id: string }>();
+  return row?.id ?? null;
+}
+
+/** Resolve a day only inside one already-authorized plan. */
+export async function getWorkoutInPlan(
+  db: D1Database,
+  planId: string,
+  dayId: string,
+  includeArchived = false,
+): Promise<WorkoutRow | null> {
+  return db
+    .prepare('SELECT * FROM workouts WHERE id = ?1 AND plan_id = ?2 AND (?3=1 OR archived_at IS NULL)')
+    .bind(dayId, planId, includeArchived ? 1 : 0)
+    .first<WorkoutRow>();
+}
+
+/** Allowlist of patch keys accepted by `patchWorkoutAtVersion`. Unknown keys
+ *  surface as `{ error: 'unknown_fields', fields }` — same diagnosability
+ *  contract as updateExercise. */
+const DAY_TEMPLATE_PATCH_KEYS = new Set<string>([
+  'tags', 'archived_at',
+  'name',
+  'day_label',
+  'order_index',
+  'notes',
+]);
+
+/** True when rows, in their stored order, are numbered 0, 1, 2, … */
+const denselyOrdered = (rows: { order_index: number }[]): boolean =>
+  rows.every((row, index) => row.order_index === index);
+
+const orderDayRows = <T extends { id: string; order_index: number }>(
+  rows: T[],
+  movedId: string,
+): T[] => {
+  const moved = rows.find((row) => row.id === movedId);
+  if (!moved) return rows;
+  const others = rows.filter((row) => row.id !== movedId);
+  const target = Math.max(0, Math.min(moved.order_index, others.length));
+  return [...others.slice(0, target), moved, ...others.slice(target)];
+};
+
+async function currentPlanVersion(
+  db: D1Database,
+  userId: string,
+  fallback: number,
+): Promise<PlanVersionConflict> {
+  const current = await getActivePlan(db, userId);
+  return { conflict: true, current_version: current?.version ?? fallback };
+}
+
+function validateSlotEditVersion(
+  plan: PlanRow, options: SlotEditOptions,
+): PlanVersionConflict | PrescriptionValidationError | null {
+  if (options.expectedVersion === undefined) return null;
+  if (!Number.isSafeInteger(options.expectedVersion) || options.expectedVersion < 1) {
+    return { error: 'invalid_fields', fields: ['expected_version'] };
+  }
+  return options.expectedVersion === plan.version ? null
+    : { conflict: true, current_version: plan.version };
+}
+
+/** Options that make `addWorkoutAtVersion` create a one-time workout
+ * (workout-library P3): made for `date`, kept out of the library, the weekly
+ * schedule and blocks. `id` is a client UUID so a retry returns the same
+ * workout; `copyFrom` copies another live workout's slots as they read on
+ * `date` (a block week's targets included). */
+/** False when `workoutId` is a one-time workout made for a different date:
+ * it belongs to its own date only (workout-library P3). An unknown id is
+ * left to the caller's own lookup. */
+export async function workoutFitsDate(db: D1Database, planId: string, workoutId: string, date: string): Promise<boolean> {
+  const row = await db.prepare('SELECT one_time_date FROM workouts WHERE id = ?1 AND plan_id = ?2')
+    .bind(workoutId, planId).first<{ one_time_date: string | null }>();
+  return !row || row.one_time_date == null || row.one_time_date === date;
+}
+
+export interface OneTimeWorkoutOptions {
+  date: string;
+  id?: string;
+  copyFrom?: string;
+}
+
+export type OneTimeWorkoutError =
+  | { error: 'unknown_workout'; workout_id: string }
+  | { error: 'one_time_workout_conflict' };
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** A one-time workout an earlier request with this client `id` made: the
+ * same workout for a retry of that request, a conflict for any other use of
+ * the id, null when the id is new. */
+export async function oneTimeWorkoutReceipt(
+  db: D1Database, planId: string, id: string, date: string, name: string,
+): Promise<WorkoutRow | { error: 'one_time_workout_conflict' } | null> {
+  const existing = await db.prepare('SELECT * FROM workouts WHERE id = ?1').bind(id).first<WorkoutRow>();
+  if (!existing) return null;
+  return existing.plan_id === planId && existing.one_time_date === date && existing.name === name
+    ? existing : { error: 'one_time_workout_conflict' };
+}
+
+/** A real YYYY-MM-DD civil date. */
+function isCivilDate(value: unknown): value is string {
+  return typeof value === 'string' && YMD.test(value) && addDays(value, 0) === value;
+}
+
+/**
+ * App day creation tied to the exact plan version the route read. D1 batches
+ * are transactions, so the day insert, dense ordering, and version bump either
+ * commit together or all observe that a concurrent plan writer won.
+ */
+export async function addWorkoutAtVersion(
+  db: D1Database,
+  userId: string,
+  plan: PlanRow,
+  name: string,
+  dayLabel: string | null,
+  orderIndex: number,
+  attribution: PlanWriteAttribution = { actor: 'system', operation: 'add_workout' },
+  exerciseIds: string[] = [],
+  metadata: { tags?: string[]; archived_at?: number | null } = {},
+  oneTime?: OneTimeWorkoutOptions,
+): Promise<WorkoutRow | PlanVersionConflict | { error: 'invalid_exercises' } | PrescriptionValidationError
+  | OneTimeWorkoutError> {
+  if ((metadata.tags !== undefined && !validWorkoutTags(metadata.tags)) ||
+      (metadata.archived_at !== undefined && !validArchivedAt(metadata.archived_at))) {
+    return { error: 'invalid_fields', fields: ['tags', 'archived_at'] };
+  }
+  // A one-time workout (workout-library P3) is made for one date, empty, from
+  // picked exercises, or as a copy of another workout as it reads that date.
+  let copied: TemplateExerciseRow[] = [];
+  if (oneTime) {
+    if (!isCivilDate(oneTime.date)) return { error: 'invalid_fields', fields: ['one_time_date'] };
+    if (oneTime.id !== undefined && !UUID_PATTERN.test(oneTime.id)) return { error: 'invalid_fields', fields: ['id'] };
+    if (oneTime.copyFrom !== undefined && exerciseIds.length > 0) {
+      return { error: 'invalid_fields', fields: ['copy_from', 'exercise_ids'] };
+    }
+    if (oneTime.id !== undefined) {
+      const made = await oneTimeWorkoutReceipt(db, plan.id, oneTime.id, oneTime.date, name);
+      if (made) return made;
+    }
+    if (oneTime.copyFrom !== undefined) {
+      const tree = await loadPlanTree(db, plan);
+      const source = tree.workouts.find((day) => day.id === oneTime.copyFrom && day.archived_at == null);
+      if (!source) return { error: 'unknown_workout', workout_id: oneTime.copyFrom };
+      // The copy starts from what the source asks for on that date: a block
+      // week's targets are written into the copy's own slots.
+      copied = applyWeekTargets(source, parsePlanMeta(tree.meta).program, oneTime.date).exercises;
+    }
+  }
+  // Resolve every selection before opening the versioned write. The complete
+  // workout, slots, audit and snapshot then share one CAS transaction.
+  if (exerciseIds.length > 50 || new Set(exerciseIds).size !== exerciseIds.length) {
+    return { error: 'invalid_exercises' };
+  }
+  const catalog = exerciseIds.length ? await db.prepare(
+    'SELECT id, modality FROM exercises WHERE id IN (SELECT value FROM json_each(?1))',
+  ).bind(JSON.stringify(exerciseIds)).all<{ id: string; modality: string }>() : { results: [] };
+  if (catalog.results.length !== exerciseIds.length) return { error: 'invalid_exercises' };
+  const modalities = new Map(catalog.results.map((exercise) => [exercise.id, exercise.modality]));
+  const ts = now();
+  const row: WorkoutRow = {
+    tags: normalizeWorkoutTags(metadata.tags ?? []),
+    archived_at: metadata.archived_at ?? null,
+    one_time_date: oneTime?.date ?? null,
+    id: oneTime?.id ?? uuid(),
+    plan_id: plan.id,
+    name,
+    day_label: dayLabel,
+    order_index: orderIndex,
+    notes: null,
+    created_at: ts,
+    updated_at: ts,
+  };
+  const currentDays = await db
+    .prepare(
+      'SELECT id, order_index FROM workouts WHERE plan_id = ?1 ORDER BY order_index, created_at, id',
+    )
+    .bind(plan.id)
+    .all<{ id: string; order_index: number }>();
+  const ordered = orderDayRows([...currentDays.results, row], row.id);
+  const nonce = uuid();
+  const statements: D1PreparedStatement[] = [
+    ...preparePlanWriteStart(db, plan, attribution, ts, nonce),
+    db
+      .prepare(
+        `INSERT INTO workouts
+         (id,plan_id,name,day_label,order_index,notes,created_at,updated_at)
+         SELECT ?1,?2,?3,?4,?5,?6,?7,?8
+          WHERE EXISTS (
+            SELECT 1 FROM plans
+             WHERE id = ?2 AND user_id = ?9 AND status = 'active' AND version = ?10
+          )`,
+      )
+      .bind(
+        row.id, row.plan_id, row.name, row.day_label, row.order_index, row.notes,
+        row.created_at, row.updated_at, userId, -plan.version,
+      ),
+    ...ordered.map((day, index) =>
+      db
+        .prepare(
+          `UPDATE workouts SET order_index = ?2, updated_at = ?3
+            WHERE id = ?1 AND plan_id = ?4
+              AND EXISTS (
+                SELECT 1 FROM plans
+                 WHERE id = ?4 AND user_id = ?5 AND status = 'active' AND version = ?6
+              )`,
+        )
+        .bind(day.id, index, ts, plan.id, userId, -plan.version),
+    ),
+  ];
+  statements.push(db.prepare(`UPDATE workouts SET tags=?1,archived_at=?2,one_time_date=?8 WHERE id=?3
+    AND EXISTS (SELECT 1 FROM plans WHERE id=?4 AND user_id=?5 AND version=-?6 AND plan_write_nonce=?7)`)
+    .bind(row.tags, row.archived_at, row.id, plan.id, userId, plan.version, nonce, row.one_time_date));
+  // A copy keeps every slot field and its groups, under new ids.
+  const copiedGroups = new Map<string, string>();
+  for (const slot of copied) {
+    const groupId = slot.group_id
+      ? copiedGroups.get(slot.group_id) ?? copiedGroups.set(slot.group_id, uuid()).get(slot.group_id)!
+      : null;
+    statements.push(db.prepare(
+      `INSERT INTO template_exercises
+       (id,workout_id,exercise_id,order_index,target_sets,target_reps,target_reps_max,
+        target_rpe,rest_seconds,target_weight,target_duration_s,progression,cues,is_warmup,
+        created_at,updated_at,group_id,group_rest_seconds,group_transition_seconds,target_weight_unit,run_steps)
+       SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?15,?16,?17,?18,?19,?20
+       WHERE EXISTS (SELECT 1 FROM plans
+         WHERE id=?21 AND user_id=?22 AND version=-?23 AND plan_write_nonce=?24)`,
+    ).bind(uuid(), row.id, slot.exercise_id, slot.order_index, slot.target_sets, slot.target_reps,
+      slot.target_reps_max, slot.target_rpe, slot.rest_seconds, slot.target_weight, slot.target_duration_s,
+      slot.progression, slot.cues, slot.is_warmup, ts, groupId, slot.group_rest_seconds ?? null,
+      slot.group_transition_seconds ?? null, slot.target_weight_unit ?? 'lb', slot.run_steps ?? null,
+      plan.id, userId, plan.version, nonce));
+  }
+  for (const [index, exerciseId] of exerciseIds.entries()) {
+    const modality = modalities.get(exerciseId);
+    const cardio = modality === 'cardio';
+    const timed = modality === 'timed';
+    statements.push(db.prepare(
+      `INSERT INTO template_exercises
+       (id,workout_id,exercise_id,order_index,target_sets,target_reps,rest_seconds,
+        target_weight,target_duration_s,progression,is_warmup,created_at,updated_at)
+       SELECT ?1,?2,?3,?4,?5,?6,120,0,?7,'{"type":"manual"}',0,?8,?8
+       WHERE EXISTS (SELECT 1 FROM plans
+         WHERE id=?9 AND user_id=?10 AND version=-?11 AND plan_write_nonce=?12)`,
+    ).bind(uuid(), row.id, exerciseId, index, cardio ? 1 : 3, cardio ? 1 : timed ? 45 : 8,
+      cardio ? 300 : timed ? 45 : null, ts, plan.id, userId, plan.version, nonce));
+  }
+  const versionResultIndex = statements.length;
+  statements.push(...preparePlanWriteFinish(db, plan, { ...attribution, result: row.id }, ts, nonce));
+  const results = await runWorkoutWriteBatch<{ version: number }>(db, statements);
+  const inserted = results[2];
+  const updatedPlan = results[versionResultIndex]?.results[0];
+  if ((results[0]?.meta.changes ?? 0) !== 1 || (inserted?.meta.changes ?? 0) !== 1 || !updatedPlan) {
+    return currentPlanVersion(db, userId, plan.version);
+  }
+  row.order_index = ordered.findIndex((day) => day.id === row.id);
+  return row;
+}
+
+/** Rename/reorder one day with write-time optimistic concurrency. */
+export async function patchWorkoutAtVersion(
+  db: D1Database,
+  userId: string,
+  plan: PlanRow,
+  dayId: string,
+  patch: {
+    name?: string;
+    day_label?: string | null;
+    order_index?: number;
+    notes?: string | null;
+    tags?: string[];
+    archived_at?: number | null;
+  },
+  attribution: PlanWriteAttribution = { actor: 'system', operation: 'update_workout' },
+): Promise<WorkoutRow | { error: 'unknown_fields'; fields: string[] } | { error: 'active_workout' } | PrescriptionValidationError | PlanVersionConflict | null> {
+  const existing = await getWorkoutInPlan(db, plan.id, dayId, true);
+  if (!existing) return null;
+  const unknown = Object.keys(patch).filter((key) => !DAY_TEMPLATE_PATCH_KEYS.has(key));
+  if (unknown.length > 0) return { error: 'unknown_fields', fields: unknown };
+  const invalid: string[] = [];
+  if (patch.tags !== undefined && !validWorkoutTags(patch.tags)) invalid.push('tags');
+  if (patch.archived_at !== undefined && !validArchivedAt(patch.archived_at)) invalid.push('archived_at');
+  if (invalid.length) return { error: 'invalid_fields', fields: invalid };
+  const archiving = existing.archived_at == null && patch.archived_at != null;
+  if (archiving && await workoutIsActive(db, plan, dayId)) return { error: 'active_workout' };
+  const merged: WorkoutRow = {
+    ...existing,
+    tags: patch.tags === undefined ? existing.tags ?? '[]' : normalizeWorkoutTags(patch.tags),
+    archived_at: patch.archived_at === undefined ? existing.archived_at ?? null : patch.archived_at,
+    name: patch.name ?? existing.name,
+    day_label: patch.day_label === undefined ? existing.day_label : patch.day_label,
+    order_index: patch.order_index ?? existing.order_index,
+    notes: patch.notes === undefined ? existing.notes : patch.notes,
+    updated_at: now(),
+  };
+  const currentDays = await db
+    .prepare(
+      'SELECT id, order_index FROM workouts WHERE plan_id = ?1 ORDER BY order_index, created_at, id',
+    )
+    .bind(plan.id)
+    .all<{ id: string; order_index: number }>();
+  const withMove = currentDays.results.map((day) =>
+    day.id === dayId ? { ...day, order_index: merged.order_index } : day,
+  );
+  const ordered = patch.order_index === undefined
+    ? withMove
+    : orderDayRows(withMove, dayId);
+  const nonce = uuid();
+  const statements: D1PreparedStatement[] = [
+    ...preparePlanWriteStart(db, plan, attribution, merged.updated_at, nonce, false, archiving ? [dayId] : []),
+    db
+      .prepare(
+        `UPDATE workouts
+            SET name=?2, day_label=?3, order_index=?4, notes=?5, updated_at=?6, tags=?10, archived_at=?11
+          WHERE id=?1 AND plan_id=?7
+            AND EXISTS (
+              SELECT 1 FROM plans
+               WHERE id=?7 AND user_id=?8 AND status='active' AND version=?9
+            )`,
+      )
+      .bind(
+        dayId, merged.name, merged.day_label, merged.order_index, merged.notes,
+        merged.updated_at, plan.id, userId, -plan.version, merged.tags, merged.archived_at,
+      ),
+    ...(patch.order_index === undefined
+      ? []
+      : ordered.map((day, index) =>
+          db
+            .prepare(
+              `UPDATE workouts SET order_index=?2, updated_at=?3
+                WHERE id=?1 AND plan_id=?4
+                  AND EXISTS (
+                    SELECT 1 FROM plans
+                     WHERE id=?4 AND user_id=?5 AND status='active' AND version=?6
+                  )`,
+            )
+            .bind(day.id, index, merged.updated_at, plan.id, userId, -plan.version),
+        )),
+  ];
+  if (archiving) {
+    const meta = parsePlanMeta(plan.meta);
+    const liveIds = new Set(currentDays.results.filter(day => day.id !== dayId).map(day => day.id));
+    const schedule = scrubSchedule(meta.schedule, liveIds);
+    const program = scrubProgram(meta.program, liveIds);
+    statements.push(prepareArchiveAssignments(db, plan, dayId, merged.updated_at, nonce));
+    statements.push(db.prepare(`UPDATE plans SET meta=?1 WHERE id=?2 AND user_id=?3
+      AND version=-?4 AND plan_write_nonce=?5`)
+      .bind(serializePlanMeta({ ...meta, program: program ?? meta.program }, schedule ?? meta.schedule),
+        plan.id, userId, plan.version, nonce));
+  }
+  const versionResultIndex = statements.length;
+  statements.push(...preparePlanWriteFinish(db, plan, attribution, merged.updated_at, nonce));
+  const results = await runWorkoutWriteBatch<{ version: number }>(db, statements);
+  const patched = results[2];
+  const updatedPlan = results[versionResultIndex]?.results[0];
+  if ((results[0]?.meta.changes ?? 0) !== 1 || (patched?.meta.changes ?? 0) !== 1 || !updatedPlan) {
+    if (archiving && await workoutIsActive(db, plan, dayId)) return { error: 'active_workout' };
+    return currentPlanVersion(db, userId, plan.version);
+  }
+  if (patch.order_index !== undefined) {
+    merged.order_index = ordered.findIndex((day) => day.id === dayId);
+  }
+  return merged;
+}
+
+/**
+ * Next `order_index` for an append to a day — max existing + 1, or 0 if
+ * the day has no exercises yet. Callers should use this when no explicit
+ * order_index is given, instead of defaulting to a sentinel like 99
+ * (which silently stranded every after-creation `add_exercise` at the
+ * bottom; agent-facing P0 in the bug report).
+ */
+export async function nextExerciseOrderIndex(
+  db: D1Database,
+  workoutId: string,
+): Promise<number> {
+  const row = await db
+    .prepare('SELECT COALESCE(MAX(order_index), -1) AS m FROM template_exercises WHERE workout_id = ?1')
+    .bind(workoutId)
+    .first<{ m: number }>();
+  return (row?.m ?? -1) + 1;
+}
+
+async function exerciseGroupDayRows(db: D1Database, dayId: string): Promise<TemplateExerciseRow[]> {
+  return (await db.prepare(
+    'SELECT * FROM template_exercises WHERE workout_id=?1 ORDER BY order_index,created_at,id',
+  ).bind(dayId).all<TemplateExerciseRow>()).results;
+}
+
+
+/**
+ * Collapse duplicate `order_index` values within one day to a dense,
+ * deterministic 0..n-1 sequence. No-op when indices are already unique, so
+ * it's cheap to call defensively after any write that takes an explicit
+ * order_index (add_exercise / update_exercise). Returns true if it rewrote.
+ *
+ * `preferId` is the slot the caller just placed at an explicit index. To
+ * honor that destination exactly (in BOTH directions — moving up or down),
+ * we rebuild the order by removing that slot, densely ordering the rest by
+ * (order_index, created_at, id), then re-inserting the slot at its requested
+ * index (clamped). A tiebreak alone is insufficient: it works for upward
+ * moves but a downward move (e.g. 0 → 2) would land one short after the
+ * dense pass.
+ */
+export async function dedupeDayOrderIndexes(
+  db: D1Database, workoutId: string, preferId?: string,
+): Promise<boolean | GroupConflict> {
+  const plan = await db.prepare(
+    `SELECT p.* FROM plans p JOIN workouts d ON d.plan_id=p.id
+     WHERE d.id=?1 AND d.archived_at IS NULL AND p.status='active'`,
+  ).bind(workoutId).first<PlanRow>();
+  if (!plan) return false;
+  const list = await exerciseGroupDayRows(db, workoutId);
+  if (preferId && list.find((row) => row.id === preferId)?.group_id != null) {
+    return { error: 'group_conflict', fields: ['order_index'] };
+  }
+  const hasDup = new Set(list.map((row) => row.order_index)).size !== list.length;
+  const ordered = (hasDup && preferId ? orderDayRows(list, preferId) : list)
+    .map((row, index) => hasDup ? { ...row, order_index: index } : row);
+  const invalid = validateExerciseGroups(ordered);
+  if (invalid) return invalid;
+  if (!hasDup) return false;
+  const ts = now(); const nonce = uuid();
+  const attribution: PlanWriteAttribution = { actor: 'system', operation: 'normalize_exercise_order' };
+  const statements = preparePlanWriteStart(db, plan, attribution, ts, nonce);
+  for (const row of ordered) statements.push(db.prepare(
+    `UPDATE template_exercises SET order_index=?2,updated_at=?3 WHERE id=?1
+     AND EXISTS (SELECT 1 FROM plans WHERE id=?4 AND user_id=?5 AND version=-?6 AND plan_write_nonce=?7)`,
+  ).bind(row.id, row.order_index, ts, plan.id, plan.user_id, plan.version, nonce));
+  statements.push(...preparePlanWriteFinish(db, plan, attribution, ts, nonce));
+  const results = await runWorkoutWriteBatch(db, statements);
+  if ((results[0]?.meta.changes ?? 0) !== 1) throw new Error('plan_write_conflict');
+  return true;
+}
+
+/** Sibling of `nextExerciseOrderIndex` for `workouts` — append a new
+ *  day densely instead of the old 99 sentinel that `add_day` used. */
+export async function nextWorkoutOrderIndex(
+  db: D1Database,
+  planId: string,
+): Promise<number> {
+  const row = await db
+    .prepare('SELECT COALESCE(MAX(order_index), -1) AS m FROM workouts WHERE plan_id = ?1')
+    .bind(planId)
+    .first<{ m: number }>();
+  return (row?.m ?? -1) + 1;
+}
+
+export async function addTemplateExercise(
+  db: D1Database,
+  planId: string,
+  input: Omit<TemplateExerciseRow, 'id' | 'created_at' | 'updated_at' | 'is_warmup' | 'run_steps'> & {
+    is_warmup: number | boolean;
+    /** Caller's run steps (an array); stored as canonical text. */
+    run_steps?: unknown;
+  },
+  attribution: PlanWriteAttribution = { actor: 'system', operation: 'add_exercise' },
+  options: SlotEditOptions = {},
+): Promise<SlotEditResult> {
+  const plan = await db.prepare("SELECT * FROM plans WHERE id=?1 AND status='active'")
+    .bind(planId).first<PlanRow>();
+  if (!plan) return { error: 'no_active_plan' };
+  const versionError = validateSlotEditVersion(plan, options);
+  if (versionError) return versionError;
+  if (!await getWorkoutInPlan(db, plan.id, input.workout_id)) {
+    throw new Error('workout_archived_assignment');
+  }
+  const exercise = await db.prepare('SELECT modality FROM exercises WHERE id=?1')
+    .bind(input.exercise_id).first<{ modality: string }>();
+  const validationInput: Record<string, unknown> = {
+    ...input,
+    progression: input.progression === null
+      ? null
+      : (() => { try { return JSON.parse(input.progression); } catch { return input.progression; } })(),
+  };
+  const invalid = validateExercisePrescription(validationInput, { modality: exercise?.modality });
+  if (invalid) return invalid;
+  const groupFields = ['group_id', 'group_rest_seconds', 'group_transition_seconds'] as const;
+  const suppliedGroupFields = groupFields.filter((field) => input[field] != null);
+  if (suppliedGroupFields.length) return { error: 'group_conflict', fields: suppliedGroupFields };
+  const ts = now();
+  const row: TemplateExerciseRow = {
+    ...input,
+    target_weight_unit: input.target_weight_unit ?? 'lb',
+    run_steps: input.run_steps === undefined ? null : serializeRunSteps(input.run_steps),
+    is_warmup: input.is_warmup ? 1 : 0,
+    id: uuid(),
+    created_at: ts,
+    updated_at: ts,
+  };
+  const siblings = await exerciseGroupDayRows(db, row.workout_id);
+  const collides = siblings.some((slot) => slot.order_index === row.order_index);
+  const ordered = collides ? orderDayRows([...siblings, row], row.id) : [...siblings, row];
+  const groupInvalid = validateExerciseGroups(ordered.map((slot, index) => collides ? { ...slot, order_index: index } : slot));
+  if (groupInvalid) return groupInvalid;
+  const nonce = uuid();
+  const statements: D1PreparedStatement[] = [
+    ...preparePlanWriteStart(db, plan, attribution, ts, nonce),
+    db.prepare(
+      `INSERT INTO template_exercises
+       (id,workout_id,exercise_id,order_index,target_sets,target_reps,target_reps_max,target_rpe,rest_seconds,target_weight,target_duration_s,progression,cues,is_warmup,created_at,updated_at,target_weight_unit,run_steps)
+       SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?21,?22
+       WHERE EXISTS (SELECT 1 FROM plans WHERE id=?17 AND user_id=?18 AND version=-?19 AND plan_write_nonce=?20)`,
+    )
+    .bind(
+      row.id, row.workout_id, row.exercise_id, row.order_index, row.target_sets,
+      row.target_reps, row.target_reps_max, row.target_rpe, row.rest_seconds,
+      row.target_weight, row.target_duration_s, row.progression, row.cues, row.is_warmup ? 1 : 0,
+      row.created_at, row.updated_at, plan.id, plan.user_id, plan.version, nonce,
+      row.target_weight_unit ?? 'lb', row.run_steps ?? null,
+    ),
+    ...(collides ? ordered.map((slot, index) => db.prepare(
+      `UPDATE template_exercises SET order_index=?2,updated_at=?3 WHERE id=?1
+       AND EXISTS (SELECT 1 FROM plans WHERE id=?4 AND user_id=?5 AND version=-?6 AND plan_write_nonce=?7)`,
+    ).bind(slot.id, index, ts, plan.id, plan.user_id, plan.version, nonce)) : []),
+  ];
+  const versionResultIndex = statements.length;
+  statements.push(...preparePlanWriteFinish(db, plan, { ...attribution, result: row.id }, ts, nonce));
+  const results = await runWorkoutWriteBatch<{ version: number }>(db, statements);
+  if ((results[0]?.meta.changes ?? 0) !== 1) {
+    return options.expectedVersion === undefined && options.retryLegacyConflict !== false
+      ? addTemplateExercise(db, planId, input, attribution, { ...options, retryLegacyConflict: false })
+      : currentPlanVersion(db, plan.user_id, plan.version);
+  }
+  if ((results[2]?.meta.changes ?? 0) !== 1 || !results[versionResultIndex]?.results[0]) {
+    throw new Error('plan_write_ack_missing');
+  }
+  if (collides) row.order_index = ordered.findIndex((slot) => slot.id === row.id);
+  return row;
+}
+
+// ---- exercise resolver ---------------------------------------------------
+
+/**
+ * Discoverable exercise catalog read for agents — closes the agent-facing
+ * "exercise vocabulary is closed and undiscoverable" P1 in the bug report.
+ * Optional filters: case-insensitive substring `query` (matches `name`),
+ * exact `muscle` (matches `primary_muscle`), exact `modality`. Returns a
+ * compact projection ordered by name.
+ */
+export async function getExercises(
+  db: D1Database,
+  filters: { query?: string; muscle?: string; modality?: string } = {},
+): Promise<
+  {
+    id: string;
+    name: string;
+    primary_muscle: string;
+    modality: string;
+    unit: string;
+    laterality: string;
+    load_mode: string;
+    demo_slug: string | null;
+    aliases: string | null;
+  }[]
+> {
+  const where: string[] = [];
+  const binds: (string | number)[] = [];
+  if (filters.query && filters.query.trim() !== '') {
+    binds.push(`%${filters.query.trim().toLowerCase()}%`);
+    where.push(`lower(name) LIKE ?${binds.length}`);
+  }
+  if (filters.muscle && filters.muscle.trim() !== '') {
+    binds.push(filters.muscle.trim().toLowerCase());
+    where.push(`lower(primary_muscle) = ?${binds.length}`);
+  }
+  if (filters.modality && filters.modality.trim() !== '') {
+    binds.push(filters.modality.trim().toLowerCase());
+    where.push(`lower(modality) = ?${binds.length}`);
+  }
+  const sql =
+    'SELECT id, name, primary_muscle, modality, unit, laterality, load_mode, demo_slug, aliases FROM exercises' +
+    (where.length ? ' WHERE ' + where.join(' AND ') : '') +
+    ' ORDER BY name';
+  const stmt = db.prepare(sql);
+  const bound = binds.length === 0 ? stmt : stmt.bind(...binds);
+  const r = await bound.all<{
+    id: string;
+    name: string;
+    primary_muscle: string;
+    modality: string;
+    unit: string;
+    laterality: string;
+    load_mode: string;
+    demo_slug: string | null;
+    aliases: string | null;
+  }>();
+  return r.results;
+}
+
+/** Resolve an id, exact name, or alias to an exercise row. */
+export async function resolveExercise(db: D1Database, nameOrId: string) {
+  const q = nameOrId.trim().toLowerCase();
+  return db
+    .prepare(
+      'SELECT * FROM exercises WHERE id = ?1 OR lower(name) = ?2 OR lower(aliases) LIKE ?3 LIMIT 1',
+    )
+    .bind(nameOrId, q, `%"${q}"%`)
+    .first();
+}
+
+// ---- sessions + sets -----------------------------------------------------
+
+function assertSessionSlot(slot: number): void {
+  if (!Number.isSafeInteger(slot) || slot < 0) throw new Error('invalid_session_slot');
+}
+
+/** Allocate and claim the next position in one statement. Deleted workouts
+ * retain their slots; retries use the client UUID, never MAX(slot) again. */
+async function createAdditionalSession(
+  db: D1Database, userId: string, planId: string, date: string,
+  workoutId: string | null, id: string, kind: 'planned' | 'freestyle', claimProtocol: boolean,
+): Promise<SessionRow> {
+  const request = JSON.stringify({ date, workoutId, kind });
+  const read = () => db.prepare('SELECT * FROM sessions WHERE id=?1').bind(id).first<SessionRow>();
+  const accept = (row: SessionRow): SessionRow => {
+    if (row.user_id !== userId || row.date !== date || (row.slot ?? 0) === 0
+        || row.additional_request !== request) throw new Error('session_id_conflict');
+    return row;
+  };
+  const previous = await read();
+  if (previous) return accept(previous);
+  const ts = now();
+  const result = await runWorkoutWriteStatement<SessionRow>(db, db.prepare(`
+    INSERT INTO sessions (id,user_id,plan_id,workout_id,date,slot,kind,status,
+      started_at,created_at,updated_at,attempt,write_protocol,additional_request)
+    SELECT ?1,?2,?3,?4,?5,
+      (SELECT COALESCE(MAX(slot),0)+1 FROM sessions WHERE user_id=?2 AND date=?5),
+      ?6,?7,?8,?9,?9,0,?10,?11
+    WHERE EXISTS (SELECT 1 FROM plans WHERE id=?3 AND user_id=?2 AND status='active')
+      AND (?4 IS NULL OR EXISTS (SELECT 1 FROM workouts WHERE id=?4 AND plan_id=?3 AND archived_at IS NULL
+        AND (one_time_date IS NULL OR one_time_date=?5)))
+    ON CONFLICT(id) DO NOTHING RETURNING *`)
+    .bind(id,userId,planId,workoutId,date,kind,kind === 'freestyle' ? 'in_progress' : 'planned',
+      kind === 'freestyle' ? ts : null,ts,claimProtocol ? 'attempt-v1' : 'legacy',request));
+  const inserted = result.results[0];
+  if (inserted) return inserted;
+  const winner = await read();
+  if (winner) return accept(winner);
+  throw new Error('session_state_conflict');
+}
+
+/** All non-discarded workouts on a date, in stable slot order. */
+export async function getSessionsByDate(db: D1Database, userId: string, date: string): Promise<SessionRow[]> {
+  return (await db.prepare("SELECT * FROM sessions WHERE user_id=?1 AND date=?2 AND status!='discarded' ORDER BY slot,id")
+    .bind(userId,date).all<SessionRow>()).results;
+}
+
+export async function getInProgressSessions(db: D1Database, userId: string, slot?: number): Promise<SessionRow[]> {
+  if (slot !== undefined) assertSessionSlot(slot);
+  return (await db.prepare(`SELECT * FROM sessions WHERE user_id=?1 AND status='in_progress'
+    AND (?2 IS NULL OR slot=?2) ORDER BY date DESC,slot,id`)
+    .bind(userId,slot ?? null).all<SessionRow>()).results;
+}
+
+export async function getOrCreateSession(
+  db: D1Database,
+  userId: string,
+  planId: string,
+  date: string,
+  workoutId: string | null,
+  options: {
+    slot?: number;
+    additionalID?: string;
+    reviveDiscarded?: boolean;
+    expectedAttempt?: number;
+    /** Only an explicitly capability-declaring REST client may claim v1.
+     * Internal/MCP callers still carry an attempt CAS but preserve the row's
+     * current protocol so the released tokenless app remains compatible. */
+    claimAttemptProtocol?: boolean;
+  } = {},
+): Promise<SessionRow> {
+  const slot = options.slot ?? 0;
+  assertSessionSlot(slot);
+  if (options.additionalID) {
+    if (options.expectedAttempt !== undefined && options.expectedAttempt !== 0) throw new Error('session_expected_attempt_missing');
+    return createAdditionalSession(db, userId, planId, date, workoutId, options.additionalID,
+      'planned', options.claimAttemptProtocol === true);
+  }
+  const claimAttemptProtocol = options.claimAttemptProtocol === true;
+  const attemptScoped = options.expectedAttempt !== undefined;
+  if (claimAttemptProtocol && !attemptScoped) {
+    throw new Error('session_expected_attempt_missing');
+  }
+  const selectExisting = () =>
+    db
+      .prepare(
+        'SELECT * FROM sessions WHERE user_id = ?1 AND date = ?2 AND slot = ?3 LIMIT 1',
+      )
+      .bind(userId, date, slot)
+      .first<SessionRow>();
+
+  // Keep all existing-row behavior in one path. A writer that loses the
+  // conflict-safe INSERT below must behave exactly like a caller that found
+  // the winning row on its initial read: it may fill an unpinned explicit day
+  // (first writer wins), and it may revive a discarded session.
+  const useExisting = async (existing: SessionRow): Promise<SessionRow> => {
+    if (existing.kind === 'freestyle') {
+      if (workoutId !== null) throw new Error('session_kind_conflict');
+      if (existing.status === 'discarded' && options.reviveDiscarded !== false
+          && !attemptScoped && existing.write_protocol === 'legacy') {
+        const restarted = await startFreestyleSession(db, userId, date, existing.attempt, 'mcp', { slot });
+        if ('session' in restarted && restarted.session) return restarted.session;
+        throw new SessionWriteConflictError('session_state_conflict', await selectExisting() ?? existing);
+      }
+      return existing;
+    }
+    // A tokenless legacy resolver may operate only until an attempt-aware
+    // writer claims this generation. Returning the row unchanged lets the
+    // route surface a stable protocol conflict without reviving or pinning it.
+    if (!attemptScoped && existing.write_protocol !== 'legacy') return existing;
+    // A write-scoped resolver must not mutate a later generation before its
+    // caller can report the conflict. This guard precedes both revival and the
+    // optional day-template backfill below.
+    if (
+      options.expectedAttempt !== undefined &&
+      existing.attempt !== options.expectedAttempt
+    ) {
+      return existing;
+    }
+    if (existing.status === 'discarded') {
+      if (options.reviveDiscarded === false) return existing;
+      // The (user,date) row exists but was DISCARDED. "Discarded" means
+      // "this never happened" — so a fresh get/start for the same date must
+      // RESURRECT it to a clean planned state rather than hand back the
+      // tombstone (which would leave the day un-startable: the start path
+      // only promotes 'planned'→'in_progress'). We keep the same row id
+      // (the (user,date) idempotency key) but wipe it back to pristine. Its
+      // old set_logs stay soft-deleted (they belong to the thrown-away
+      // attempt); new work logs fresh rows.
+      const ts = now();
+      const revived: SessionRow = {
+        ...existing,
+        workout_id: workoutId,
+        status: 'planned',
+        started_at: null,
+        completed_at: null,
+        perceived_fatigue: null,
+        notes: null,
+        runner_targets: null,
+        updated_at: ts,
+        attempt: existing.attempt + 1,
+        write_protocol: claimAttemptProtocol
+          ? 'attempt-v1'
+          : existing.write_protocol,
+      };
+      const updated = await runWorkoutWriteStatement(
+        db,
+        db.prepare(
+          `UPDATE sessions
+              SET workout_id=?2,
+                  runner_targets=NULL,
+                  status=?3,
+                  started_at=?4,
+                  completed_at=?5,
+                  perceived_fatigue=?6,
+                  notes=?7,
+                  updated_at=?8,
+                  attempt=?9,
+                  write_protocol=CASE
+                    WHEN ?11 = 1 THEN 'attempt-v1'
+                    ELSE write_protocol
+                  END
+            WHERE id=?1
+              AND status='discarded'
+              AND attempt=?10
+              AND (?12 = 1 OR write_protocol = 'legacy')`,
+        )
+        .bind(
+          revived.id,
+          revived.workout_id,
+          revived.status,
+          null,
+          null,
+          null,
+          null,
+          ts,
+          revived.attempt,
+          existing.attempt,
+          claimAttemptProtocol ? 1 : 0,
+          attemptScoped ? 1 : 0,
+        ),
+      );
+      if (updated.meta.changes > 0) return revived;
+
+      // A competing explicit restart or another resolver advanced the reused
+      // row after our read. Adopt that winner without applying this stale
+      // resolver's day pin or pristine-state reset to the newer generation.
+      const winner = await db
+        .prepare('SELECT * FROM sessions WHERE id = ?1')
+        .bind(existing.id)
+        .first<SessionRow>();
+      return winner ?? existing;
+    }
+
+    // #926: honor an EXPLICITLY-provided workout_id on a row that
+    // doesn't have one yet. Most creators (GET /today, MCP log_set,
+    // logWorkoutComplete) pass null and let the weekly schedule resolve the
+    // template at display time — that's the "calendar is computed, not
+    // stored" design, so we must NOT auto-resolve from the schedule here
+    // (that would freeze a stale template if the schedule later changes).
+    // But when a caller (POST /api/sessions / iOS createSession) explicitly
+    // says "this date is day X", silently dropping it on an existing
+    // null-template row is the Today/session impedance mismatch the iOS UX
+    // had to paper over. Backfill ONLY a NULL slot; never clobber an
+    // existing pin.
+    const shouldPin = workoutId != null && existing.workout_id == null;
+    const shouldClaim =
+      claimAttemptProtocol && existing.write_protocol !== 'attempt-v1';
+    if (shouldPin || shouldClaim) {
+      const ts = now();
+      // The conditional SET guards a read-then-write race: two explicit POSTs
+      // for the same null-template date can both read workout_id == null,
+      // but only the first execution sees NULL and installs its pin. Keep the
+      // row eligible after another writer pins it so this request can still
+      // perform its independent explicit protocol claim without clobbering the
+      // winning day. (Codex P2 on #58.)
+      await runWorkoutWriteStatement(
+        db,
+        db.prepare(
+          `UPDATE sessions
+              SET workout_id = CASE
+                    WHEN ?5 = 1 AND workout_id IS NULL THEN ?2
+                    ELSE workout_id
+                  END,
+                  write_protocol = CASE
+                    WHEN ?6 = 1 THEN 'attempt-v1'
+                    ELSE write_protocol
+                  END,
+                  updated_at = ?3
+            WHERE id = ?1
+              AND attempt = ?4
+              AND status = ?7
+              AND (?8 = 1 OR write_protocol = 'legacy')`,
+        )
+        .bind(
+          existing.id,
+          workoutId,
+          ts,
+          existing.attempt,
+          shouldPin ? 1 : 0,
+          claimAttemptProtocol ? 1 : 0,
+          existing.status,
+          attemptScoped ? 1 : 0,
+        ),
+      );
+      // Always return the authoritative row. A terminal transition can land
+      // immediately after the guarded update; synthesizing from `existing`
+      // would acknowledge stale planned/live state. A zero-change result is
+      // likewise a normal CAS loss (pin, status, generation, or protocol).
+      const fresh = await db
+        .prepare('SELECT * FROM sessions WHERE id = ?1')
+        .bind(existing.id)
+        .first<SessionRow>();
+      return fresh ?? existing;
+    }
+    return existing;
+  };
+
+  const existing = await selectExisting();
+  if (existing) return useExisting(existing);
+  if (slot !== 0) throw new Error('session_slot_missing');
+
+  // A nonzero token asserts that a prior generation already exists. Never
+  // manufacture attempt zero and then reject the response: that phantom row
+  // would still change calendar/state projections.
+  if (options.expectedAttempt !== undefined && options.expectedAttempt !== 0) {
+    throw new Error('session_expected_attempt_missing');
+  }
+
+  const ts = now();
+  const s: SessionRow = {
+    slot,
+    id: uuid(),
+    user_id: userId,
+    plan_id: planId,
+    workout_id: workoutId,
+    date,
+    status: 'planned',
+    started_at: null,
+    completed_at: null,
+    perceived_fatigue: null,
+    notes: null,
+    created_at: ts,
+    updated_at: ts,
+    attempt: 0,
+    write_protocol: claimAttemptProtocol ? 'attempt-v1' : 'legacy',
+  };
+  const inserted = await runWorkoutWriteStatement(
+    db,
+    db.prepare(
+      `INSERT INTO sessions
+       (id,user_id,plan_id,workout_id,date,status,started_at,completed_at,perceived_fatigue,notes,created_at,updated_at,attempt,write_protocol)
+       VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+       ON CONFLICT DO NOTHING`,
+    )
+    .bind(
+      s.id,
+      s.user_id,
+      s.plan_id,
+      s.workout_id,
+      s.date,
+      s.status,
+      s.started_at,
+      s.completed_at,
+      s.perceived_fatigue,
+      s.notes,
+      s.created_at,
+      s.updated_at,
+      s.attempt,
+      s.write_protocol,
+    ),
+  );
+  if (inserted.meta.changes > 0) return s;
+
+  // Another creator won after our null read. Do not inspect or parse an
+  // engine-specific unique-constraint error: the unique index plus
+  // ON CONFLICT makes the outcome explicit, and we re-read the canonical
+  // row before applying the same explicit-pin/discarded-revival rules above.
+  const winner = await selectExisting();
+  if (!winner) throw new Error('session_create_conflict_without_winner');
+  return useExisting(winner);
+}
+
+/** Read the canonical date row without revival, pin backfill, or creation. */
+export async function getOwnedSessionByDate(
+  db: D1Database,
+  userId: string,
+  date: string,
+  slot = 0,
+): Promise<SessionRow | null> {
+  return db
+    .prepare(
+      'SELECT * FROM sessions WHERE user_id = ?1 AND date = ?2 AND slot = ?3 LIMIT 1',
+    )
+    .bind(userId, date, slot)
+    .first<SessionRow>();
+}
+
+/**
+ * Explicitly revive one discarded session generation. This is deliberately
+ * separate from ordinary date-level session resolution: a delayed pre-discard
+ * create must never look like a user-authorized restart. The expected attempt
+ * makes the operation idempotent across a commit-then-timeout retry while
+ * preventing that retry from reviving a later discarded generation.
+ */
+export async function reviveDiscardedSession(
+  db: D1Database,
+  userId: string,
+  sessionId: string,
+  expectedAttempt: number,
+  workoutId: string | null,
+  claimAttemptProtocol = false,
+): Promise<SessionRow | SessionAttemptConflict | null> {
+  const canonicalSessionId = await resolveOwnedSessionId(db, userId, sessionId);
+  if (!canonicalSessionId) return null;
+  const readCurrent = () =>
+    db
+      .prepare('SELECT * FROM sessions WHERE id = ?1 AND user_id = ?2')
+      .bind(canonicalSessionId, userId)
+      .first<SessionRow>();
+  const current = await readCurrent();
+  if (!current) return null;
+
+  const acceptLiveWinner = async (
+    candidate: SessionRow,
+  ): Promise<SessionRow | SessionAttemptConflict | null> => {
+    const revivedAttempt = expectedAttempt + 1;
+    if (
+      candidate.status === 'discarded' || candidate.kind === 'freestyle' ||
+      candidate.attempt !== revivedAttempt
+    ) {
+      return sessionAttemptConflict(expectedAttempt, candidate);
+    }
+    if (!claimAttemptProtocol || candidate.write_protocol === 'attempt-v1') {
+      return candidate;
+    }
+    await runWorkoutWriteStatement(
+      db,
+      db.prepare(
+        `UPDATE sessions
+            SET write_protocol = 'attempt-v1'
+          WHERE id = ?1
+            AND user_id = ?2
+            AND attempt = ?3
+            AND status = ?4
+            AND write_protocol = 'legacy'`,
+      )
+      .bind(
+        canonicalSessionId,
+        userId,
+        revivedAttempt,
+        candidate.status,
+      ),
+    );
+    const authoritative = await readCurrent();
+    if (!authoritative) return null;
+    if (
+      authoritative.status === 'discarded' ||
+      authoritative.attempt !== revivedAttempt ||
+      authoritative.write_protocol !== 'attempt-v1'
+    ) {
+      return sessionAttemptConflict(expectedAttempt, authoritative);
+    }
+    return authoritative;
+  };
+
+  // A retry after the original restart committed observes exactly the next
+  // live generation. Return it as the idempotent result; do not increment it
+  // again. Any later generation is a real conflict.
+  if (current.status !== 'discarded') {
+    if (current.attempt === expectedAttempt + 1) {
+      return acceptLiveWinner(current);
+    }
+    return sessionAttemptConflict(expectedAttempt, current);
+  }
+  if (current.attempt !== expectedAttempt) {
+    return sessionAttemptConflict(expectedAttempt, current);
+  }
+
+  const ts = now();
+  const revivedAttempt = expectedAttempt + 1;
+  await runWorkoutWriteStatement(
+    db,
+    db.prepare(
+      `UPDATE sessions
+          SET workout_id = ?2,
+              kind = 'planned',
+              status = 'planned',
+              runner_targets = NULL,
+              started_at = NULL,
+              completed_at = NULL,
+              perceived_fatigue = NULL,
+              notes = NULL,
+              updated_at = ?3,
+              attempt = ?4,
+              write_protocol = CASE
+                WHEN ?7 = 1 THEN 'attempt-v1'
+                ELSE write_protocol
+              END
+        WHERE id = ?1
+          AND user_id = ?5
+          AND status = 'discarded'
+          AND attempt = ?6`,
+    )
+    .bind(
+      canonicalSessionId,
+      workoutId,
+      ts,
+      revivedAttempt,
+      userId,
+      expectedAttempt,
+      claimAttemptProtocol ? 1 : 0,
+    ),
+  );
+  // Reread even after a successful CAS. A same-attempt discard can commit
+  // immediately after the restart/claim; returning a synthesized planned row
+  // would install an obsolete client barrier.
+  const winner = await readCurrent();
+  if (!winner) return null;
+  if (winner.status !== 'discarded' && winner.attempt === revivedAttempt) {
+    return acceptLiveWinner(winner);
+  }
+  return sessionAttemptConflict(expectedAttempt, winner);
+}
+
+/**
+ * Resolve a session mutation target for one user. Direct session ids take
+ * precedence; otherwise a stale id retained by migration 0029 may redirect to
+ * its surviving canonical row. Joining through sessions keeps both paths
+ * tenant-scoped and ensures an alias can never grant access to another user's
+ * session.
+ */
+async function resolveOwnedSessionId(
+  db: D1Database,
+  userId: string,
+  requestedId: string,
+): Promise<string | null> {
+  const resolved = await db
+    .prepare(
+      `SELECT s.id
+         FROM sessions AS s
+         LEFT JOIN session_aliases AS sa
+           ON sa.canonical_session_id = s.id
+          AND sa.alias_session_id = ?1
+        WHERE s.user_id = ?2
+          AND (s.id = ?1 OR sa.alias_session_id = ?1)
+        ORDER BY CASE WHEN s.id = ?1 THEN 0 ELSE 1 END
+        LIMIT 1`,
+    )
+    .bind(requestedId, userId)
+    .first<{ id: string }>();
+  return resolved?.id ?? null;
+}
+
+export type SessionAttemptConflict = {
+  error: 'session_attempt_conflict';
+  status: SessionRow['status'];
+  expected_attempt: number;
+  current_attempt: number;
+  current_session: SessionRow;
+};
+
+export type SessionAttemptMissing = {
+  error: 'session_attempt_missing';
+  expected_attempt: number;
+};
+
+export type SessionStateConflict = {
+  error: 'session_state_conflict';
+  expected_status?: SessionRow['status'];
+  current_session: SessionRow;
+};
+
+export type SessionProtocolConflict = {
+  error: 'session_attempt_required';
+  status: SessionRow['status'];
+  current_attempt: number;
+  current_session: SessionRow;
+};
+
+function sessionAttemptConflict(
+  expectedAttempt: number,
+  current: SessionRow,
+): SessionAttemptConflict {
+  return {
+    error: 'session_attempt_conflict',
+    status: current.status,
+    expected_attempt: expectedAttempt,
+    current_attempt: current.attempt,
+    current_session: current,
+  };
+}
+
+function sessionStateConflict(
+  expectedStatus: SessionRow['status'],
+  current: SessionRow,
+): SessionStateConflict {
+  return {
+    error: 'session_state_conflict',
+    expected_status: expectedStatus,
+    current_session: current,
+  };
+}
+
+function sessionProtocolConflict(current: SessionRow): SessionProtocolConflict {
+  return {
+    error: 'session_attempt_required',
+    status: current.status,
+    current_attempt: current.attempt,
+    current_session: current,
+  };
+}
+
+export class SessionWriteConflictError extends Error {
+  readonly currentSession: SessionRow;
+  readonly expectedAttempt?: number;
+  readonly expectedStatus?: SessionRow['status'];
+
+  constructor(
+    error:
+      | 'session_attempt_conflict'
+      | 'session_attempt_required'
+      | 'session_discarded'
+      | 'session_state_conflict',
+    currentSession: SessionRow,
+    expectedAttempt?: number,
+    expectedStatus?: SessionRow['status'],
+  ) {
+    super(error);
+    this.name = 'SessionWriteConflictError';
+    this.currentSession = currentSession;
+    this.expectedAttempt = expectedAttempt;
+    this.expectedStatus = expectedStatus;
+  }
+
+  response():
+    | SessionAttemptConflict
+    | SessionProtocolConflict
+    | SessionStateConflict
+    | { error: 'session_discarded'; status: 'discarded'; current_session: SessionRow } {
+    if (this.message === 'session_attempt_conflict' && this.expectedAttempt !== undefined) {
+      return sessionAttemptConflict(this.expectedAttempt, this.currentSession);
+    }
+    if (this.message === 'session_attempt_required') {
+      return sessionProtocolConflict(this.currentSession);
+    }
+    if (this.message === 'session_state_conflict') {
+      return {
+        error: 'session_state_conflict',
+        ...(this.expectedStatus === undefined
+          ? {}
+          : { expected_status: this.expectedStatus }),
+        current_session: this.currentSession,
+      };
+    }
+    return {
+      error: 'session_discarded',
+      status: 'discarded',
+      current_session: this.currentSession,
+    };
+  }
+}
+
+type SessionPatch = {
+  // `status` is `unknown`: the PATCH body is NOT runtime-validated, so a
+  // client can send a number/null/bool/object/array here. Typing it
+  // honestly forces the type-guard below.
+  status?: unknown;
+  perceived_fatigue?: number | null;
+  notes?: string | null;
+  expected_feedback?: { notes: string | null; perceived_fatigue: number | null };
+  workout_id?: string | null;
+};
+
+export function patchSession(
+  db: D1Database,
+  userId: string,
+  sessionId: string,
+  patch: SessionPatch,
+  expectedAttempt?: number,
+  claimAttemptProtocol = false,
+) {
+  return patchSessionInternal(db, userId, sessionId, patch, expectedAttempt, claimAttemptProtocol);
+}
+
+/** Feedback edits cannot complete, reopen, or replace the reviewed attempt. */
+export function patchCompletedSessionFeedback(
+  db: D1Database,
+  userId: string,
+  sessionId: string,
+  feedback: {
+    notes: string | null;
+    perceived_fatigue: number | null;
+    expected_feedback: { notes: string | null; perceived_fatigue: number | null };
+  },
+  expectedAttempt: number,
+) {
+  return patchSessionInternal(db, userId, sessionId, {
+    notes: feedback.notes,
+    perceived_fatigue: feedback.perceived_fatigue,
+    expected_feedback: feedback.expected_feedback,
+  }, expectedAttempt, true, true);
+}
+
+async function patchSessionInternal(
+  db: D1Database,
+  userId: string,
+  sessionId: string,
+  patch: SessionPatch,
+  expectedAttempt?: number,
+  claimAttemptProtocol = false,
+  completedFeedbackOnly = false,
+): Promise<
+  | SessionRow
+  | null
+  | { error: 'session_already_started'; status: 'in_progress' | 'completed' }
+  | {
+      error: 'session_discarded';
+      status: 'discarded';
+      current_session: SessionRow;
+    }
+  | { error: 'session_feedback_conflict'; current_session: SessionRow }
+  | { error: 'invalid_status'; status: unknown }
+  | SessionAttemptConflict
+  | SessionProtocolConflict
+  | SessionStateConflict
+> {
+  const canonicalSessionId = await resolveOwnedSessionId(db, userId, sessionId);
+  if (!canonicalSessionId) return null;
+  const s = await db
+    .prepare('SELECT * FROM sessions WHERE id = ?1 AND user_id = ?2')
+    .bind(canonicalSessionId, userId)
+    .first<SessionRow>();
+  if (!s) return null;
+  if (s.kind === 'freestyle' && patch.workout_id != null) throw new Error('session_kind_conflict');
+  const attemptScoped = expectedAttempt !== undefined;
+  if (claimAttemptProtocol && !attemptScoped) {
+    throw new Error('session_expected_attempt_missing');
+  }
+  if (!attemptScoped && s.write_protocol !== 'legacy') {
+    return sessionProtocolConflict(s);
+  }
+  if (expectedAttempt !== undefined && expectedAttempt !== s.attempt) {
+    return sessionAttemptConflict(expectedAttempt, s);
+  }
+  const casAttempt = expectedAttempt ?? s.attempt;
+  // Type-guard BEFORE normalizing: a present-but-non-string `status`
+  // (e.g. {"status":123|null|true|{}|[]}) must be treated exactly like an
+  // invalid status — return the invalid_status arm (→ HTTP 400), never
+  // call .trim() on a non-string (that was a 500-causing regression),
+  // never persist, never reach the burial guard. Key absent / undefined
+  // → field-only patch, unchanged. Only a string proceeds to normalize.
+  if (patch.status !== undefined && typeof patch.status !== 'string') {
+    return { error: 'invalid_status', status: patch.status };
+  }
+  // Normalize the incoming status ONCE (trim + lowercase) so casing /
+  // whitespace cannot bypass the skipped-guard ({"status":"  SKIPPED "})
+  // and so the value compared here is the value persisted below — a
+  // non-canonical status can never silently corrupt the row.
+  const normalizedStatus =
+    patch.status === undefined ? undefined : patch.status.trim().toLowerCase();
+  // Validate against the closed status set BEFORE the burial guard and
+  // BEFORE any write: an unknown status (e.g. "junk") is rejected, never
+  // persisted. A field-only patch (no `status` key) skips this entirely.
+  // This is app-layer validation (no DB CHECK / migration) and is what
+  // makes the "can never silently corrupt the row" guarantee true.
+  if (
+    normalizedStatus !== undefined &&
+    normalizedStatus !== 'planned' &&
+    normalizedStatus !== 'in_progress' &&
+    normalizedStatus !== 'completed' &&
+    normalizedStatus !== 'skipped'
+  ) {
+    return { error: 'invalid_status', status: normalizedStatus };
+  }
+  // Discard is terminal for mutations that still address this session id.
+  // A deliberate same-day restart goes through getOrCreateSession, which
+  // first revives the row to a fresh `planned` attempt. Keeping that explicit
+  // boundary prevents a delayed completion/status PATCH from silently
+  // resurrecting the attempt the user just threw away.
+  if (s.status === 'discarded') {
+    return {
+      error: 'session_discarded',
+      status: 'discarded',
+      current_session: s,
+    };
+  }
+  if (completedFeedbackOnly && s.status !== 'completed') {
+    return sessionStateConflict('completed', s);
+  }
+  // History-integrity guard (REST sibling of FIX2's skipPlannedSession
+  // guard): a `skipped` patch must not bury a started/finished workout.
+  // Setting an in_progress/completed session to 'skipped' would render it
+  // skipped on the calendar/agenda and hide its logged set_logs. Reject
+  // and leave the row + its sets untouched — same rejection shape as
+  // skipPlannedSession. Other status transitions and non-status patches
+  // are unchanged.
+  if (
+    normalizedStatus === 'skipped' &&
+    (s.status === 'in_progress' || s.status === 'completed')
+  ) {
+    return {
+      error: 'session_already_started',
+      status: s.status as 'in_progress' | 'completed',
+    };
+  }
+  const ts = now();
+  const status = normalizedStatus ?? s.status;
+  const fatigue = Object.prototype.hasOwnProperty.call(patch, 'perceived_fatigue')
+    ? patch.perceived_fatigue ?? null : s.perceived_fatigue;
+  const notes = Object.prototype.hasOwnProperty.call(patch, 'notes')
+    ? patch.notes ?? null : s.notes;
+  const completedAt = status === 'completed' ? s.completed_at ?? ts : s.completed_at;
+  const startedAt = status === 'in_progress' ? s.started_at ?? ts : s.started_at;
+  const statusPredicate =
+    completedFeedbackOnly
+      ? "status = 'completed'"
+      : normalizedStatus === 'completed'
+      ? "status IN ('planned','in_progress','completed')"
+      : normalizedStatus === 'in_progress'
+        ? "status IN ('planned','in_progress')"
+        : normalizedStatus === 'skipped'
+          ? "status IN ('planned','skipped')"
+          : normalizedStatus === 'planned'
+            ? "status IN ('planned','skipped')"
+            : "status != 'discarded'";
+  // Feedback CAS compares the original private fields, independently of set
+  // writes that also advance sessions.updated_at. An exact retry is accepted;
+  // a newer different note/rating is never overwritten by a delayed finish.
+  // Attempt plus a transition-specific current-state predicate form the
+  // read/write CAS. Completion is allowed to linearize on either side of a
+  // final logSet in the same generation, and SQL COALESCE preserves the
+  // concurrently installed started_at. Skip/planned transitions are stricter:
+  // once a set promoted the row, they cannot hide or demote the live workout.
+  const [updated] = await runWorkoutWriteBatch<SessionRow>(db, [
+    db.prepare(
+      `UPDATE sessions
+          SET status = CASE WHEN ?8 = 1 THEN ?2 ELSE status END,
+              perceived_fatigue = CASE
+                WHEN ?2 = 'planned' AND status = 'skipped' THEN NULL
+                WHEN ?10 = 1 THEN ?3
+                ELSE perceived_fatigue
+              END,
+              notes = CASE
+                WHEN ?2 = 'planned' AND status = 'skipped' THEN NULL
+                WHEN ?11 = 1 THEN ?4
+                ELSE notes
+              END,
+              started_at = CASE
+                WHEN ?2 = 'planned' AND status = 'skipped' THEN NULL
+                WHEN ?2 = 'in_progress' THEN COALESCE(started_at, ?5)
+                ELSE started_at
+              END,
+              runner_targets = CASE
+                WHEN ?2 = 'planned' AND status = 'skipped' THEN NULL
+                WHEN ?2 = 'completed' AND runner_targets IS NULL AND started_at IS NULL
+                  THEN ${runnerTargetSnapshotSQL('sessions.workout_id', '?7', 'sessions.user_id', programWeekTargetsSQL('sessions.date'))}
+                ELSE runner_targets
+              END,
+              completed_at = CASE
+                WHEN ?2 = 'planned' AND status = 'skipped' THEN NULL
+                WHEN ?2 = 'completed' THEN COALESCE(completed_at, ?6)
+                ELSE completed_at
+              END,
+              attempt = CASE
+                WHEN ?2 = 'planned' AND status = 'skipped' THEN attempt + 1
+                ELSE attempt
+              END,
+              workout_id = CASE
+                WHEN ?12 = 1 THEN ?13
+                ELSE workout_id
+              END,
+              write_protocol = CASE
+                WHEN ?14 = 1 THEN 'attempt-v1'
+                ELSE write_protocol
+              END,
+              updated_at = ?7
+        WHERE id = ?1
+          AND attempt = ?9
+          AND (?15 = 1 OR write_protocol = 'legacy')
+          AND ${statusPredicate}
+          AND (?16 = 0
+            OR (notes IS ?17 AND perceived_fatigue IS ?18)
+            OR (notes IS ?4 AND perceived_fatigue IS ?3))
+        ${completedFeedbackOnly ? 'RETURNING *' : ''}`,
+    )
+    .bind(
+      canonicalSessionId,
+      normalizedStatus ?? '',
+      fatigue,
+      notes,
+      startedAt,
+      completedAt,
+      ts,
+      normalizedStatus === undefined ? 0 : 1,
+      casAttempt,
+      Object.prototype.hasOwnProperty.call(patch, 'perceived_fatigue') ? 1 : 0,
+      Object.prototype.hasOwnProperty.call(patch, 'notes') ? 1 : 0,
+      normalizedStatus === 'planned' &&
+      Object.prototype.hasOwnProperty.call(patch, 'workout_id')
+        ? 1
+        : 0,
+      patch.workout_id ?? null,
+      claimAttemptProtocol ? 1 : 0,
+      attemptScoped ? 1 : 0,
+      patch.expected_feedback ? 1 : 0,
+      patch.expected_feedback?.notes ?? null,
+      patch.expected_feedback?.perceived_fatigue ?? null,
+    ),
+    // Feedback changes no workout timing or completion, so no activity
+    // reconciliation is needed. Its ACK is the row returned by the write.
+    ...(completedFeedbackOnly ? [] : [reconcileNativeHealthKitStatement(db, userId, ts, true)]),
+  ]);
+  if (updated!.meta.changes === 0) {
+    const current = await db
+      .prepare('SELECT * FROM sessions WHERE id = ?1 AND user_id = ?2')
+      .bind(canonicalSessionId, userId)
+      .first<SessionRow>();
+    if (current && !attemptScoped && current.write_protocol !== 'legacy') {
+      return sessionProtocolConflict(current);
+    }
+    if (current && current.attempt !== casAttempt) {
+      return sessionAttemptConflict(casAttempt, current);
+    }
+    if (current?.status === 'discarded') {
+      return {
+        error: 'session_discarded',
+        status: 'discarded',
+        current_session: current,
+      };
+    }
+    if (current && completedFeedbackOnly && current.status !== 'completed') {
+      return sessionStateConflict('completed', current);
+    }
+    if (
+      normalizedStatus === 'skipped' &&
+      current &&
+      (current.status === 'in_progress' || current.status === 'completed')
+    ) {
+      return {
+        error: 'session_already_started',
+        status: current.status,
+      };
+    }
+    if (current && patch.expected_feedback
+        && !(current.notes === patch.expected_feedback.notes
+          && current.perceived_fatigue === patch.expected_feedback.perceived_fatigue)
+        && !(current.notes === notes && current.perceived_fatigue === fatigue)) {
+      return { error: 'session_feedback_conflict', current_session: current };
+    }
+    if (current) return sessionStateConflict(s.status, current);
+    return null;
+  }
+  if (completedFeedbackOnly) return updated!.results[0] ?? null;
+  return db
+    .prepare('SELECT * FROM sessions WHERE id = ?1 AND user_id = ?2')
+    .bind(canonicalSessionId, userId)
+    .first<SessionRow>();
+}
+
+/**
+ * Discard a session — the sanctioned escape hatch for "I started/ended a
+ * workout I didn't really do." This is the ONE place allowed to override
+ * the history-integrity burial guard in patchSession/skipPlannedSession,
+ * and it earns that by being EXPLICIT and non-silent: it soft-deletes the
+ * session's set_logs (so logged work is intentionally thrown away, never
+ * hidden) and marks the session 'discarded'. A discarded session VANISHES
+ * from the calendar projection (see projectCalendar's discarded carve-out)
+ * and its now-soft-deleted sets drop out of history/volume/e1RM (those
+ * already filter deleted_at IS NULL) and out of ride-conflict lift dates
+ * (derived from the projection). The only session-row reads needing an
+ * explicit `status != 'discarded'` filter are getRecentSessions and
+ * getSessionByDate (the MCP coach reads) — both already carry it.
+ *
+ * Idempotent AND side-effect-free on repeat: an already-discarded session
+ * short-circuits before any write (no redundant audit row). Reversible-
+ * by-restart:
+ * getOrCreateSession resurrects a discarded (user,date) row to a pristine
+ * 'planned' state, so discarding never wedges a date.
+ *
+ * Returns null if no such session for this user (caller → 404).
+ */
+export async function discardSession(
+  db: D1Database,
+  userId: string,
+  sessionId: string,
+  expectedAttempt?: number,
+  claimAttemptProtocol = false,
+): Promise<
+  | SessionRow
+  | SessionAttemptConflict
+  | SessionProtocolConflict
+  | null
+> {
+  const canonicalSessionId = await resolveOwnedSessionId(db, userId, sessionId);
+  if (!canonicalSessionId) return null;
+  const s = await db
+    .prepare('SELECT * FROM sessions WHERE id = ?1 AND user_id = ?2')
+    .bind(canonicalSessionId, userId)
+    .first<SessionRow>();
+  if (!s) return null;
+  const attemptScoped = expectedAttempt !== undefined;
+  if (claimAttemptProtocol && !attemptScoped) {
+    throw new Error('session_expected_attempt_missing');
+  }
+  if (!attemptScoped && s.write_protocol !== 'legacy') {
+    return sessionProtocolConflict(s);
+  }
+  if (expectedAttempt !== undefined && expectedAttempt !== s.attempt) {
+    return sessionAttemptConflict(expectedAttempt, s);
+  }
+  const casAttempt = expectedAttempt ?? s.attempt;
+  const acceptDiscardedWinner = async (
+    candidate: SessionRow,
+  ): Promise<SessionRow | SessionAttemptConflict | null> => {
+    if (candidate.attempt !== casAttempt || candidate.status !== 'discarded') {
+      return sessionAttemptConflict(casAttempt, candidate);
+    }
+    if (!claimAttemptProtocol || candidate.write_protocol === 'attempt-v1') {
+      return candidate;
+    }
+    await runWorkoutWriteStatement(
+      db,
+      db.prepare(
+        `UPDATE sessions
+            SET write_protocol = 'attempt-v1'
+          WHERE id = ?1
+            AND user_id = ?2
+            AND attempt = ?3
+            AND status = 'discarded'
+            AND write_protocol = 'legacy'`,
+      )
+      .bind(canonicalSessionId, userId, casAttempt),
+    );
+    const authoritative = await db
+      .prepare('SELECT * FROM sessions WHERE id = ?1 AND user_id = ?2')
+      .bind(canonicalSessionId, userId)
+      .first<SessionRow>();
+    if (!authoritative) return null;
+    if (
+      authoritative.attempt !== casAttempt ||
+      authoritative.status !== 'discarded' ||
+      authoritative.write_protocol !== 'attempt-v1'
+    ) {
+      return sessionAttemptConflict(casAttempt, authoritative);
+    }
+    return authoritative;
+  };
+  // Already discarded: skip the terminal/tombstone batch and its audit so a
+  // retry cannot inflate coaching history. An explicit iOS capability claim
+  // may still perform the one guarded legacy→v1 protocol update.
+  if (s.status === 'discarded') {
+    return acceptDiscardedWinner(s);
+  }
+  const ts = now();
+  // D1 batches are ordered transactions. Mark the session terminal first,
+  // then tombstone every live set in the same transaction. A concurrent
+  // logSet batch therefore linearizes wholly on one side: if it wins first,
+  // its new set is included in this tombstone; if discard wins first, its
+  // status-guarded insert observes `discarded` and is rejected.
+  const [transition, , tombstones, terminalState] = await runWorkoutWriteBatch(db, [
+    db
+      .prepare(
+        `UPDATE sessions
+            SET status = 'discarded',
+                updated_at = ?2,
+                write_protocol = CASE
+                  WHEN ?4 = 1 THEN 'attempt-v1'
+                  ELSE write_protocol
+                END
+          WHERE id = ?1
+            AND status != 'discarded'
+            AND attempt = ?3
+            AND (?5 = 1 OR write_protocol = 'legacy')`,
+      )
+      .bind(
+        canonicalSessionId,
+        ts,
+        casAttempt,
+        claimAttemptProtocol ? 1 : 0,
+        attemptScoped ? 1 : 0,
+      ),
+    reconcileNativeHealthKitStatement(db, userId, ts, true),
+    db
+      .prepare(
+        `UPDATE set_logs
+            SET deleted_at = ?2,
+                updated_at = MAX(updated_at + 1, ?2)
+          WHERE session_id = ?1
+            AND deleted_at IS NULL
+            AND EXISTS (
+              SELECT 1 FROM sessions
+               WHERE id = ?1 AND status = 'discarded' AND attempt = ?3
+            )
+          RETURNING id`,
+      )
+      .bind(canonicalSessionId, ts, casAttempt),
+    db
+      .prepare('SELECT * FROM sessions WHERE id = ?1 AND user_id = ?2')
+      .bind(canonicalSessionId, userId),
+  ]);
+  const authoritative = terminalState!.results[0] as SessionRow | undefined;
+  // Another concurrent/retried discard already won. Its transaction also
+  // tombstoned the live sets, so this remains a true audit no-op. Return the
+  // terminal result observed by this batch. If an explicit iOS caller still
+  // needs to claim a legacy winner, acceptDiscardedWinner performs one guarded
+  // claim and authoritative reread; a same-day restart that wins that race is
+  // returned as a conflict rather than a misleading discarded ACK.
+  if (transition!.meta.changes === 0) {
+    const current = authoritative;
+    if (current && !attemptScoped && current.write_protocol !== 'legacy') {
+      return sessionProtocolConflict(current);
+    }
+    if (current && current.attempt !== casAttempt) {
+      return sessionAttemptConflict(casAttempt, current);
+    }
+    if (current?.status === 'discarded') {
+      return acceptDiscardedWinner(current);
+    }
+    if (current) return sessionAttemptConflict(casAttempt, current);
+    return null;
+  }
+  // Count the outer statement's authoritative returned rows. D1 meta.changes
+  // also includes writes performed by compatibility triggers, so it is not a
+  // logical row count while migration 0034's legacy-update trigger exists.
+  const discardedSets = tombstones!.results.length;
+  await writeAudit(
+    db,
+    userId,
+    'discard_session',
+    {
+      session_id: canonicalSessionId,
+      date: s.date,
+      attempt: casAttempt,
+      prior_status: s.status,
+      sets_discarded: discardedSets,
+    },
+    `discarded:${discardedSets}_sets`,
+  );
+  return authoritative ?? {
+    ...s,
+    status: 'discarded',
+    updated_at: ts,
+    write_protocol: claimAttemptProtocol ? 'attempt-v1' : s.write_protocol,
+  };
+}
+
+/** Idempotent on the client-generated `id` (offline-safe; retries are no-ops). */
+export async function logSet(
+  db: D1Database,
+  userId: string,
+  input: {
+    id: string;
+    session_id: string;
+    exercise_id: string;
+    template_exercise_id?: string | null;
+    set_index: number;
+    weight: number;
+    reps: number;
+    rpe?: number | null;
+    is_warmup?: boolean;
+    notes?: string | null;
+    logged_at?: number;
+    duration_s?: number | null;
+    /** Explicit timed-hold flag. When omitted, defaults to the exercise's
+     *  catalog modality (=== 'timed'). A client that rendered a timed
+     *  countdown (e.g. a target_duration_s slot) passes true so the set is
+     *  stored as timed regardless of modality. */
+    is_timed?: boolean;
+    /** Unit of `weight` as the client logged it; omitted means 'lb'. */
+    weight_unit?: 'lb' | 'kg';
+    /** Optional generation CAS. New durable clients persist and reuse it;
+     *  omitted legacy/MCP calls still snapshot the pre-write attempt below. */
+    expected_attempt?: number;
+    /** Capability declaration is separate from generation CAS. MCP supplies
+     * an observed attempt but never claims the client protocol. */
+    claim_attempt_protocol?: boolean;
+    prescription?: SetPrescriptionContext;
+    source: 'ios' | 'mcp';
+  },
+): Promise<{ set: SetLogRow; deduped: boolean; session: SessionRow }> {
+  // Guard + migration compatibility: the requested id must resolve to this
+  // user's direct or canonical session. Every operation below uses that
+  // canonical id so a stale client heals from the returned SetLogRow.
+  const canonicalSessionId = await resolveOwnedSessionId(db, userId, input.session_id);
+  if (!canonicalSessionId) throw new Error('session_not_found');
+
+  // A set UUID is idempotent only within the resolved owned session. Never
+  // return a globally-matched row from another session/tenant, even if a
+  // caller happens to know its UUID.
+  const selectExisting = () =>
+    db
+      .prepare(
+        `SELECT sl.*
+           FROM set_logs AS sl
+           JOIN sessions AS s ON s.id = sl.session_id
+          WHERE sl.id = ?1 AND sl.session_id = ?2 AND s.user_id = ?3`,
+      )
+      .bind(input.id, canonicalSessionId, userId);
+  const selectSession = () =>
+    db
+      .prepare('SELECT * FROM sessions WHERE id = ?1 AND user_id = ?2')
+      .bind(canonicalSessionId, userId);
+  // Read the UUID winner and its authoritative session from one D1 snapshot.
+  // A retry must never pair an old planned read with a set that won later.
+  const [initialSetState, initialSessionState] = await db.batch([
+    selectExisting(),
+    selectSession(),
+  ]);
+  const targetSession = initialSessionState!.results[0] as SessionRow | undefined;
+  if (!targetSession) throw new Error('session_not_found');
+  // Exact UUID retries remain idempotent even after discard/restart. The
+  // original mutation already happened, so this path settles the old intent
+  // without applying anything to the current generation. Return the current
+  // authoritative session alongside the (possibly tombstoned) old set.
+  const existing = initialSetState!.results[0] as SetLogRow | undefined;
+  if (existing) {
+    return { set: existing, deduped: true, session: targetSession };
+  }
+  if (targetSession.kind === 'freestyle' && (input.template_exercise_id || input.prescription)) {
+    throw new Error('session_kind_conflict');
+  }
+  const attemptScoped = input.expected_attempt !== undefined;
+  const claimAttemptProtocol = input.claim_attempt_protocol === true;
+  if (claimAttemptProtocol && !attemptScoped) {
+    throw new Error('session_expected_attempt_missing');
+  }
+  if (!attemptScoped && targetSession.write_protocol !== 'legacy') {
+    throw new SessionWriteConflictError(
+      'session_attempt_required',
+      targetSession,
+    );
+  }
+  if (
+    input.expected_attempt !== undefined &&
+    input.expected_attempt !== targetSession.attempt
+  ) {
+    throw new SessionWriteConflictError(
+      'session_attempt_conflict',
+      targetSession,
+      input.expected_attempt,
+    );
+  }
+  const casAttempt = input.expected_attempt ?? targetSession.attempt;
+  if (targetSession.status === 'skipped') {
+    throw new SessionWriteConflictError(
+      'session_state_conflict',
+      targetSession,
+      undefined,
+    );
+  }
+
+  // Resolve the plan slot (if a link was provided) ONCE — it drives both the
+  // dangling-link guard and the warm-up default.
+  //
+  // Dangling-link guard: template_exercise_id is an enforced FK into
+  // template_exercises. A stale client can send a slot id that a plan rebuild
+  // (update_plan deletes + re-creates rows with new ids) has since removed —
+  // a real edit/sync race during an in-flight workout. Inserting it unchanged
+  // would 500 and BLOCK logging until the user reloads. Set logs key on
+  // exercise_id anyway, so treat a missing slot as "no link": store
+  // template_exercise_id = null (an exercise-only log) and keep the set.
+  //
+  // Stale-swap guard: the slot may still EXIST but now hold a different
+  // exercise (a swap_exercise / update_exercise edit landed mid-workout while
+  // iOS still cached the old slot id). Keeping the link would file this set's
+  // movement under the swapped-in slot, and todaySlotSets attributes any
+  // non-null slot id before checking exercise_id — silently marking the wrong
+  // slot complete. So only retain the link when the slot's exercise_id matches
+  // the submitted set; otherwise drop it like the dangling path. (Ownership is
+  // already covered: the session is user-scoped above, and a foreign-day slot
+  // never appears in today's slot set regardless.)
+  //
+  // Warm-up default: an explicit flag wins; otherwise inherit the slot's
+  // is_warmup so a set logged against a prescribed warm-up slot (erg, mobility)
+  // is correctly a warm-up without the client restating it (migration 0026).
+  let templateExerciseId: string | null = input.template_exercise_id ?? null;
+  let slotIsWarmup: number | null = null;
+  if (templateExerciseId) {
+    const slot = await db
+      .prepare(`SELECT te.is_warmup, te.exercise_id FROM template_exercises te
+        JOIN workouts w ON w.id=te.workout_id JOIN plans p ON p.id=w.plan_id
+        WHERE te.id=?1 AND p.user_id=?2`)
+      .bind(templateExerciseId, userId)
+      .first<{ is_warmup: number; exercise_id: string }>();
+    const approvedSwap = parseSessionExerciseSwaps(targetSession.exercise_swaps, targetSession.attempt).entries.find(
+      (entry) => entry.original.id === templateExerciseId
+        && entry.original.exercise_id === slot?.exercise_id
+        && entry.exercise_ids.includes(input.exercise_id));
+    if (!slot || (slot.exercise_id !== input.exercise_id && !approvedSwap)) {
+      templateExerciseId = null; // dangling or swapped slot → exercise-only log
+    } else {
+      slotIsWarmup = slot.is_warmup === 1 ? 1 : 0;
+    }
+  }
+
+  let isWarmupInt: number;
+  if (typeof input.is_warmup === 'boolean') {
+    isWarmupInt = input.is_warmup ? 1 : 0;
+  } else {
+    isWarmupInt = slotIsWarmup ?? 0;
+  }
+
+  // Collision-safe set_index. MCP and iOS each compute set_index
+  // independently, so two writers could pick the same index for the same
+  // (session, exercise, is_warmup) — the bug that produced two set_index=3
+  // squat sets. Renumber on collision: keep the provided index unless a live
+  // row already holds it, in which case bump to max+1. The partial unique
+  // index ux_set_slot (migration 0013) is the hard backstop for races.
+  let setIndex = input.set_index;
+  const clash = await db
+    .prepare(
+      `SELECT 1 FROM set_logs
+       WHERE session_id = ?1 AND exercise_id = ?2 AND set_index = ?3
+         AND is_warmup = ?4 AND deleted_at IS NULL LIMIT 1`,
+    )
+    .bind(canonicalSessionId, input.exercise_id, setIndex, isWarmupInt)
+    .first();
+  if (clash) {
+    const max = await db
+      .prepare(
+        `SELECT COALESCE(MAX(set_index), 0) AS m FROM set_logs
+         WHERE session_id = ?1 AND exercise_id = ?2 AND is_warmup = ?3
+           AND deleted_at IS NULL`,
+      )
+      .bind(canonicalSessionId, input.exercise_id, isWarmupInt)
+      .first<{ m: number }>();
+    setIndex = (max?.m ?? 0) + 1;
+  }
+
+  // Timed-ness is stored per-set (never inferred from duration_s, which rep
+  // sets carry incidentally): an explicit flag wins; otherwise default to the
+  // exercise's catalog modality. Both 'timed' (planks/holds) and 'cardio'
+  // (erg/treadmill, migration 0026) are duration-driven, so a caller that
+  // omits is_timed while logging a cardio effort still stores it as timed.
+  let isTimedInt: number;
+  if (typeof input.is_timed === 'boolean') {
+    isTimedInt = input.is_timed ? 1 : 0;
+  } else {
+    const exRow = await db
+      .prepare('SELECT modality FROM exercises WHERE id = ?1')
+      .bind(input.exercise_id)
+      .first<{ modality: string | null }>();
+    isTimedInt = exRow?.modality === 'timed' || exRow?.modality === 'cardio' ? 1 : 0;
+  }
+
+  const setUpdatedAt = now();
+  const row: SetLogRow = {
+    id: input.id,
+    user_id: userId,
+    session_id: canonicalSessionId,
+    exercise_id: input.exercise_id,
+    template_exercise_id: templateExerciseId,
+    set_index: setIndex,
+    weight: input.weight,
+    reps: input.reps,
+    rpe: input.rpe ?? null,
+    is_warmup: isWarmupInt,
+    notes: input.notes ?? null,
+    logged_at: input.logged_at ?? setUpdatedAt,
+    updated_at: setUpdatedAt,
+    source: input.source,
+    duration_s: input.duration_s ?? null,
+    is_timed: isTimedInt,
+    deleted_at: null,
+    weight_unit: input.weight_unit ?? 'lb',
+  };
+  // The pre-check above resolves the common collision, but two concurrent
+  // writers can both pass it and then race on the INSERT — only the unique
+  // index ux_set_slot catches that. Honor the "renumber, don't reject"
+  // contract: on a slot-unique violation, recompute max+1 and retry rather
+  // than letting one writer's set be dropped. ON CONFLICT(id) DO NOTHING
+  // still covers a concurrent same-id retry (idempotency).
+  const recordedTargets = input.prescription && targetSession.runner_targets == null
+    ? await targetsForSetPrescription(db, userId, input.prescription, row.logged_at, targetSession.date) : null;
+  const insertAndStart = () => {
+    const ts = now();
+    return runWorkoutWriteBatch(db, [
+      db
+        .prepare(
+          `INSERT INTO set_logs
+           (id,session_id,exercise_id,template_exercise_id,set_index,weight,reps,rpe,is_warmup,notes,logged_at,source,duration_s,is_timed,deleted_at,user_id,updated_at,weight_unit)
+           SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,NULL,user_id,?17,?19
+             FROM sessions
+            WHERE id = ?2
+              AND user_id = ?18
+              AND status != 'discarded'
+              AND status != 'skipped'
+              AND attempt = ?15
+              AND (?16 = 1 OR write_protocol = 'legacy')
+           ON CONFLICT(id) DO NOTHING`,
+        )
+        .bind(
+          row.id, row.session_id, row.exercise_id, row.template_exercise_id, row.set_index,
+          row.weight, row.reps, row.rpe, row.is_warmup, row.notes, row.logged_at, row.source,
+          row.duration_s, row.is_timed, casAttempt, attemptScoped ? 1 : 0,
+          row.updated_at, userId, row.weight_unit,
+        ),
+      // Claim/start only when this owned UUID now exists. Keeping the INSERT
+      // first avoids mutating the session for a globally-colliding UUID, while
+      // the enclosing D1 batch remains one atomic linearization point: no
+      // legacy writer can slip between insertion and the protocol fence.
+      db
+        .prepare(
+          `UPDATE sessions
+              SET status = CASE WHEN status = 'planned' THEN 'in_progress' ELSE status END,
+                  runner_targets = CASE
+                    WHEN runner_targets IS NULL AND started_at IS NULL AND status = 'planned'
+                      THEN CASE WHEN ?8=1 THEN ?9 ELSE ${runnerTargetSnapshotSQL("COALESCE((SELECT workout_id FROM template_exercises WHERE id=?7), sessions.workout_id)", '?2', 'sessions.user_id', programWeekTargetsSQL('sessions.date'))} END
+                    ELSE runner_targets END,
+                  started_at = COALESCE(started_at, ?2),
+                  updated_at = ?2,
+                  write_protocol = CASE
+                    WHEN ?4 = 1 THEN 'attempt-v1'
+                    ELSE write_protocol
+                  END
+            WHERE id = ?1
+              AND status != 'discarded'
+              AND status != 'skipped'
+              AND attempt = ?3
+              AND (?6 = 1 OR write_protocol = 'legacy')
+              AND EXISTS (
+                SELECT 1 FROM set_logs
+                 WHERE id = ?5 AND session_id = ?1
+              )`,
+        )
+        .bind(
+          canonicalSessionId,
+          ts,
+          casAttempt,
+          claimAttemptProtocol ? 1 : 0,
+          row.id,
+          attemptScoped ? 1 : 0,
+          row.template_exercise_id,
+          input.prescription ? 1 : 0,
+          recordedTargets,
+        ),
+      // Capture both the target generation and the canonical current row at
+      // the same linearization point. The latter gives a stable conflict body
+      // when discard/restart moved the generation during this request.
+      db
+        .prepare('SELECT * FROM sessions WHERE id = ?1 AND attempt = ?2')
+        .bind(canonicalSessionId, casAttempt),
+      db
+        .prepare('SELECT * FROM sessions WHERE id = ?1')
+        .bind(canonicalSessionId),
+      selectExisting(),
+    ]);
+  };
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const [inserted, started, sessionState, currentState, winnerState] =
+        await insertAndStart();
+      const sessionAtWrite = sessionState!.results[0] as SessionRow | undefined;
+      const currentSession = currentState!.results[0] as SessionRow | undefined;
+      const winner = winnerState!.results[0] as SetLogRow | undefined;
+      if (inserted!.meta.changes === 0) {
+        // A concurrent same-id request won after our pre-read. Return only a
+        // winner from this owned canonical session; a UUID already used by a
+        // different session remains indistinguishable from a missing target.
+        if (winner && (sessionAtWrite || currentSession)) {
+          return {
+            set: winner,
+            deduped: true,
+            session: sessionAtWrite ?? currentSession!,
+          };
+        }
+        if (
+          currentSession &&
+          !attemptScoped &&
+          currentSession.write_protocol !== 'legacy'
+        ) {
+          throw new SessionWriteConflictError(
+            'session_attempt_required',
+            currentSession,
+          );
+        }
+        if (!sessionAtWrite && currentSession) {
+          throw new SessionWriteConflictError(
+            'session_attempt_conflict',
+            currentSession,
+            casAttempt,
+          );
+        }
+        if (sessionAtWrite?.status === 'discarded') {
+          throw new SessionWriteConflictError('session_discarded', sessionAtWrite);
+        }
+        if (sessionAtWrite?.status === 'skipped') {
+          throw new SessionWriteConflictError(
+            'session_state_conflict',
+            sessionAtWrite,
+          );
+        }
+        throw new Error('session_not_found');
+      }
+      // The claim/start and insert share one transaction, so a successful insert
+      // always has a matching non-discarded session update. Keep this check as
+      // a defensive invariant rather than allowing a stranded live set.
+      if (started!.meta.changes === 0) {
+        if (currentSession && currentSession.attempt !== casAttempt) {
+          throw new SessionWriteConflictError(
+            'session_attempt_conflict',
+            currentSession,
+            casAttempt,
+          );
+        }
+        if (currentSession) {
+          if (currentSession.status === 'skipped') {
+            throw new SessionWriteConflictError(
+              'session_state_conflict',
+              currentSession,
+            );
+          }
+          throw new SessionWriteConflictError('session_discarded', currentSession);
+        }
+        throw new Error('session_not_found');
+      }
+      if (!sessionAtWrite) throw new Error('session_not_found');
+      return { set: row, deduped: false, session: sessionAtWrite };
+    } catch (e) {
+      const msg = String((e as Error)?.message ?? '');
+      const slotConflict = /unique constraint failed/i.test(msg) && /set_index/i.test(msg);
+      if (!slotConflict || attempt >= 5) throw e;
+      const max = await db
+        .prepare(
+          `SELECT COALESCE(MAX(set_index), 0) AS m FROM set_logs
+           WHERE session_id = ?1 AND exercise_id = ?2 AND is_warmup = ?3
+             AND deleted_at IS NULL`,
+        )
+        .bind(canonicalSessionId, input.exercise_id, isWarmupInt)
+        .first<{ m: number }>();
+      row.set_index = (max?.m ?? 0) + 1;
+    }
+  }
+}
+
+/**
+ * Most recent live non-MCP set for (user, exercise, weight, reps, is_warmup)
+ * within a sliding window (default 120s). Explicit set index / duration
+ * values narrow the match; omitted values remain ambiguous wildcards. Used
+ * by MCP log_set to refuse cross-channel phantom dupes when iOS just logged
+ * the same work; REST writes are not gated (their idempotency is the row UUID).
+ */
+export async function findRecentMatchingSet(
+  db: D1Database,
+  userId: string,
+  args: {
+    exercise_id: string;
+    weight: number;
+    reps: number;
+    is_warmup: boolean;
+    set_index?: number | null;
+    duration_s?: number | null;
+    weight_unit?: 'lb' | 'kg';
+    within_ms?: number;
+    workout_scope?: { date: string; slot: number };
+  },
+): Promise<SetLogRow | null> {
+  const since = now() - (args.within_ms ?? 120_000);
+  const row = await db
+    .prepare(
+      `SELECT sl.* FROM set_logs sl
+       JOIN sessions s ON s.id = sl.session_id
+       WHERE sl.user_id = ?1
+         AND s.user_id = ?1
+         AND sl.exercise_id = ?2
+         AND sl.weight = ?3
+         AND sl.reps = ?4
+         AND sl.is_warmup = ?5
+         AND sl.source <> 'mcp'
+         AND sl.deleted_at IS NULL
+         AND sl.logged_at >= ?6
+         AND (?7 IS NULL OR sl.set_index = ?7)
+         AND (?8 IS NULL OR sl.duration_s = ?8)
+         AND (?9 IS NULL OR sl.weight_unit = ?9)
+         AND (?10 IS NULL OR s.date <> ?10 OR s.slot = ?11)
+       ORDER BY sl.logged_at DESC LIMIT 1`,
+    )
+    .bind(
+      userId,
+      args.exercise_id,
+      args.weight,
+      args.reps,
+      args.is_warmup ? 1 : 0,
+      since,
+      args.set_index ?? null,
+      args.duration_s ?? null,
+      args.weight_unit ?? null,
+      args.workout_scope?.date ?? null,
+      args.workout_scope?.slot ?? null,
+    )
+    .first<SetLogRow>();
+  return row ?? null;
+}
+
+/** The unit an MCP set inherits when it names none: the session workout's
+ * slot for that exercise (matching warm-up flag first), as the block's week
+ * for the session date sets it (`weekTargets`), else lb. */
+export async function slotWeightUnit(
+  db: D1Database, workoutId: string | null, exerciseId: string, isWarmup: boolean,
+  weekTargets: Record<string, SlotTargets> = {},
+): Promise<'lb' | 'kg'> {
+  if (!workoutId) return 'lb';
+  const slot = await db.prepare(`SELECT id, target_weight_unit FROM template_exercises
+      WHERE workout_id=?1 AND exercise_id=?2
+      ORDER BY is_warmup=?3 DESC, order_index, id LIMIT 1`)
+    .bind(workoutId, exerciseId, isWarmup ? 1 : 0).first<{ id: string; target_weight_unit: string }>();
+  const unit = (slot && weekTargets[slot.id]?.target_weight_unit) ?? slot?.target_weight_unit;
+  return unit === 'kg' ? 'kg' : 'lb';
+}
+
+export async function patchSet(
+  db: D1Database,
+  userId: string,
+  setId: string,
+  patch: {
+    weight?: number;
+    weight_unit?: 'lb' | 'kg';
+    reps?: number;
+    rpe?: number | null;
+    notes?: string | null;
+    duration_s?: number | null;
+    deleted?: boolean;
+  },
+  expected?: { session_id: string; attempt: number; updated_at: number },
+): Promise<(SetLogRow & { session?: SessionRow }) | null> {
+  if (patch.deleted === false) {
+    throw new Error('set_undelete_unsupported');
+  }
+  const row = await db
+    .prepare(
+      `SELECT sl.*, s.attempt AS session_attempt
+         FROM set_logs sl JOIN sessions s ON s.id = sl.session_id
+       WHERE sl.id = ?1 AND s.user_id = ?2`,
+    )
+    .bind(setId, userId)
+    .first<SetLogRow & { session_attempt: number }>();
+  if (!row) return null;
+  const has = (field: keyof typeof patch) =>
+    Object.prototype.hasOwnProperty.call(patch, field);
+  const matches = (candidate: SetLogRow) => {
+    if (patch.deleted === true) return candidate.deleted_at != null;
+    if (candidate.deleted_at != null) return false;
+    return (['weight', 'weight_unit', 'reps', 'rpe', 'notes', 'duration_s'] as const)
+      .every((field) => !has(field) || candidate[field] === patch[field]);
+  };
+  if (expected && (row.session_id !== expected.session_id || row.session_attempt !== expected.attempt
+      || (row.updated_at !== expected.updated_at && !matches(row)))) {
+    throw new Error('set_correction_conflict');
+  }
+  if (expected && row.deleted_at != null && patch.deleted !== true) {
+    throw new Error('set_correction_conflict');
+  }
+  const ts = now();
+  const statements: D1PreparedStatement[] = [];
+  const deletedAt =
+    patch.deleted === undefined
+      ? row.deleted_at
+      : row.deleted_at ?? ts;
+  // Build a field-only UPDATE. A duration correction must not rewrite a
+  // concurrently changed weight/RPE or resurrect a concurrently deleted row;
+  // deleted_at is touched only for an explicit soft-delete. Undelete is not a
+  // public operation: an old-attempt tombstone must never rejoin a restarted
+  // workout generation.
+  const values: unknown[] = [setId];
+  const assignments: string[] = [];
+  const assign = (column: string, value: unknown) => {
+    values.push(value);
+    assignments.push(`${column}=?${values.length}`);
+  };
+  if (has('weight')) assign('weight', patch.weight);
+  if (has('weight_unit')) assign('weight_unit', patch.weight_unit);
+  if (has('reps')) assign('reps', patch.reps);
+  if (has('rpe')) assign('rpe', patch.rpe);
+  if (has('notes')) assign('notes', patch.notes);
+  if (has('duration_s')) assign('duration_s', patch.duration_s);
+  if (has('deleted')) assign('deleted_at', deletedAt);
+  if (assignments.length > 0 && (!expected || !matches(row))) {
+    values.push(ts);
+    assignments.push(`updated_at=MAX(updated_at + 1, ?${values.length})`);
+    let condition = '';
+    if (expected) {
+      values.push(expected.updated_at, expected.session_id, expected.attempt);
+      condition = ` AND updated_at=?${values.length - 2}
+        AND session_id=?${values.length - 1}
+        AND EXISTS (SELECT 1 FROM sessions WHERE id=set_logs.session_id AND attempt=?${values.length})
+        AND deleted_at IS NULL`;
+    }
+    statements.push(db.prepare(`UPDATE set_logs SET ${assignments.join(', ')} WHERE id=?1${condition}`)
+      .bind(...values));
+  }
+  // Phantom-session guard. Logging a set promotes a session 'planned' ->
+  // 'in_progress' (see logSet). Deleting the LAST live set must do the
+  // inverse: an 'in_progress' session with zero live sets records no work,
+  // yet without this it lingers as a stale "in progress" row that the
+  // calendar/agenda (and MCP get_today_workout) still surface. Revert it to
+  // 'planned' and clear started_at so EVERY client — app, REST, MCP — agrees
+  // the day is simply the upcoming workout again. Fires only on a real
+  // live->deleted transition (field-only edits never touch
+  // status), and only for 'in_progress' (a 'completed' session is NOT
+  // auto-un-completed — that's a deliberate terminal state).
+  const isDelete = patch.deleted === true;
+  if (isDelete) {
+    // Check both facts at the write's linearization point: this deletion must
+    // still belong to the generation we read, and no concurrent writer may
+    // have installed another live set. If a new set wins first, NOT EXISTS is
+    // false; if this demotion wins first, logSet's ordered batch promotes the
+    // same attempt back to in_progress. A discard/restart advances `attempt`,
+    // so a stale deletion can never demote the newer workout.
+    statements.push(db.prepare(
+        `UPDATE sessions
+            SET status = 'planned', started_at = NULL, updated_at = MAX(updated_at + 1, ?2)
+          WHERE id = ?1
+            AND status = 'in_progress' AND kind = 'planned'
+            AND attempt = ?3
+            AND NOT EXISTS (
+              SELECT 1 FROM set_logs
+               WHERE session_id = ?1 AND deleted_at IS NULL
+            )`,
+      )
+      .bind(row.session_id, ts, row.session_attempt));
+  }
+  // Keep deletion and last-set demotion atomic; a lost reply can safely
+  // replay the desired state without reopening or retargeting a workout.
+  if (statements.length) await runWorkoutWriteBatch(db, statements);
+  const fresh = await db.prepare(
+    `SELECT sl.*, s.attempt AS session_attempt FROM set_logs sl
+       JOIN sessions s ON s.id=sl.session_id WHERE sl.id=?1 AND s.user_id=?2`)
+    .bind(setId, userId).first<SetLogRow & { session_attempt: number }>();
+  if (expected && (!fresh || fresh.session_attempt !== expected.attempt || !matches(fresh))) {
+    throw new Error('set_correction_conflict');
+  }
+  if (!fresh) return null;
+  const { session_attempt, ...set } = fresh;
+  if (!expected) return set;
+  const session = await db.prepare('SELECT * FROM sessions WHERE id=?1 AND user_id=?2')
+    .bind(set.session_id, userId).first<SessionRow>();
+  if (!session || session.attempt !== expected.attempt) throw new Error('set_correction_conflict');
+  return { ...set, session };
+}
+
+// ---- read models ---------------------------------------------------------
+
+/** Change a movement for this attempt only. Session CAS + plan-version CAS are
+ * enforced in the same transaction as the audit. No log or plan is rewritten. */
+export async function swapSessionExercise(db: D1Database, userId: string, sessionId: string,
+  slotId: string, input: { to_exercise: string; expected_attempt: number;
+    expected_version: number; expected_revision: number }) {
+  const session = await db.prepare('SELECT * FROM sessions WHERE id=?1 AND user_id=?2')
+    .bind(sessionId, userId).first<SessionRow>();
+  if (!session) return { error: 'not_found' as const };
+  if (session.attempt !== input.expected_attempt || !['planned', 'in_progress'].includes(session.status)) {
+    return { error: 'session_conflict' as const };
+  }
+  const plan = await getPlanTree(db, userId);
+  if (!plan || plan.version !== input.expected_version) return { error: 'plan_conflict' as const };
+  const slot = plan.workouts.flatMap((day) => day.exercises).find((slot) => slot.id === slotId);
+  if (!slot) return { error: 'not_found' as const };
+  const swaps = parseSessionExerciseSwaps(session.exercise_swaps, session.attempt);
+  if (swaps.revision !== input.expected_revision) return { error: 'swap_conflict' as const };
+  const exercise = await resolveExercise(db, input.to_exercise);
+  if (!exercise) return { error: 'exercise_not_found' as const };
+  const destination = await db.prepare('SELECT * FROM exercises WHERE id=?1')
+    .bind(exercise.id).first<{ id: string; name: string; unit: string; primary_muscle: string;
+      modality: string; laterality: string; load_mode: string; demo_slug: string | null }>();
+  if (!destination) return { error: 'exercise_not_found' as const };
+  const timed = ['timed', 'cardio'].includes(slot.exercise_modality) || slot.target_duration_s != null;
+  if (timed !== ['timed', 'cardio'].includes(destination.modality)) {
+    return { error: 'incompatible_measure' as const };
+  }
+  const previous = applicableSessionSwap(session.exercise_swaps, slot, session.attempt);
+  const replacement: EnrichedTemplateExercise = { ...slot,
+    exercise_id: destination.id, exercise_name: destination.name, exercise_unit: destination.unit,
+    exercise_muscle: destination.primary_muscle, exercise_modality: destination.modality,
+    exercise_laterality: destination.laterality, exercise_load_mode: destination.load_mode,
+    exercise_demo_slug: destination.demo_slug, target_weight: null, cues: null, progression: null };
+  const entry = { original: slot, replacement,
+    exercise_ids: [...new Set([slot.exercise_id, ...(previous?.exercise_ids ?? []), destination.id])] };
+  const next = JSON.stringify({ attempt: session.attempt, revision: swaps.revision + 1,
+    entries: [...swaps.entries.filter((entry) => entry.original.id !== slotId), entry] });
+  const auditID = uuid();
+  const results = await runWorkoutWriteBatch(db, [
+    db.prepare(`UPDATE sessions SET exercise_swaps=?3, updated_at=MAX(updated_at+1,?4)
+      WHERE id=?1 AND user_id=?2 AND attempt=?5 AND status IN ('planned','in_progress')
+        AND exercise_swaps IS ?6
+        AND EXISTS (SELECT 1 FROM plans WHERE id=?7 AND user_id=?2 AND status='active' AND version=?8)
+      RETURNING *`).bind(sessionId, userId, next, now(), input.expected_attempt,
+        session.exercise_swaps ?? null, plan.id, input.expected_version),
+    db.prepare(`INSERT INTO audit_log(id,user_id,actor,tool,args,result,created_at)
+      SELECT ?1,?2,'ios','swap_session_exercise',?3,?4,?5 WHERE changes()>0`)
+      .bind(auditID, userId, JSON.stringify({ session_id: sessionId, slot_id: slotId, ...input }), next, now()),
+  ]);
+  const updated = results[0]?.results[0] as SessionRow | undefined;
+  return updated ?? { error: 'swap_conflict' as const };
+}
+
+export async function getState(
+  db: D1Database,
+  userId: string,
+  sincePlanVersion: number,
+  setsSince: number,
+  eventsSince = 0,
+  activitiesSince = 0,
+  logSince = 0,
+) {
+  // Capture the response watermark before any collection read. A write that
+  // commits after its collection was read will then have updated_at greater
+  // than this value and cannot be skipped by the next overlapping pull.
+  const serverTime = now();
+  const plan = await getActivePlan(db, userId);
+  const baseTree =
+    plan && plan.version > sincePlanVersion ? await loadPlanTree(db, plan) : null;
+  // The weekly schedule rides the existing plan-tree sync: it is only
+  // returned when the tree is (i.e. when plans.version advanced past the
+  // client cursor). Parsed via the single meta accessor so iOS never
+  // hand-parses meta. Null when nothing changed — no new endpoint.
+  // Parsed via the single meta accessor so iOS never hand-parses meta. The
+  // authored multisport intent (race/periodization/trips/stress_model) rides
+  // the same plan-tree sync as the schedule — surfaced here pre-parsed.
+  const baseMeta = baseTree ? parsePlanMeta(baseTree.meta) : null;
+  const tree =
+    baseTree && baseMeta
+      ? {
+          ...baseTree,
+          schedule: baseMeta.schedule,
+          race: baseMeta.race ?? null,
+          periodization: baseMeta.periodization ?? [],
+          trips: baseMeta.trips ?? [],
+          stress_model: baseMeta.stress_model ?? null,
+        }
+      : null;
+  const sessions = await db
+    .prepare("SELECT * FROM sessions WHERE user_id = ?1 AND updated_at > ?2 ORDER BY date")
+    .bind(userId, setsSince)
+    .all<SessionRow>();
+  // Full reload preserves the existing complete shape. Incremental pulls use
+  // the server-owned mutable cursor directly from the member-first index and
+  // include soft-deleted rows as tombstones. Both read set_logs.user_id
+  // (migration 0034: backfilled, asserted, and trigger-maintained for legacy
+  // inserts) so neither needs to join sessions for ownership.
+  const sets = setsSince > 0
+    ? await db.prepare(
+        'SELECT * FROM set_logs WHERE user_id=?1 AND updated_at > ?2 ORDER BY updated_at,id')
+        .bind(userId, setsSince).all<SetLogRow>()
+    : await db.prepare(
+        'SELECT * FROM set_logs WHERE user_id=?1 ORDER BY logged_at')
+        .bind(userId).all<SetLogRow>();
+  // external_events ride a SEPARATE watermark (synced_at epoch-ms). This is
+  // a server-owned reconciled cache: NOT gated on plans.version and a ride
+  // sync NEVER bumps it. TWO explicit modes (iOS must match):
+  //
+  //  - FULL RELOAD  (events_since absent OR 0): return the full CURRENT set
+  //    of NON-deleted external_events. The full-reload path does a full
+  //    replace (DESIGN §7, same as since=0/sets_since=0) so the server must
+  //    NOT hand it tombstones — there is nothing to reconcile them against.
+  //  - INCREMENTAL  (events_since > 0): return every row touched since the
+  //    cursor INCLUDING soft-deleted ones (deleted_at set), so a syncing
+  //    client learns about removals and drops them — exactly the set_logs
+  //    delta+tombstone pattern.
+  const events =
+    eventsSince > 0
+      ? await db
+          .prepare(
+            'SELECT * FROM external_events WHERE user_id = ?1 AND synced_at > ?2 ORDER BY synced_at',
+          )
+          .bind(userId, eventsSince)
+          .all<ExternalEventRow>()
+      : await db
+          .prepare(
+            'SELECT * FROM external_events WHERE user_id = ?1 AND deleted_at IS NULL ORDER BY synced_at',
+          )
+          .bind(userId)
+          .all<ExternalEventRow>();
+  // external_activities ride their OWN watermark (activities_since), exactly
+  // like external_events: a separate server-owned reconciled cache (COMPLETED
+  // endurance actuals), never gated on plans.version. Same two modes:
+  //  - FULL RELOAD  (activities_since absent/0): full current non-deleted set
+  //    (full replace on the client — no tombstones to reconcile).
+  //  - INCREMENTAL  (activities_since > 0): every row touched since the cursor
+  //    INCLUDING soft-deleted ones, so a syncing client learns about removals.
+  const activities =
+    activitiesSince > 0
+      ? await db
+          .prepare(
+            'SELECT * FROM external_activities WHERE user_id = ?1 AND synced_at > ?2 ORDER BY synced_at',
+          )
+          .bind(userId, activitiesSince)
+          .all<ExternalActivityRow>()
+      : await db
+          .prepare(
+            'SELECT * FROM external_activities WHERE user_id = ?1 AND deleted_at IS NULL ORDER BY date',
+          )
+          .bind(userId)
+          .all<ExternalActivityRow>();
+  // Generic activity log (M3 — `activities` table). Append-only,
+  // user-authored. Same delta-sync pattern as set_logs / external_events:
+  //  - FULL RELOAD  (log_since absent/0): full current non-deleted set.
+  //  - INCREMENTAL  (log_since > 0): every row touched since the cursor
+  //    INCLUDING soft-deleted ones, so a syncing client learns about
+  //    removals. Uses server-owned `updated_at`, never the client-authored
+  //    event time, so clock skew cannot strand rows (see
+  //    listActivitiesForUser for the delta-sync contract).
+  const userActivities =
+    logSince > 0
+      ? await listActivitiesForUser(db, userId, logSince)
+      : (
+          await db
+            .prepare(
+              'SELECT * FROM activities WHERE user_id = ?1 AND deleted_at IS NULL ORDER BY logged_at',
+            )
+            .bind(userId)
+            .all<ActivityRow>()
+        ).results;
+  return {
+    plan: tree,
+    plan_version: plan?.version ?? 0,
+    // Rollout capability for the two intervals.icu cache cursors. Older
+    // Workers rewrote synced_at on every reconcile, so collection presence
+    // alone cannot tell iOS that a nonzero cursor is safe. P2 lands the event
+    // and activity semantics together; one version gates both collections.
+    external_sync_cursors_version: 2 as const,
+    sessions: sessions.results,
+    sets: sets.results,
+    external_events: events.results,
+    external_activities: activities.results.map(withActivityAttribution),
+    activities: userActivities,
+    server_time: serverTime,
+  };
+}
+
+export async function getInProgressSession(
+  db: D1Database,
+  userId: string,
+): Promise<SessionRow | null> {
+  return db
+    .prepare(
+      "SELECT * FROM sessions WHERE user_id = ?1 AND status = 'in_progress' ORDER BY updated_at DESC LIMIT 1",
+    )
+    .bind(userId)
+    .first<SessionRow>();
+}
+
+export async function getSetsForSession(db: D1Database, sessionId: string) {
+  const r = await db
+    .prepare(
+      'SELECT * FROM set_logs WHERE session_id = ?1 AND deleted_at IS NULL ORDER BY logged_at',
+    )
+    .bind(sessionId)
+    .all<SetLogRow>();
+  return r.results;
+}
+
+/**
+ * Sets for SEVERAL sessions in one query — the batched form of
+ * `getSetsForSession`, with the same columns, `deleted_at` filter and
+ * `logged_at` ordering. Callers group the flat result by `session_id`; the
+ * relative order inside each session is the single-session order.
+ *
+ * The coach brief reads up to eight recent sessions at once, so the per-session
+ * read was an N+1 on the hottest MCP path.
+ */
+export async function getSetsForSessions(
+  db: D1Database,
+  userId: string,
+  sessionIds: string[],
+): Promise<SetLogRow[]> {
+  if (sessionIds.length === 0) return [];
+  const placeholders = sessionIds.map((_, i) => `?${i + 2}`).join(',');
+  const r = await db
+    .prepare(
+      `SELECT * FROM set_logs
+        WHERE user_id = ?1 AND session_id IN (${placeholders}) AND deleted_at IS NULL
+        ORDER BY logged_at`,
+    )
+    .bind(userId, ...sessionIds)
+    .all<SetLogRow>();
+  return r.results;
+}
+
+export async function getRecentSessions(
+  db: D1Database,
+  userId: string,
+  n: number,
+  throughDate = '9999-12-31',
+  excludeDate = '',
+): Promise<SessionRow[]> {
+  // Exclude 'discarded' — a thrown-away session is not "recent training"
+  // and must not surface as last_session in the coach brief / today
+  // context. (Visual calendar surfaces vanish it via the projection;
+  // set-based reads via deleted_at. This is the one session-list read
+  // that needs an explicit filter.)
+  const r = await db
+    .prepare("SELECT * FROM sessions WHERE user_id = ?1 AND status != 'discarded' AND date <= ?3 AND date != ?4 ORDER BY date DESC, slot DESC, id LIMIT ?2")
+    .bind(userId, n, throughDate, excludeDate)
+    .all<SessionRow>();
+  return r.results;
+}
+
+/**
+ * Most recent COMPLETED session, optionally excluding a date (usually
+ * today). Coaching context wants "the last real training session" — a
+ * skipped/planned row in between (status != 'completed') should not obscure
+ * it. Distinct from getRecentSessions, which returns the latest row of any
+ * non-discarded status.
+ */
+export async function getLastCompletedSession(
+  db: D1Database,
+  userId: string,
+  excludeDate?: string,
+  throughDate = '9999-12-31',
+): Promise<SessionRow | null> {
+  return db
+    .prepare(
+      "SELECT * FROM sessions WHERE user_id = ?1 AND status = 'completed' AND date != ?2 AND date <= ?3 ORDER BY date DESC, slot DESC, id LIMIT 1",
+    )
+    .bind(userId, excludeDate ?? '', throughDate)
+    .first<SessionRow>();
+}
+
+export async function getSessionByDate(
+  db: D1Database,
+  userId: string,
+  date: string,
+  slot = 0,
+): Promise<SessionRow | null> {
+  // Excludes 'discarded': a thrown-away session must read as "no session
+  // on this date" for the MCP coach reads that call this (get_today_workout,
+  // get_session_log) — same vanish semantics the calendar projection
+  // applies. Revival/discard never route through here (getOrCreateSession
+  // has its own query; discardSession takes a session id), so filtering is
+  // safe.
+  return db
+    .prepare("SELECT * FROM sessions WHERE user_id = ?1 AND date = ?2 AND slot = ?3 AND status != 'discarded' LIMIT 1")
+    .bind(userId, date, slot)
+    .first<SessionRow>();
+}
+
+export async function getWorkoutSummary(
+  db: D1Database, userId: string, sessionId: string,
+): Promise<WorkoutSummary | null> {
+  const owned = `SELECT id FROM sessions WHERE id=?1 AND user_id=?2 AND status!='discarded'`;
+  const [sessionResult, setResult, exerciseResult, previousResult] = await db.batch([
+    db.prepare(`SELECT * FROM sessions WHERE id IN (${owned})`).bind(sessionId, userId),
+    db.prepare(`SELECT * FROM set_logs WHERE session_id IN (${owned}) AND deleted_at IS NULL`).bind(sessionId, userId),
+    db.prepare(`SELECT e.* FROM exercises e WHERE e.id IN (
+      SELECT exercise_id FROM set_logs WHERE session_id IN (${owned}) AND deleted_at IS NULL)`)
+      .bind(sessionId, userId),
+    // Bests stay per load and unit (24 kg is not 24 lb); summarizeWorkout
+    // matches the same physical load across units (24 kg and 53 lb).
+    db.prepare(`SELECT sl.exercise_id,sl.weight,sl.weight_unit,sl.is_timed,MAX(sl.reps) AS reps,
+        MAX(COALESCE(sl.duration_s,sl.reps)) AS duration_s
+      FROM set_logs sl JOIN sessions s ON s.id=sl.session_id
+      WHERE s.user_id=?2 AND s.status='completed' AND sl.deleted_at IS NULL AND sl.is_warmup=0
+        AND s.date < (SELECT date FROM sessions WHERE id IN (${owned}))
+        AND sl.exercise_id IN (SELECT exercise_id FROM set_logs WHERE session_id IN (${owned}) AND deleted_at IS NULL)
+      GROUP BY sl.exercise_id,sl.weight,sl.weight_unit,sl.is_timed`).bind(sessionId, userId),
+  ]);
+  const session = sessionResult!.results[0] as unknown as SessionRow | undefined;
+  if (!session) return null;
+  return summarizeWorkout(session, setResult!.results as unknown as SummarySet[],
+    previousResult!.results as unknown as SummarySet[], exerciseResult!.results as unknown as SummaryExercise[],
+    parseRunnerTargets(session.runner_targets));
+}
+
+// ---- notes + audit -------------------------------------------------------
+
+export async function writeNote(
+  db: D1Database,
+  userId: string,
+  scope: string,
+  refId: string | null,
+  author: 'coach' | 'nick',
+  body: string,
+): Promise<void> {
+  await db
+    .prepare(
+      'INSERT INTO notes (id,user_id,scope,ref_id,author,body,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7)',
+    )
+    .bind(uuid(), userId, scope, refId, author, body, now())
+    .run();
+}
+
+export async function writeAudit(
+  db: D1Database,
+  userId: string,
+  tool: string,
+  args: unknown,
+  result: string,
+  actor: string = 'mcp',
+): Promise<void> {
+  await db
+    .prepare(
+      'INSERT INTO audit_log (id,user_id,actor,tool,args,result,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7)',
+    )
+    .bind(uuid(), userId, actor, tool, JSON.stringify(args).slice(0, 4000), result.slice(0, 500), now())
+    .run();
+}
+
+// ---- generic activity log (M3 — append-only, user-authored) --------------
+//
+// The "everything else" bucket alongside strength sessions (set_logs) and
+// intervals.icu actuals (external_activities). Same consistency model as
+// set_logs:
+//   - `id` is the CLIENT-generated UUID idempotency key (iOS outbox safe-
+//     retries land on ON CONFLICT(id) DO NOTHING). MCP-source rows mint the
+//     id server-side because Claude doesn't retry like the iOS outbox.
+//   - Rows are SOFT-deleted only (deleted_at) — preserve history.
+//   - Writes do NOT bump plans.version.
+
+export interface ActivityInput {
+  id: string;
+  date: string;
+  type: string;
+  title?: string | null;
+  duration_minutes?: number | null;
+  /** Precise duration (migration 0057); duration_minutes stays the rounded view. */
+  duration_s?: number | null;
+  avg_hr?: number | null;
+  calories?: number | null;
+  notes?: string | null;
+  logged_at?: number;
+}
+
+/**
+ * Idempotent on the client-generated `id`. A retry of the same id is a
+ * no-op (returns the existing row). The user_id is stamped from the
+ * authenticated caller, never trusted from the client body.
+ */
+export async function logActivity(
+  db: D1Database,
+  userId: string,
+  input: ActivityInput,
+  source: 'ios' | 'mcp',
+): Promise<ActivityRow> {
+  const updatedAt = now();
+  const loggedAt = input.logged_at ?? updatedAt;
+  await db
+    .prepare(
+      `INSERT INTO activities
+         (id,user_id,date,type,title,duration_minutes,notes,logged_at,source,deleted_at,updated_at,
+          duration_s,avg_hr,calories)
+       VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,NULL,?10,?11,?12,?13)
+       ON CONFLICT(id) DO NOTHING`,
+    )
+    .bind(
+      input.id,
+      userId,
+      input.date,
+      input.type,
+      input.title ?? null,
+      input.duration_minutes ?? null,
+      input.notes ?? null,
+      loggedAt,
+      source,
+      updatedAt,
+      input.duration_s ?? null,
+      input.avg_hr ?? null,
+      input.calories ?? null,
+    )
+    .run();
+  // Re-select so retries return the *original* persisted row (preserving the
+  // original logged_at/title/etc.), not the fresh-looking input.
+  const row = await db
+    .prepare('SELECT * FROM activities WHERE id = ?1 AND user_id = ?2')
+    .bind(input.id, userId)
+    .first<ActivityRow>();
+  if (!row) {
+    // Either the user_id mismatched (an id collision across users — should
+    // be impossible for UUIDs, but we surface it rather than silently
+    // returning a stale row from another user) or the insert failed
+    // mysteriously. Either way the caller needs to see this.
+    throw new Error('activity_insert_failed');
+  }
+  return row;
+}
+
+/**
+ * Soft-delete by id, scoped to the caller's user. Returns true on success,
+ * false if the row doesn't exist or belongs to another user — REST surfaces
+ * both as 404 (don't leak existence of other users' rows). Idempotent:
+ * deleting an already-deleted row returns false (the row still exists but
+ * the second call is a no-op delete).
+ */
+export async function softDeleteActivity(
+  db: D1Database,
+  userId: string,
+  activityId: string,
+): Promise<boolean> {
+  const ts = now();
+  const r = await db
+    .prepare(
+      `UPDATE activities
+          SET deleted_at = ?3,
+              updated_at = MAX(updated_at + 1, ?3)
+       WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NULL`,
+    )
+    .bind(activityId, userId, ts)
+    .run();
+  // D1 exposes meta.changes; fall back to 0 if absent.
+  const changes = (r as { meta?: { changes?: number } }).meta?.changes ?? 0;
+  return changes > 0;
+}
+
+/**
+ * Delta-sync read for /api/state. Returns every row TOUCHED since the
+ * server-owned cursor, including tombstones, so skewed client event times
+ * cannot strand a row behind a server-time watermark. Same pattern as the
+ * set_logs sync described in DESIGN.md §7.
+ */
+export async function listActivitiesForUser(
+  db: D1Database,
+  userId: string,
+  sinceMs: number,
+): Promise<ActivityRow[]> {
+  const rows = await db
+    .prepare(
+      `SELECT * FROM activities
+       WHERE user_id = ?1 AND updated_at > ?2
+       ORDER BY updated_at, id`,
+    )
+    .bind(userId, sinceMs)
+    .all<ActivityRow>();
+  return rows.results;
+}
+
+// ---- plan-tree mutations (MCP write tools) -------------------------------
+
+export interface ExerciseInput extends ExerciseGroupFields {
+  exercise: string;
+  order_index?: number;
+  target_sets: number;
+  target_reps: number;
+  target_reps_max?: number | null;
+  target_rpe?: number | null;
+  rest_seconds?: number;
+  target_weight?: number | null;
+  /** Unit of target_weight. Omitted keeps the matched slot's unit in a
+   *  rebuild, else lb. */
+  target_weight_unit?: 'lb' | 'kg';
+  /** Planned hold seconds for timed slots (mirrors set_logs.duration_s).
+   *  NULL/omitted → conventional reps slot. */
+  target_duration_s?: number | null;
+  progression?: unknown;
+  /** Planned run steps (src/runSteps.ts) on the outdoor run; null clears
+   *  them. Omitted keeps the matched slot's steps in a rebuild. */
+  run_steps?: unknown;
+  cues?: string | null;
+  /** 1 = prescribed warm-up slot (erg, mobility). Omitted/0 = working slot.
+   *  Preserved across a full-tree rebuild so update_plan never silently
+   *  strips a warm-up flag set via the REST editor. */
+  is_warmup?: number | boolean;
+}
+
+export type PrescriptionValidationError = {
+  error: 'invalid_fields';
+  fields: string[];
+};
+
+const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value);
+
+/** Runtime prescription validation shared by every plan-slot writer.
+ * Null is intentionally distinct from omission for nullable targets. */
+export function validateExercisePrescription(
+  value: Record<string, unknown>,
+  options: { partial?: boolean; modality?: string | null; exerciseId?: string | null } = {},
+): PrescriptionValidationError | null {
+  const bad = new Set<string>();
+  const has = (field: string) => Object.prototype.hasOwnProperty.call(value, field);
+  const required = (field: string) => !options.partial || has(field);
+  const integer = (field: string, min: number) => {
+    if (required(field) && (!Number.isSafeInteger(value[field]) || (value[field] as number) < min)) bad.add(field);
+  };
+  integer('target_sets', 1);
+  integer('target_reps', 1);
+  if (has('target_reps_max') && value.target_reps_max !== null &&
+      (!Number.isSafeInteger(value.target_reps_max) || (value.target_reps_max as number) < 1)) bad.add('target_reps_max');
+  if (has('target_rpe') && value.target_rpe !== null &&
+      (typeof value.target_rpe !== 'number' || !Number.isFinite(value.target_rpe) || value.target_rpe < 0 || value.target_rpe > 10)) bad.add('target_rpe');
+  if (has('rest_seconds') && (!Number.isSafeInteger(value.rest_seconds) || (value.rest_seconds as number) < 0)) bad.add('rest_seconds');
+  if (has('target_duration_s') && value.target_duration_s !== null &&
+      (!Number.isSafeInteger(value.target_duration_s) || (value.target_duration_s as number) <= 0)) bad.add('target_duration_s');
+  if (has('target_weight') && value.target_weight !== null &&
+      (typeof value.target_weight !== 'number' || !Number.isFinite(value.target_weight))) bad.add('target_weight');
+  if (typeof value.target_weight === 'number' && value.target_weight < 0 &&
+      options.modality !== 'bw' && options.modality !== 'timed') bad.add('target_weight');
+  if (has('target_weight_unit') && value.target_weight_unit !== undefined &&
+      value.target_weight_unit !== 'lb' && value.target_weight_unit !== 'kg') bad.add('target_weight_unit');
+  if (has('order_index') && (!Number.isSafeInteger(value.order_index) || (value.order_index as number) < 0)) bad.add('order_index');
+  if (has('cues') && value.cues !== null && typeof value.cues !== 'string') bad.add('cues');
+  if (has('progression') && value.progression !== null && !isPlainRecord(value.progression)) bad.add('progression');
+  if (has('group_id') && value.group_id !== undefined && value.group_id !== null && !isGroupId(value.group_id)) bad.add('group_id');
+  for (const field of ['group_rest_seconds', 'group_transition_seconds']) {
+    if (has(field) && value[field] !== undefined && value[field] !== null &&
+        (!Number.isSafeInteger(value[field]) || (value[field] as number) < 0)) bad.add(field);
+  }
+  if (has('is_warmup') && typeof value.is_warmup !== 'boolean' && value.is_warmup !== 0 && value.is_warmup !== 1) bad.add('is_warmup');
+  if (has('run_steps') && value.run_steps !== undefined && value.run_steps !== null) {
+    // Stored rows carry the text; callers send the array. Only a run has steps.
+    const steps = parseRunSteps(value.run_steps);
+    if (!steps.ok) for (const field of steps.fields) bad.add(field);
+    else if ((options.exerciseId ?? value.exercise_id) !== RUN_EXERCISE_ID) bad.add('run_steps');
+  }
+  if (typeof value.target_reps === 'number' && typeof value.target_reps_max === 'number' && value.target_reps_max < value.target_reps) bad.add('target_reps_max');
+  return bad.size === 0 ? null : { error: 'invalid_fields', fields: [...bad].sort() };
+}
+
+async function resolveOrThrow(db: D1Database, name: string): Promise<string> {
+  const ex = await resolveExercise(db, name);
+  if (!ex) throw new Error(`unknown_exercise:${name}`);
+  return (ex as { id: string }).id;
+}
+
+/**
+ * Transactional full-plan upsert with optimistic concurrency. If
+ * expectedVersion is given and stale, returns a conflict (Claude refetches
+ * and reapplies — DESIGN.md §7). Replaces the day/exercise tree atomically.
+ */
+export async function updatePlanTree(
+  db: D1Database,
+  userId: string,
+  input: {
+    name?: string;
+    meta?: unknown;
+    expected_version?: number | null;
+    workouts: {
+      day_label?: string | null;
+      name: string;
+      order_index?: number;
+      notes?: string | null;
+      tags?: string[];
+      archived_at?: number | null;
+      exercises?: ExerciseInput[];
+    }[];
+  },
+  attribution: PlanWriteAttribution = { actor: 'system', operation: 'update_plan' },
+  retryConcurrentBootstrap = true,
+): Promise<
+  | { conflict: true; current_version: number }
+  | { conflict: false; plan: PlanTree }
+  | { conflict: false; acknowledged: true; refresh_required: true; plan_id: string; version: number }
+  | { error: 'unknown_exercise'; queries: string[]; query: string }
+  | { error: 'active_workout' }
+  | PrescriptionValidationError | GroupConflict | GroupSetsMismatch
+> {
+  if (!input || !Array.isArray(input.workouts)) {
+    return { error: 'invalid_fields', fields: ['workouts'] };
+  }
+  if (input.name !== undefined && typeof input.name !== 'string') {
+    return { error: 'invalid_fields', fields: ['name'] };
+  }
+  if (input.meta !== undefined && input.meta !== null && !isPlainRecord(input.meta)) {
+    return { error: 'invalid_fields', fields: ['meta'] };
+  }
+  if (input.expected_version !== undefined && input.expected_version !== null &&
+      (!Number.isInteger(input.expected_version) || input.expected_version < 1)) {
+    return { error: 'invalid_fields', fields: ['expected_version'] };
+  }
+  const malformedDays: string[] = [];
+  input.workouts.forEach((day, dayIndex) => {
+    if (!isPlainRecord(day) || !Array.isArray(day.exercises ?? [])) {
+      malformedDays.push(`workouts.${dayIndex}`);
+      return;
+    }
+    (day.exercises ?? []).forEach((exercise, exerciseIndex) => {
+      if (!isPlainRecord(exercise)) malformedDays.push(`workouts.${dayIndex}.exercises.${exerciseIndex}`);
+    });
+  });
+  if (malformedDays.length > 0) return { error: 'invalid_fields', fields: malformedDays.sort() };
+  const explicitlyGroups = input.workouts.some((day) => (day.exercises ?? []).some((slot) =>
+    slot.group_id !== undefined || slot.group_rest_seconds !== undefined || slot.group_transition_seconds !== undefined));
+  if (explicitlyGroups && input.expected_version == null) return { error: 'invalid_fields', fields: ['expected_version'] };
+  let plan = await getActivePlan(db, userId);
+  let createsPlan = false;
+  if (
+    plan &&
+    input.expected_version != null &&
+    input.expected_version !== plan.version
+  ) {
+    return { conflict: true, current_version: plan.version };
+  }
+
+  // Resolve every exercise name up front, collecting EVERY unresolved
+  // name into `queries` instead of aborting on the first miss — a 16-
+  // exercise plan with two typos previously took two round trips
+  // (fail-fix-retry-fail-fix-retry). Now the agent fixes them in one
+  // pass. `query` is kept (= first unknown) for back-compat with the
+  // structured shape introduced in PR #12. Use list_exercises to
+  // discover valid catalog names.
+  const resolved = new Map<string, string>();
+  const resolvedModality = new Map<string, string>();
+  const unknown: string[] = [];
+  const seenUnknown = new Set<string>();
+  for (const d of input.workouts) {
+    for (const e of d.exercises ?? []) {
+      if (typeof e.exercise !== 'string' || e.exercise.trim() === '') {
+        if (!seenUnknown.has('<missing>')) {
+          seenUnknown.add('<missing>');
+          unknown.push('<missing>');
+        }
+        continue;
+      }
+      if (resolved.has(e.exercise) || seenUnknown.has(e.exercise)) continue;
+      const ex = await resolveExercise(db, e.exercise);
+      if (!ex) {
+        seenUnknown.add(e.exercise);
+        unknown.push(e.exercise);
+        continue;
+      }
+      resolved.set(e.exercise, (ex as { id: string }).id);
+      resolvedModality.set(e.exercise, (ex as { modality: string }).modality);
+    }
+  }
+  if (unknown.length > 0) {
+    return { error: 'unknown_exercise', queries: unknown, query: unknown[0]! };
+  }
+  const invalidFields = new Set<string>();
+  input.workouts.forEach((day, dayIndex) => {
+    if (typeof day.name !== 'string' || day.name.trim() === '') invalidFields.add(`workouts.${dayIndex}.name`);
+    if (day.order_index !== undefined && (!Number.isInteger(day.order_index) || day.order_index < 0)) invalidFields.add(`workouts.${dayIndex}.order_index`);
+    if (day.day_label !== undefined && day.day_label !== null && typeof day.day_label !== 'string') invalidFields.add(`workouts.${dayIndex}.day_label`);
+    if (day.notes !== undefined && day.notes !== null && typeof day.notes !== 'string') invalidFields.add(`workouts.${dayIndex}.notes`);
+    if (day.tags !== undefined && !validWorkoutTags(day.tags)) invalidFields.add(`workouts.${dayIndex}.tags`);
+    if (day.archived_at !== undefined && !validArchivedAt(day.archived_at)) invalidFields.add(`workouts.${dayIndex}.archived_at`);
+    (day.exercises ?? []).forEach((exercise, exerciseIndex) => {
+      const invalid = validateExercisePrescription(exercise as unknown as Record<string, unknown>, {
+        modality: resolvedModality.get(exercise.exercise),
+        exerciseId: resolved.get(exercise.exercise),
+      });
+      for (const field of invalid?.fields ?? []) invalidFields.add(`workouts.${dayIndex}.exercises.${exerciseIndex}.${field}`);
+    });
+  });
+  if (invalidFields.size > 0) return { error: 'invalid_fields', fields: [...invalidFields].sort() };
+  if (!plan) {
+    // Build the candidate only after the complete proposed tree has passed
+    // resolution and runtime validation. Its INSERT joins the tree rebuild's
+    // transaction below, so a downstream failure cannot leave an empty plan.
+    const prior = await db.prepare(
+      'SELECT COALESCE(MAX(version),0) AS version FROM plans WHERE user_id=?1',
+    ).bind(userId).first<{ version: number }>();
+    const ts = now();
+    plan = {
+      id: uuid(), user_id: userId, name: input.name ?? 'My Plan', status: 'active',
+      version: (prior?.version ?? 0) + 1, meta: null, created_at: ts, updated_at: ts,
+    };
+    createsPlan = true;
+  }
+
+  // Capture the OLD day identity (id → name/label) before the rebuild so we
+  // can re-point surviving schedule weekdays at the NEW day id whose
+  // name/label matches. Without this, every update_plan (e.g. "add a
+  // deadlift day") would silently wipe the entire weekly schedule because
+  // rebuilt days get fresh UUIDs.
+  // A rebuild replaces the library. One-time workouts (workout-library P3)
+  // are not part of it: they keep their ids, slots and dated sessions.
+  const oldDays = await db
+    .prepare(`SELECT * FROM workouts WHERE plan_id = ?1 AND one_time_date IS NULL
+      ORDER BY order_index, created_at, id`)
+    .bind(plan.id)
+    .all<WorkoutRow>();
+  const ts = now();
+  const newDayIds = input.workouts.map(() => uuid());
+  // Pair each occurrence once. Match stable labels before fallback names so
+  // a label-less duplicate cannot steal another workout's labeled identity.
+  const candidates = input.workouts.map((day, index) => ({ day, index }))
+    .sort((a, b) => (a.day.order_index ?? a.index) - (b.day.order_index ?? b.index) || a.index - b.index);
+  const unmatched = new Set(newDayIds);
+  const oldToNewDay = new Map<string, string | null>(oldDays.results.map(day => [day.id, null]));
+  for (const field of ['day_label', 'name'] as const) {
+    for (const old of oldDays.results) {
+      if (oldToNewDay.get(old.id) != null || old[field] == null) continue;
+      const match = candidates.find(({ day, index }) => unmatched.has(newDayIds[index]!)
+        && day[field]?.toLowerCase() === old[field]!.toLowerCase());
+      if (match) {
+        const id = newDayIds[match.index]!;
+        oldToNewDay.set(old.id, id);
+        unmatched.delete(id);
+      }
+    }
+  }
+
+  // FK-safe rebuild: sessions.workout_id and set_logs.template_exercise_id
+  // reference rows we're about to DELETE. With no ON DELETE clause on those
+  // FKs (schema 0001), a strict-FK delete fails the moment any real session
+  // or logged set points at a day_template/template_exercise that's being
+  // rebuilt — the agent-facing bug report's P0. The fix is a pre-DELETE
+  // REMAP: for every old → new (matched by day_label/name, then by
+  // exercise_id within the matched day), repoint the referencing rows at
+  // the NEW id; for genuinely-removed old rows, NULL out the reference
+  // (history preserved, plan-tree pointer detached). All in the same D1
+  // batch so it's atomic with the rebuild.
+
+  const metadataByNewId = new Map(newDayIds.map((id, index) => {
+    const day = input.workouts[index]!;
+    const old = oldDays.results.find(old => oldToNewDay.get(old.id) === id);
+    return [id, { tags: day.tags === undefined ? old?.tags ?? '[]' : normalizeWorkoutTags(day.tags),
+      archived_at: day.archived_at === undefined ? old?.archived_at ?? null : day.archived_at }];
+  }));
+  const newlyArchived = oldDays.results.filter(old => old.archived_at == null &&
+    metadataByNewId.get(oldToNewDay.get(old.id) ?? '')?.archived_at != null);
+  // Fence only archive targets; unrelated active workouts keep the existing remap contract.
+  for (const old of newlyArchived) if (await workoutIsActive(db, plan, old.id)) {
+    return { error: 'active_workout' };
+  }
+  const oldTeRows = await db
+    .prepare(
+      `SELECT te.*
+         FROM template_exercises te
+         JOIN workouts d ON d.id = te.workout_id
+        WHERE d.plan_id = ?1 AND d.one_time_date IS NULL
+        ORDER BY te.workout_id, te.order_index, te.created_at, te.id`,
+    )
+    .bind(plan.id)
+    .all<TemplateExerciseRow>();
+  // Even an older payload can move or remove grouped members during rebuild.
+  // Keep the legacy optional version contract only for an ungrouped document.
+  if (input.expected_version == null && oldTeRows.results.some((slot) => slot.group_id != null)) {
+    return { error: 'invalid_fields', fields: ['expected_version'] };
+  }
+
+  // is_warmup INHERITANCE map — positional by (newDayId, exercise_id) occurrence.
+  // Recovers the existing warm-up flag for a slot a caller leaves unspecified so
+  // a rebuild from an older client / tool-schema payload that omits is_warmup
+  // doesn't silently demote a prescribed warm-up. This MUST stay positional: the
+  // new slot's flag isn't known until we apply this very inheritance, so it can't
+  // key on is_warmup itself. The n-th old slot of an exercise pairs to the n-th
+  // new one (old rows ordered by order_index above).
+  const oldIsWarmupByDayExOcc = new Map<string, number>();
+  // A load unit follows the same positional match: a rebuild that omits
+  // target_weight_unit must not relabel a 24 kg target as 24 lb.
+  const oldUnitByDayExOcc = new Map<string, 'lb' | 'kg'>();
+  // Planned run steps a rebuild omits follow the same positional match, so a
+  // changed warm-up flag cannot drop them.
+  const oldRunStepsByDayExOcc = new Map<string, string | null>();
+  {
+    const occ = new Map<string, number>();
+    for (const ot of oldTeRows.results) {
+      const newDayId = oldToNewDay.get(ot.workout_id) ?? null;
+      if (newDayId == null) continue;
+      const exKey = `${newDayId}:${ot.exercise_id}`;
+      const o = occ.get(exKey) ?? 0;
+      occ.set(exKey, o + 1);
+      oldIsWarmupByDayExOcc.set(`${exKey}:${o}`, ot.is_warmup);
+      oldUnitByDayExOcc.set(`${exKey}:${o}`, ot.target_weight_unit ?? 'lb');
+      oldRunStepsByDayExOcc.set(`${exKey}:${o}`, ot.run_steps ?? null);
+    }
+  }
+
+  // Pre-generate new template_exercise ids AND each new slot's FINAL is_warmup
+  // (the inserter below reuses both), then index the new slots by
+  // (dayId, exId, is_warmup, occurrence-WITHIN-that-class). The set-log remap
+  // pairs warm-up→warm-up and working→working within an exercise, so removing a
+  // duplicate slot from ANY position — front, middle, or end of the duplicate
+  // run — detaches that class member's logged sets to null instead of sliding
+  // them onto a surviving slot of the OTHER class (e.g. a removed warm-up erg's
+  // sets must not land on the surviving working erg). A purely positional index
+  // only handled end removals. (A slot whose warm-up flag is genuinely flipped
+  // by the rebuild changes class, so its old sets detach rather than mis-count —
+  // the safe direction, consistent with the dangling/swap guards.)
+  const teIdPerExerciseOccurrence: string[][] = input.workouts.map((d) =>
+    (d.exercises ?? []).map(() => uuid()),
+  );
+  const isWarmupPerOccurrence: number[][] = input.workouts.map((d) =>
+    (d.exercises ?? []).map(() => 0),
+  );
+  const unitPerOccurrence: ('lb' | 'kg')[][] = input.workouts.map((d) =>
+    (d.exercises ?? []).map(() => 'lb' as const),
+  );
+  const runStepsPerOccurrence: (string | null)[][] = input.workouts.map((d) =>
+    (d.exercises ?? []).map(() => null),
+  );
+  const newTeIdByClassOcc = new Map<string, string>();
+  {
+    const posOcc = new Map<string, number>(); // positional (exId) — inheritance lookup
+    const classOcc = new Map<string, number>(); // (exId, is_warmup) — remap pairing
+    input.workouts.forEach((d, di) => {
+      const dayId = newDayIds[di]!;
+      (d.exercises ?? []).forEach((e, ei) => {
+        const exId = resolved.get(e.exercise)!;
+        const exKey = `${dayId}:${exId}`;
+        const p = posOcc.get(exKey) ?? 0;
+        posOcc.set(exKey, p + 1);
+        const isWarmup =
+          e.is_warmup === undefined
+            ? oldIsWarmupByDayExOcc.get(`${exKey}:${p}`) ?? 0
+            : e.is_warmup
+              ? 1
+              : 0;
+        isWarmupPerOccurrence[di]![ei] = isWarmup;
+        unitPerOccurrence[di]![ei] = e.target_weight_unit ?? oldUnitByDayExOcc.get(`${exKey}:${p}`) ?? 'lb';
+        runStepsPerOccurrence[di]![ei] = e.run_steps === undefined
+          ? oldRunStepsByDayExOcc.get(`${exKey}:${p}`) ?? null
+          : serializeRunSteps(e.run_steps);
+        const classKey = `${exKey}:${isWarmup}`;
+        const c = classOcc.get(classKey) ?? 0;
+        classOcc.set(classKey, c + 1);
+        newTeIdByClassOcc.set(`${classKey}:${c}`, teIdPerExerciseOccurrence[di]![ei]!);
+      });
+    });
+  }
+
+  // Old → new set-log remap, paired within (exId, is_warmup) class; a surplus
+  // old slot with no matching new class member detaches to null (history kept,
+  // pointer cleared) — the same path a fully-removed exercise/day takes.
+  const oldToNewTe = new Map<string, string | null>();
+  {
+    const classOcc = new Map<string, number>();
+    for (const ot of oldTeRows.results) {
+      const newDayId = oldToNewDay.get(ot.workout_id) ?? null;
+      if (newDayId == null) {
+        oldToNewTe.set(ot.id, null);
+        continue;
+      }
+      const classKey = `${newDayId}:${ot.exercise_id}:${ot.is_warmup}`;
+      const c = classOcc.get(classKey) ?? 0;
+      classOcc.set(classKey, c + 1);
+      oldToNewTe.set(ot.id, newTeIdByClassOcc.get(`${classKey}:${c}`) ?? null);
+    }
+  }
+
+  // Group attributes follow the exact slot remap, including duplicate exercise
+  // occurrences and warm-up roles. Older clients can omit these additive fields.
+  const oldByNewSlot = new Map<string, TemplateExerciseRow>();
+  for (const old of oldTeRows.results) {
+    const newId = oldToNewTe.get(old.id);
+    if (newId) oldByNewSlot.set(newId, old);
+  }
+  const groupCandidates = input.workouts.map((day, di) => ({
+    exercises: (day.exercises ?? []).map((exercise, ei) => {
+      const id = teIdPerExerciseOccurrence[di]![ei]!;
+      const old = oldByNewSlot.get(id);
+      const groupId = exercise.group_id === undefined ? old?.group_id ?? null : exercise.group_id;
+      return {
+        id, order_index: exercise.order_index ?? ei, target_sets: exercise.target_sets,
+        group_id: groupId,
+        group_rest_seconds: groupId == null ? exercise.group_rest_seconds ?? null
+          : exercise.group_rest_seconds === undefined ? old?.group_rest_seconds ?? null : exercise.group_rest_seconds,
+        group_transition_seconds: groupId == null ? exercise.group_transition_seconds ?? null
+          : exercise.group_transition_seconds === undefined ? old?.group_transition_seconds ?? 0 : exercise.group_transition_seconds,
+      };
+    }),
+  }));
+  // Removing a member in a rebuild has the same singleton normalization as
+  // deleting it directly. An explicitly authored singleton is still invalid.
+  for (const day of groupCandidates) {
+    for (const slot of day.exercises) if (slot.group_id != null) {
+      const groupId = slot.group_id;
+      const oldMembers = oldTeRows.results.filter((old) => old.group_id === groupId);
+      const survivors = day.exercises.filter((member) => member.group_id === groupId);
+      if (survivors.length === 1 && oldMembers.length >= 2 && oldMembers.some((old) => !oldToNewTe.get(old.id))) {
+        Object.assign(slot, emptyExerciseGroup);
+      }
+    }
+  }
+  const groupInvalid = validatePlanExerciseGroups(groupCandidates);
+  if (groupInvalid) return groupInvalid;
+
+  // FK-safe order: INSERT new rows FIRST (so the remap can point at real
+  // parents), then UPDATE refs old→new (or NULL for removed), then DELETE
+  // the now-orphaned old rows by EXPLICIT id (not by plan_id sweep —
+  // that'd catch the freshly-inserted new rows too). The original DELETE-
+  // before-INSERT order failed FK the moment any real session or set_log
+  // referenced a row being deleted.
+  const nonce = uuid();
+  const stmts: D1PreparedStatement[] = createsPlan
+    ? [db.prepare(
+        `INSERT INTO plans
+           (id,user_id,name,status,version,meta,created_at,updated_at,plan_write_nonce)
+         SELECT ?1,?2,?3,'active',?4,NULL,?5,?5,?6
+          WHERE EXISTS (SELECT 1 FROM users u WHERE u.id=?2)
+            AND NOT EXISTS (SELECT 1 FROM account_deletion_intents i WHERE i.user_id=?2)
+            AND NOT EXISTS (SELECT 1 FROM account_deletion_receipts r WHERE r.user_id=?2)
+         ON CONFLICT DO NOTHING
+         RETURNING id`,
+      ).bind(plan.id, userId, plan.name, -plan.version, ts, nonce)]
+    : [...preparePlanWriteStart(db, plan, attribution, ts, nonce, false, newlyArchived.map(day => day.id))];
+  for (const old of newlyArchived) stmts.push(prepareArchiveAssignments(db, plan, old.id, ts, nonce));
+  // 1) INSERT new workouts (parents) — coexist with old by id.
+  input.workouts.forEach((d, di) => {
+    const dayId = newDayIds[di]!;
+    stmts.push(
+      db
+        .prepare(
+          `INSERT INTO workouts
+           (id,plan_id,name,day_label,order_index,notes,created_at,updated_at)
+           SELECT ?1,?2,?3,?4,?5,?6,?7,?8
+            WHERE EXISTS (
+              SELECT 1 FROM plans
+               WHERE id = ?9 AND user_id = ?10 AND status = 'active' AND version = ?11
+            )`,
+        )
+        .bind(
+          dayId,
+          plan!.id,
+          d.name,
+          d.day_label ?? null,
+          d.order_index ?? di,
+          d.notes ?? null,
+          ts,
+          ts,
+          plan!.id,
+          userId,
+          -plan!.version,
+        ),
+    );
+  });
+  for (const [id, metadata] of metadataByNewId) {
+    stmts.push(db.prepare(`UPDATE workouts SET tags=?1,archived_at=?2 WHERE id=?3
+      AND EXISTS (SELECT 1 FROM plans WHERE id=?4 AND user_id=?5 AND version=-?6 AND plan_write_nonce=?7)`)
+      .bind(metadata.tags, metadata.archived_at, id, plan.id, userId, plan.version, nonce));
+  }
+  // 2) INSERT new template_exercises (children of step 1's parents). is_warmup
+  // was resolved above (explicit wins; else inherit the matched old slot's flag)
+  // into isWarmupPerOccurrence so the inserted flag and the remap's class keys
+  // are guaranteed identical.
+  input.workouts.forEach((d, di) => {
+    const dayId = newDayIds[di]!;
+    (d.exercises ?? []).forEach((e, ei) => {
+      const exId = resolved.get(e.exercise)!;
+      const isWarmup = isWarmupPerOccurrence[di]![ei]!;
+      const group = groupCandidates[di]!.exercises[ei]!;
+      stmts.push(
+        db
+          .prepare(
+            `INSERT INTO template_exercises
+             (id,workout_id,exercise_id,order_index,target_sets,target_reps,target_reps_max,target_rpe,rest_seconds,target_weight,target_duration_s,progression,cues,is_warmup,created_at,updated_at,group_id,group_rest_seconds,group_transition_seconds,target_weight_unit,run_steps)
+             SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?20,?21,?22,?23,?24
+              WHERE EXISTS (
+                SELECT 1 FROM plans
+                 WHERE id = ?17 AND user_id = ?18 AND status = 'active' AND version = ?19
+              )`,
+          )
+          .bind(
+            teIdPerExerciseOccurrence[di]![ei]!, dayId, exId, e.order_index ?? ei, e.target_sets,
+            e.target_reps, e.target_reps_max ?? null, e.target_rpe ?? null, e.rest_seconds ?? 120,
+            e.target_weight ?? null, e.target_duration_s ?? null,
+            e.progression == null ? null : JSON.stringify(e.progression),
+            e.cues ?? null, isWarmup, ts, ts, plan!.id, userId, -plan!.version,
+            group.group_id, group.group_rest_seconds, group.group_transition_seconds,
+            unitPerOccurrence[di]![ei]!, runStepsPerOccurrence[di]![ei]!,
+          ),
+      );
+    });
+  });
+  // 3) Remap session.workout_id: old → new (surviving) or NULL.
+  for (const [oldDayId, newDayId] of oldToNewDay.entries()) {
+    if (newDayId != null) {
+      stmts.push(
+        db
+          .prepare(
+            `UPDATE sessions SET workout_id = ?2, updated_at = ?6
+              WHERE workout_id = ?1
+                AND EXISTS (
+                  SELECT 1 FROM plans
+                   WHERE id = ?3 AND user_id = ?4 AND status = 'active' AND version = ?5
+                )`,
+          )
+          .bind(oldDayId, newDayId, plan.id, userId, -plan.version, ts),
+      );
+    } else {
+      stmts.push(
+        db
+          .prepare(
+            `UPDATE sessions SET workout_id = NULL, updated_at = ?5
+              WHERE workout_id = ?1
+                AND EXISTS (
+                  SELECT 1 FROM plans
+                   WHERE id = ?2 AND user_id = ?3 AND status = 'active' AND version = ?4
+                )`,
+          )
+          .bind(oldDayId, plan.id, userId, -plan.version, ts),
+      );
+    }
+  }
+  // 4) Remap set_logs.template_exercise_id (same scheme).
+  for (const [oldTeId, newTeId] of oldToNewTe.entries()) {
+    if (newTeId != null) {
+      stmts.push(
+        db
+          .prepare(
+            `UPDATE set_logs
+                SET template_exercise_id = ?2,
+                    updated_at = MAX(updated_at + 1, ?6)
+              WHERE template_exercise_id = ?1
+                AND EXISTS (
+                  SELECT 1 FROM plans
+                   WHERE id = ?3 AND user_id = ?4 AND status = 'active' AND version = ?5
+                )`,
+          )
+          .bind(oldTeId, newTeId, plan.id, userId, -plan.version, ts),
+      );
+    } else {
+      stmts.push(
+        db
+          .prepare(
+            `UPDATE set_logs
+                SET template_exercise_id = NULL,
+                    updated_at = MAX(updated_at + 1, ?5)
+              WHERE template_exercise_id = ?1
+                AND EXISTS (
+                  SELECT 1 FROM plans
+                   WHERE id = ?2 AND user_id = ?3 AND status = 'active' AND version = ?4
+                )`,
+          )
+          .bind(oldTeId, plan.id, userId, -plan.version, ts),
+      );
+    }
+  }
+  // 5) DELETE old template_exercises by EXPLICIT id (avoid catching the
+  //    freshly-inserted new rows that now share plan_id). Children first.
+  for (const ot of oldTeRows.results) {
+    stmts.push(
+      db
+        .prepare(
+          `DELETE FROM template_exercises
+            WHERE id = ?1
+              AND EXISTS (
+                SELECT 1 FROM plans
+                 WHERE id = ?2 AND user_id = ?3 AND status = 'active' AND version = ?4
+              )`,
+        )
+        .bind(ot.id, plan.id, userId, -plan.version),
+    );
+  }
+  // 6) DELETE old workouts by EXPLICIT id. Parents last.
+  for (const od of oldDays.results) {
+    stmts.push(
+      db
+        .prepare(
+          `DELETE FROM workouts
+            WHERE id = ?1
+              AND EXISTS (
+                SELECT 1 FROM plans
+                 WHERE id = ?2 AND user_id = ?3 AND status = 'active' AND version = ?4
+              )`,
+        )
+        .bind(od.id, plan.id, userId, -plan.version),
+    );
+  }
+  // The full tree is rebuilt with fresh day UUIDs. Re-point each schedule
+  // weekday at the NEW day whose name/label matches the OLD day it pointed
+  // at; weekdays whose day genuinely no longer exists (no matching new day)
+  // are cleared. Same batch ⇒ shares the single version bump. Never lose
+  // the schedule key.
+  // baseMeta ALWAYS starts from the EXISTING persisted plan.meta so the
+  // user's recurring schedule survives a metadata-only update_plan. An
+  // incoming `meta` is MERGED over it (incoming keys win). The existing
+  // meta.schedule is PRESERVED unless the incoming meta explicitly carries
+  // its own `schedule` key — only then does that replace it (and it still
+  // rides the day-name/label remap below). Passing NO meta is unchanged.
+  const existingMeta = parsePlanMeta(plan.meta);
+  const incomingMetaRaw =
+    input.meta !== undefined &&
+    input.meta !== null &&
+    typeof input.meta === 'object' &&
+    !Array.isArray(input.meta)
+      ? (input.meta as Record<string, unknown>)
+      : undefined;
+  const incomingHasSchedule =
+    incomingMetaRaw !== undefined &&
+    Object.prototype.hasOwnProperty.call(incomingMetaRaw, 'schedule');
+  // Merge: existing meta is the base; incoming non-schedule keys overlay it.
+  // The schedule is decided explicitly below so a schedule-less incoming
+  // meta cannot erase the persisted one.
+  const mergedMeta: PlanMeta = parsePlanMeta(
+    JSON.stringify({
+      ...existingMeta,
+      ...(input.meta === undefined ? {} : input.meta ?? {}),
+      schedule: incomingHasSchedule
+        ? (incomingMetaRaw as Record<string, unknown>).schedule
+        : existingMeta.schedule,
+    }),
+  );
+  const baseMeta = mergedMeta;
+  // Extras stay activities: a rebuilt workout that now has exercises drops
+  // off (it would need its own session on the date; multi-session P1).
+  const activityNewIds = new Set(newDayIds);
+  // The repeating week and every block week remap the same way.
+  const remapPattern = (pattern: { week: ScheduleWeek; extras?: ScheduleExtras }) => {
+    const week = { ...pattern.week };
+    for (const wd of WEEKDAYS) {
+      const oldId = week[wd];
+      if (oldId == null) continue;
+      const newId = oldToNewDay.get(oldId);
+      week[wd] = newId && metadataByNewId.get(newId)?.archived_at == null ? newId : null;
+    }
+    const extras: ScheduleExtras = {};
+    for (const wd of WEEKDAYS) {
+      const kept = (pattern.extras?.[wd] ?? []).flatMap((oldId) => {
+        const newId = oldToNewDay.get(oldId);
+        return newId && activityNewIds.has(newId) && metadataByNewId.get(newId)?.archived_at == null
+          ? [newId] : [];
+      });
+      if (kept.length > 0) extras[wd] = kept;
+    }
+    const normalized = normalizeScheduleExtras(extras, week);
+    return { week, ...(normalized ? { extras: normalized } : {}) };
+  };
+  const remappedPattern = remapPattern(baseMeta.schedule);
+  // Times follow their workouts to the rebuilt ids and stay only for what
+  // each weekday still holds.
+  const remappedTimes: ScheduleTimes = {};
+  for (const wd of WEEKDAYS) {
+    const map: Record<string, string> = {};
+    for (const [oldId, time] of Object.entries(baseMeta.schedule.times?.[wd] ?? {})) {
+      const newId = oldToNewDay.get(oldId);
+      if (newId) map[newId] = time;
+    }
+    if (Object.keys(map).length > 0) remappedTimes[wd] = map;
+  }
+  const normalizedRemappedTimes = normalizeScheduleTimes(
+    remappedTimes, remappedPattern.week, remappedPattern.extras);
+  const remappedSchedule: WeeklySchedule = {
+    version: baseMeta.schedule.version,
+    ...remappedPattern,
+    ...(normalizedRemappedTimes ? { times: normalizedRemappedTimes } : {}),
+  };
+  if (baseMeta.program) {
+    // Slot ids are rebuilt too: a week's targets follow their slot to its
+    // new id, and drop with a slot the rebuild removed.
+    const remapTargets = (targets: ProgramWeek['targets']) => {
+      const out: Record<string, SlotTargets> = {};
+      for (const [oldId, value] of Object.entries(targets ?? {})) {
+        const newId = oldToNewTe.get(oldId);
+        if (newId) out[newId] = value;
+      }
+      return Object.keys(out).length > 0 ? { targets: out } : {};
+    };
+    baseMeta.program = { ...baseMeta.program, weeks: baseMeta.program.weeks.map((week) => ({
+      ...(week.label ? { label: week.label } : {}), ...remapPattern(week), ...remapTargets(week.targets),
+    })) };
+    // A rebuild that regroups slots must still agree with each week's counts.
+    const weekMismatch = programGroupSetsMismatch(baseMeta.program,
+      groupCandidates.flatMap((day) => day.exercises));
+    if (weekMismatch) return weekMismatch;
+  }
+  stmts.push(
+    db
+      .prepare(
+        `UPDATE plans
+            SET name = ?2, meta = ?3, updated_at = ?4
+          WHERE id = ?1 AND user_id = ?5 AND status = 'active' AND version = ?6
+            AND plan_write_nonce=?7`,
+      )
+      .bind(
+        plan.id,
+        input.name ?? plan.name,
+        serializePlanMeta(baseMeta, remappedSchedule),
+        ts,
+        userId,
+        -plan.version,
+        nonce,
+      ),
+  );
+  const documentUpdateIndex = stmts.length - 1;
+  const versionResultIndex = stmts.length;
+  stmts.push(...preparePlanWriteFinish(db, plan, attribution, ts, nonce));
+  // D1 executes a batch atomically and sequentially. Every statement above
+  // carries the SAME active-plan/version predicate, so after one contender
+  // bumps the version a stale contender's entire batch becomes a no-op: no
+  // transient inserts, remaps, or deletes can leak through before the final
+  // compare-and-swap. This applies even when the caller omitted
+  // expected_version; the version we actually read is always the CAS token.
+  const results = await runWorkoutWriteBatch(db, stmts);
+  const claimed = results[0];
+  const documentUpdate = results[documentUpdateIndex];
+  const versionUpdate = results[versionResultIndex];
+  if ((claimed?.meta.changes ?? 0) !== 1 || (documentUpdate?.meta.changes ?? 0) !== 1 || !versionUpdate?.results[0]) {
+    if (createsPlan && retryConcurrentBootstrap) {
+      return updatePlanTree(db, userId, input, attribution, false);
+    }
+    for (const old of newlyArchived) if (await workoutIsActive(db, plan, old.id)) {
+      return { error: 'active_workout' };
+    }
+    const current = await getActivePlan(db, userId);
+    return { conflict: true, current_version: current?.version ?? plan.version };
+  }
+  const acknowledgedVersion = plan.version + 1;
+  const committedPlan = await readCommittedSnapshotPlan(db, plan, acknowledgedVersion, ts);
+  if (!committedPlan) {
+    return {
+      conflict: false, acknowledged: true, refresh_required: true,
+      plan_id: plan.id, version: acknowledgedVersion,
+    };
+  }
+  return {
+    conflict: false,
+    plan: committedPlan,
+  };
+}
+
+/** Find a template_exercise slot by id, or by (day + exercise name/id).
+ *  When `workout_id` is supplied alongside `template_exercise_id`, the
+ *  slot must live in THAT day: the nested REST route /workouts/:id/exercises/:teId
+ *  claims a day in its path, so a /workouts/<dayA>/exercises/<slot-from-dayB>
+ *  request must resolve to null (→ 404) rather than mutating day B's slot by
+ *  the globally-unique teId alone. Day-less callers (the MCP tools, which have
+ *  no URL day) omit it and resolve by teId + user as before. */
+async function findSlot(
+  db: D1Database,
+  userId: string,
+  ref: { template_exercise_id?: string; workout_id?: string; day?: string; exercise?: string },
+): Promise<TemplateExerciseRow | null> {
+  if (ref.template_exercise_id) {
+    return db
+      .prepare(
+        `SELECT te.* FROM template_exercises te
+         JOIN workouts d ON d.id = te.workout_id
+         JOIN plans p ON p.id = d.plan_id
+         WHERE te.id = ?1 AND p.user_id = ?2 AND d.archived_at IS NULL
+           AND (?3 IS NULL OR te.workout_id = ?3)`,
+      )
+      .bind(ref.template_exercise_id, userId, ref.workout_id ?? null)
+      .first<TemplateExerciseRow>();
+  }
+  if (!ref.day || !ref.exercise) return null;
+  const exId = await resolveOrThrow(db, ref.exercise);
+  return db
+    .prepare(
+      `SELECT te.* FROM template_exercises te
+       JOIN workouts d ON d.id = te.workout_id
+       JOIN plans p ON p.id = d.plan_id
+       WHERE p.user_id = ?1 AND te.exercise_id = ?2 AND p.status = 'active' AND d.archived_at IS NULL
+         AND (d.id = ?3 OR (d.one_time_date IS NULL AND (d.day_label = ?3 OR d.name = ?3)))
+       ORDER BY d.id = ?3 DESC`,
+    )
+    .bind(userId, exId, ref.day)
+    .first<TemplateExerciseRow>();
+}
+
+/** Allowlist of patch keys accepted by `updateExercise`. Any unknown key
+ *  in the incoming patch returns an explicit `unknown_fields` error
+ *  instead of being silently dropped (the agent-facing diagnosability bug
+ *  — `orderIndex` camelCase had returned 200 OK with no change). */
+const TEMPLATE_EXERCISE_PATCH_KEYS = new Set<string>([
+  'target_sets',
+  'target_reps',
+  'target_reps_max',
+  'target_rpe',
+  'rest_seconds',
+  'target_weight',
+  'target_weight_unit',
+  'target_duration_s',
+  'cues',
+  'progression',
+  'order_index',
+  'is_warmup',
+  'run_steps',
+]);
+
+export async function updateExercise(
+  db: D1Database,
+  userId: string,
+  ref: { template_exercise_id?: string; workout_id?: string; day?: string; exercise?: string },
+  patch: Partial<
+    Pick<
+      TemplateExerciseRow,
+      | 'target_sets'
+      | 'target_reps'
+      | 'target_reps_max'
+      | 'target_rpe'
+      | 'rest_seconds'
+      | 'target_weight'
+      | 'target_weight_unit'
+      | 'target_duration_s'
+      | 'cues'
+      | 'order_index'
+      | 'is_warmup'
+    >
+  > & { progression?: unknown; run_steps?: unknown },
+  attribution: PlanWriteAttribution = { actor: 'system', operation: 'update_exercise' },
+  options: SlotEditOptions = {},
+): Promise<SlotEditResult> {
+  const plan = await getActivePlan(db, userId);
+  if (!plan) return null;
+  const versionError = validateSlotEditVersion(plan, options);
+  if (versionError) return versionError;
+  const slot = await findSlot(db, userId, ref);
+  if (!slot || !await getWorkoutInPlan(db, plan.id, slot.workout_id)) return null;
+  const unknown = Object.keys(patch).filter((k) => !TEMPLATE_EXERCISE_PATCH_KEYS.has(k));
+  if (unknown.length > 0) return { error: 'unknown_fields', fields: unknown };
+  if (slot.group_id != null) {
+    const owned = ['order_index', 'target_sets'].filter((key) => Object.prototype.hasOwnProperty.call(patch, key));
+    if (owned.length) return { error: 'group_conflict', fields: owned };
+  }
+  const modality = await db.prepare('SELECT modality FROM exercises WHERE id=?1')
+    .bind(slot.exercise_id).first<{ modality: string }>();
+  const merged = {
+    target_sets: patch.target_sets === undefined ? slot.target_sets : patch.target_sets,
+    target_reps: patch.target_reps === undefined ? slot.target_reps : patch.target_reps,
+    target_reps_max: patch.target_reps_max === undefined ? slot.target_reps_max : patch.target_reps_max,
+    target_rpe: patch.target_rpe === undefined ? slot.target_rpe : patch.target_rpe,
+    rest_seconds: patch.rest_seconds === undefined ? slot.rest_seconds : patch.rest_seconds,
+    target_weight: patch.target_weight === undefined ? slot.target_weight : patch.target_weight,
+    target_weight_unit: patch.target_weight_unit === undefined ? slot.target_weight_unit : patch.target_weight_unit,
+    target_duration_s: patch.target_duration_s === undefined ? slot.target_duration_s : patch.target_duration_s,
+    cues: patch.cues === undefined ? slot.cues : patch.cues,
+    order_index: patch.order_index === undefined ? slot.order_index : patch.order_index,
+    is_warmup: patch.is_warmup === undefined ? slot.is_warmup : patch.is_warmup,
+    progression: patch.progression === undefined
+      ? (slot.progression === null ? null : JSON.parse(slot.progression) as unknown)
+      : patch.progression,
+    run_steps: patch.run_steps === undefined ? slot.run_steps ?? null : patch.run_steps,
+  };
+  const invalid = validateExercisePrescription(merged as Record<string, unknown>, {
+    modality: modality?.modality, exerciseId: slot.exercise_id,
+  });
+  if (invalid) return invalid;
+  const groupSiblings = await exerciseGroupDayRows(db, slot.workout_id);
+  const groupMoved = groupSiblings.map((row) => row.id === slot.id ? { ...row, ...merged } : row);
+  const groupHasDuplicate = new Set(groupMoved.map((row) => row.order_index)).size !== groupMoved.length;
+  const groupOrdered = patch.order_index !== undefined && (groupHasDuplicate || !denselyOrdered(groupSiblings))
+    ? orderDayRows(groupMoved, slot.id).map((row, index) => ({ ...row, order_index: index })) : groupMoved;
+  const groupInvalid = validateExerciseGroups(groupOrdered);
+  if (groupInvalid) return groupInvalid;
+  if (Object.keys(patch).length === 0) return slot;
+
+  // Update only fields supplied by the caller. This bounded legacy policy lets
+  // disjoint tokenless patches compose; concurrent same-field patches remain
+  // last-committer-wins until every released caller supplies expected_version.
+  const assignments: string[] = [];
+  const values: unknown[] = [slot.id];
+  const assign = (column: string, value: unknown) => {
+    values.push(value);
+    assignments.push(`${column}=?${values.length}`);
+  };
+  for (const key of TEMPLATE_EXERCISE_PATCH_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(patch, key)) continue;
+    const value = key === 'progression'
+      ? (patch.progression == null ? null : JSON.stringify(patch.progression))
+      : key === 'is_warmup'
+        ? (patch.is_warmup ? 1 : 0)
+        : key === 'run_steps'
+          ? serializeRunSteps(patch.run_steps)
+          : (patch as Record<string, unknown>)[key];
+    assign(key, value);
+  }
+  const ts = now();
+  assign('updated_at', ts);
+  values.push(userId);
+  const userParam = values.length;
+  const rangePredicates: string[] = [];
+  if (patch.target_reps !== undefined && patch.target_reps_max === undefined) {
+    values.push(patch.target_reps);
+    rangePredicates.push(`(target_reps_max IS NULL OR target_reps_max>=?${values.length})`);
+  }
+  if (patch.target_reps_max !== undefined && patch.target_reps_max !== null && patch.target_reps === undefined) {
+    values.push(patch.target_reps_max);
+    rangePredicates.push(`target_reps<=?${values.length}`);
+  }
+  const nonce = uuid();
+  // The fence values ride the positional list like every other fence site;
+  // they are appended last so the patch and range placeholders keep theirs.
+  values.push(plan.id, plan.version, nonce);
+  const nonceParam = values.length;
+  const versionParam = nonceParam - 1;
+  const planParam = nonceParam - 2;
+  const statements: D1PreparedStatement[] = [
+    ...preparePlanWriteStart(db, plan, attribution, ts, nonce),
+    db.prepare(
+      `UPDATE template_exercises SET ${assignments.join(',')}
+        WHERE id=?1 AND EXISTS (
+          SELECT 1 FROM workouts d JOIN plans p ON p.id=d.plan_id
+           WHERE d.id=template_exercises.workout_id
+             AND p.user_id=?${userParam} AND p.status='active'
+             AND p.id=?${planParam} AND p.version=-?${versionParam}
+             AND p.plan_write_nonce=?${nonceParam}
+        )${rangePredicates.length ? ` AND ${rangePredicates.join(' AND ')}` : ''}`,
+    ).bind(...values),
+  ];
+  let acknowledgedOrder = patch.order_index ?? slot.order_index;
+  if (patch.order_index !== undefined) {
+    const siblings = await db.prepare(
+      'SELECT id,order_index FROM template_exercises WHERE workout_id=?1 ORDER BY order_index,created_at,id',
+    ).bind(slot.workout_id).all<{ id: string; order_index: number }>();
+    const moved = siblings.results.map((row) => row.id === slot.id ? { ...row, order_index: patch.order_index! } : row);
+    const hasDuplicate = new Set(moved.map((row) => row.order_index)).size !== moved.length;
+    // Removing a slot leaves gaps in the stored indexes. There a raw index can
+    // leave the slot where it was, so the move uses the destination position
+    // and re-numbers densely, as it does when the index collides.
+    if (hasDuplicate || !denselyOrdered(siblings.results)) {
+      const ordered = orderDayRows(moved, slot.id);
+      acknowledgedOrder = ordered.findIndex((row) => row.id === slot.id);
+      ordered.forEach((row, index) => statements.push(
+        db.prepare(`UPDATE template_exercises SET order_index=?2,updated_at=?3 WHERE id=?1
+          AND EXISTS (SELECT 1 FROM workouts d JOIN plans p ON p.id=d.plan_id
+            JOIN template_exercises te ON te.workout_id=d.id
+            WHERE te.id=?4 AND p.id=?5 AND p.version=-?6
+              AND p.plan_write_nonce=?7)`).bind(row.id, index, ts, slot.id, plan.id, plan.version, nonce),
+      ));
+    }
+  }
+  const versionResultIndex = statements.length;
+  statements.push(...preparePlanWriteFinish(db, plan, attribution, ts, nonce));
+  const results = await runWorkoutWriteBatch<{ version: number }>(db, statements);
+  if ((results[0]?.meta.changes ?? 0) !== 1) {
+    if (options.expectedVersion === undefined && options.retryLegacyConflict !== false) {
+      return updateExercise(db, userId, ref, patch, attribution, { ...options, retryLegacyConflict: false });
+    }
+    return currentPlanVersion(db, userId, plan.version);
+  }
+  if ((results[2]?.meta.changes ?? 0) !== 1 || !results[versionResultIndex]?.results[0]) {
+    const current = await findSlot(db, userId, ref);
+    if (current && (patch.target_reps !== undefined || patch.target_reps_max !== undefined)) {
+      return { error: 'invalid_fields', fields: ['target_reps_max'] };
+    }
+    return null;
+  }
+  return {
+    ...slot,
+    ...merged,
+    progression: merged.progression == null ? null : JSON.stringify(merged.progression),
+    run_steps: patch.run_steps === undefined ? slot.run_steps ?? null : serializeRunSteps(patch.run_steps),
+    is_warmup: merged.is_warmup ? 1 : 0,
+    order_index: acknowledgedOrder,
+    updated_at: ts,
+  };
+}
+
+/**
+ * Delete an exercise slot from a day. Resolves the slot by id or by
+ * `(day, exercise)` — same ref shape as updateExercise. NULLs any
+ * `set_logs.template_exercise_id` that pointed at this slot so historical
+ * sets are detached (not deleted — they stay queryable by exercise_id).
+ * Bumps the plan version (it's a plan-tree mutation). Returns the deleted
+ * row or null when no slot matches.
+ */
+export async function deleteTemplateExercise(
+  db: D1Database,
+  userId: string,
+  ref: { template_exercise_id?: string; workout_id?: string; day?: string; exercise?: string },
+  attribution: PlanWriteAttribution = { actor: 'system', operation: 'delete_exercise' },
+  options: SlotEditOptions = {},
+): Promise<SlotEditResult> {
+  const plan = await getActivePlan(db, userId);
+  if (!plan) return null;
+  const versionError = validateSlotEditVersion(plan, options);
+  if (versionError) return versionError;
+  const slot = await findSlot(db, userId, ref);
+  if (!slot || !await getWorkoutInPlan(db, plan.id, slot.workout_id)) return null;
+  const siblings = await exerciseGroupDayRows(db, slot.workout_id);
+  const remaining = normalizeRemovedGroupMember(siblings.filter((row) => row.id !== slot.id), slot.group_id);
+  const groupInvalid = validateExerciseGroups(remaining);
+  if (groupInvalid) return groupInvalid;
+  const normalized = remaining.filter((row) => row.group_id == null && siblings.find((old) => old.id === row.id)?.group_id != null);
+  const ts = now();
+  const nonce = uuid();
+  const statements: D1PreparedStatement[] = [
+      ...preparePlanWriteStart(db, plan, attribution, ts, nonce),
+      db
+        .prepare(
+          `UPDATE set_logs
+              SET template_exercise_id = NULL,
+                  updated_at = MAX(updated_at + 1, ?2)
+            WHERE template_exercise_id = ?1
+              AND EXISTS (SELECT 1 FROM plans WHERE id=?3 AND user_id=?4 AND version=-?5 AND plan_write_nonce=?6)`,
+        )
+        .bind(slot.id, ts, plan.id, userId, plan.version, nonce),
+      db.prepare(
+        `DELETE FROM template_exercises WHERE id=?1 AND EXISTS
+         (SELECT 1 FROM plans WHERE id=?2 AND user_id=?3 AND version=-?4 AND plan_write_nonce=?5)`,
+      ).bind(slot.id, plan.id, userId, plan.version, nonce),
+  ];
+  for (const row of normalized) statements.push(db.prepare(
+    `UPDATE template_exercises SET group_id=NULL,group_rest_seconds=NULL,group_transition_seconds=NULL,
+       updated_at=?2 WHERE id=?1 AND EXISTS
+       (SELECT 1 FROM plans WHERE id=?3 AND user_id=?4 AND version=-?5 AND plan_write_nonce=?6)`,
+  ).bind(row.id, ts, plan.id, userId, plan.version, nonce));
+  const versionResultIndex = statements.length;
+  statements.push(...preparePlanWriteFinish(db, plan, attribution, ts, nonce));
+  const results = await runWorkoutWriteBatch<{ version: number }>(db, statements);
+  if ((results[0]?.meta.changes ?? 0) !== 1) {
+    return options.expectedVersion === undefined && options.retryLegacyConflict !== false
+      ? deleteTemplateExercise(db, userId, ref, attribution, { ...options, retryLegacyConflict: false })
+      : currentPlanVersion(db, userId, plan.version);
+  }
+  if ((results[3]?.meta.changes ?? 0) !== 1 || !results[versionResultIndex]?.results[0]) return null;
+  return slot;
+}
+
+/** Reviewed replacement targets share the slot validator, but cannot alter
+ * identity, ordering, warm-up classification, or group-owned structure. */
+export type ExerciseReplacementTargets = Partial<Pick<TemplateExerciseRow,
+  | 'target_sets' | 'target_reps' | 'target_reps_max' | 'target_duration_s'
+  | 'target_weight' | 'target_weight_unit' | 'target_rpe' | 'rest_seconds' | 'cues'>>;
+
+const EXERCISE_REPLACEMENT_TARGET_KEYS = new Set<string>([
+  'target_sets', 'target_reps', 'target_reps_max', 'target_duration_s',
+  'target_weight', 'target_weight_unit', 'target_rpe', 'rest_seconds', 'cues',
+]);
+
+export async function swapExercise(
+  db: D1Database,
+  userId: string,
+  ref: {
+    template_exercise_id?: string; workout_id?: string;
+    day?: string; from_exercise?: string; to_exercise: string;
+    expected_version?: number;
+    targets?: ExerciseReplacementTargets;
+  },
+  attribution: PlanWriteAttribution = { actor: 'system', operation: 'swap_exercise' },
+  retryLegacyConflict = true,
+): Promise<TemplateExerciseRow | PlanVersionConflict | PrescriptionValidationError | GroupConflict | null> {
+  const plan = await getActivePlan(db, userId);
+  if (!plan) return null;
+  if (ref.targets !== undefined) {
+    if (!isPlainRecord(ref.targets)) return { error: 'invalid_fields', fields: ['targets'] };
+    const invalid = Object.keys(ref.targets).filter((key) =>
+      !EXERCISE_REPLACEMENT_TARGET_KEYS.has(key) || ref.targets![key as keyof ExerciseReplacementTargets] === undefined);
+    if (invalid.length) return { error: 'invalid_fields', fields: invalid.map((key) => `targets.${key}`) };
+    if (ref.expected_version === undefined) return { error: 'invalid_fields', fields: ['expected_version'] };
+  }
+  if (ref.expected_version !== undefined) {
+    if (!Number.isSafeInteger(ref.expected_version) || ref.expected_version < 1) {
+      return { error: 'invalid_fields', fields: ['expected_version'] };
+    }
+    if (ref.expected_version !== plan.version) {
+      return { conflict: true, current_version: plan.version };
+    }
+  }
+  const slot = await findSlot(db, userId, { ...ref, exercise: ref.from_exercise });
+  if (!slot || !await getWorkoutInPlan(db, plan.id, slot.workout_id)) return null;
+  if (slot.group_id != null && Object.prototype.hasOwnProperty.call(ref.targets ?? {}, 'target_sets')) {
+    return { error: 'group_conflict', fields: ['target_sets'] };
+  }
+  if (typeof ref.to_exercise !== 'string' || !ref.to_exercise.trim()) {
+    return { error: 'invalid_fields', fields: ['to_exercise'] };
+  }
+  const destination = await resolveExercise(db, ref.to_exercise) as { id: string; modality: string } | null;
+  if (!destination) return { error: 'invalid_fields', fields: ['to_exercise'] };
+  const progression = slot.progression === null ? null : JSON.parse(slot.progression) as unknown;
+  // Steps stay on a run: swap a run with steps elsewhere only after clearing them.
+  const merged = { ...slot, ...ref.targets, progression };
+  const invalid = validateExercisePrescription(merged, {
+    modality: destination.modality, exerciseId: destination.id,
+  });
+  if (invalid) return invalid;
+  const groupInvalid = validateExerciseGroups((await exerciseGroupDayRows(db, slot.workout_id))
+    .map((row) => row.id === slot.id ? { ...row, ...ref.targets } : row));
+  if (groupInvalid) return groupInvalid;
+  // Legacy callers keep saved targets. Reviewed targets and the new exercise
+  // commit together, never as a swap followed by a second prescription write.
+  // Slot identity and historical exercise/value records remain unchanged.
+  const ts = now();
+  const nonce = uuid();
+  const values: unknown[] = [slot.id, destination.id, ts, userId, plan.id, plan.version, nonce];
+  const assignments = ['exercise_id=?2', 'updated_at=?3'];
+  for (const [key, value] of Object.entries(ref.targets ?? {})) {
+    values.push(value);
+    assignments.push(`${key}=?${values.length}`);
+  }
+  const statements: D1PreparedStatement[] = [
+    ...preparePlanWriteStart(db, plan, attribution, ts, nonce),
+    db.prepare(
+      `UPDATE template_exercises SET ${assignments.join(',')} WHERE id=?1
+        AND EXISTS (
+          SELECT 1 FROM workouts d JOIN plans p ON p.id=d.plan_id
+           WHERE d.id=template_exercises.workout_id AND p.user_id=?4 AND p.status='active'
+             AND p.id=?5 AND p.version=-?6 AND p.plan_write_nonce=?7
+        )`,
+    ).bind(...values),
+  ];
+  if (ref.targets !== undefined) {
+    // An old movement's week-specific load must not silently override the
+    // prescription just reviewed for its replacement. Preserve shared group
+    // rounds, which must continue matching every sibling in that week.
+    const meta = parsePlanMeta(plan.meta);
+    if (meta.program?.weeks.some((week) => week.targets?.[slot.id] !== undefined)) {
+      meta.program = { ...meta.program, weeks: meta.program.weeks.map((week) => {
+        if (!week.targets?.[slot.id]) return week;
+        const targets = { ...week.targets };
+        const rounds = targets[slot.id]!.target_sets;
+        if (slot.group_id != null && rounds !== undefined) targets[slot.id] = { target_sets: rounds };
+        else delete targets[slot.id];
+        const { targets: _oldTargets, ...rest } = week;
+        return Object.keys(targets).length ? { ...rest, targets } : rest;
+      }) };
+      statements.push(db.prepare(`UPDATE plans SET meta=?1 WHERE id=?2 AND user_id=?3
+        AND status='active' AND version=-?4 AND plan_write_nonce=?5`)
+        .bind(serializePlanMeta(meta, meta.schedule), plan.id, userId, plan.version, nonce));
+    }
+  }
+  const versionResultIndex = statements.length;
+  statements.push(...preparePlanWriteFinish(db, plan, attribution, ts, nonce));
+  const results = await runWorkoutWriteBatch<{ version: number }>(db, statements);
+  if ((results[0]?.meta.changes ?? 0) !== 1) {
+    return ref.expected_version === undefined && retryLegacyConflict
+      ? swapExercise(db, userId, ref, attribution, false)
+      : currentPlanVersion(db, userId, plan.version);
+  }
+  if ((results[2]?.meta.changes ?? 0) !== 1 || !results[versionResultIndex]?.results[0]) return null;
+  return { ...slot, ...ref.targets, exercise_id: destination.id, updated_at: ts };
+}
+
+export async function logWorkoutComplete(
+  db: D1Database,
+  userId: string,
+  date: string,
+  perceivedFatigue: number | null,
+  notes: string | null,
+  slot = 0,
+): Promise<
+  | Awaited<ReturnType<typeof patchSession>>
+  | { error: 'session_discarded'; status: 'discarded' }
+> {
+  const plan = await getActivePlan(db, userId);
+  if (!plan) return null;
+  const session = await getOrCreateSession(
+    db,
+    userId,
+    plan.id,
+    date,
+    null,
+    { reviveDiscarded: false, slot },
+  );
+  if (session.status === 'discarded') {
+    return { error: 'session_discarded', status: 'discarded' };
+  }
+  // Carry the generation observed above across this await. A discard/restart
+  // in between returns a structured conflict instead of retargeting completion
+  // to the newer workout.
+  return patchSession(
+    db,
+    userId,
+    session.id,
+    {
+      status: 'completed',
+      perceived_fatigue: perceivedFatigue ?? undefined,
+      notes: notes ?? undefined,
+    },
+    session.attempt,
+  );
+}
+
+/** "I'm beat — adjust." Scales target day(s) and records the reasoning. */
+export async function adjustToday(
+  db: D1Database,
+  userId: string,
+  intent: 'deload' | 'reduce_volume' | 'reduce_intensity',
+  magnitude: 'light' | 'moderate' | 'heavy' = 'moderate',
+  dayLabel?: string,
+  attribution: PlanWriteAttribution = { actor: 'system', operation: 'adjust_today' },
+): Promise<{
+  plan: PlanTree | null;
+  changes: string[];
+  recurring: true;
+  affected_workouts: string[];
+  no_op: boolean;
+  acknowledged?: true;
+  refresh_required?: true;
+  version?: number;
+  conflict?: true;
+  current_version?: number;
+  error?: 'invalid_fields' | 'group_conflict';
+  fields?: string[];
+}> {
+  if (!['deload', 'reduce_volume', 'reduce_intensity'].includes(intent)
+      || !['light', 'moderate', 'heavy'].includes(magnitude)) {
+    throw new Error('invalid_adjustment');
+  }
+  const tree = await getPlanTree(db, userId);
+  if (!tree) return { plan: null, changes: [], recurring: true, affected_workouts: [], no_op: true };
+  const setF = { light: 0.8, moderate: 0.65, heavy: 0.5 }[magnitude];
+  const wtF = { light: 0.95, moderate: 0.9, heavy: 0.85 }[magnitude];
+  // Recurring targets only: a one-time workout shares its source's name, so
+  // naming the source must not change the copy (workout-library P3).
+  const days = tree.workouts.filter(d => d.archived_at == null && d.one_time_date == null
+    && (dayLabel ? d.day_label === dayLabel || d.name === dayLabel : true));
+  const invalidFields = new Set<string>();
+  for (const day of days) for (const slot of day.exercises) {
+    let progression: unknown = null;
+    try { progression = slot.progression == null ? null : JSON.parse(slot.progression); }
+    catch { invalidFields.add(`${day.day_label ?? day.name}/${slot.exercise_name}.progression`); }
+    const invalid = validateExercisePrescription({ ...slot, progression }, {
+      modality: slot.exercise_modality,
+    });
+    for (const field of invalid?.fields ?? []) {
+      invalidFields.add(`${day.day_label ?? day.name}/${slot.exercise_name}.${field}`);
+    }
+  }
+  if (invalidFields.size > 0) {
+    return {
+      error: 'invalid_fields', fields: [...invalidFields].sort(), plan: tree,
+      changes: [], recurring: true,
+      affected_workouts: days.map((day) => day.day_label ?? day.name), no_op: true,
+    };
+  }
+  const groupInvalid = validatePlanExerciseGroups(days.map((day) => ({ exercises: day.exercises.map((slot) => ({
+    ...slot, target_sets: intent === 'reduce_intensity' ? slot.target_sets : Math.max(1, Math.round(slot.target_sets * setF)),
+  })) })));
+  if (groupInvalid) return { ...groupInvalid, plan: tree, changes: [], recurring: true,
+    affected_workouts: days.map((day) => day.day_label ?? day.name), no_op: true };
+  const changes: string[] = [];
+  const computedInvalid = new Set<string>();
+  const ts = now();
+  const nonce = uuid();
+  const stmts: D1PreparedStatement[] = [
+    ...preparePlanWriteStart(db, tree, attribution, ts, nonce),
+  ];
+  for (const d of days) {
+    for (const te of d.exercises) {
+      if (intent === 'reduce_intensity') {
+        if (te.target_weight == null) continue;
+        // Positive added load gets lighter. Negative load is assistance, so
+        // reducing intensity must increase its magnitude rather than move it
+        // toward zero and accidentally make the exercise harder.
+        const assisted = te.target_weight < 0;
+        const scaled = assisted ? te.target_weight / wtF : te.target_weight * wtF;
+        // Round to the slot unit's smallest common jump: 5 lb or 2.5 kg.
+        const unit = te.target_weight_unit ?? 'lb';
+        const step = unit === 'kg' ? 2.5 : 5;
+        const rounded = Math.round(scaled / step) * step;
+        // Keep that rounding when it increases assistance, but never let a
+        // small negative value round to zero.
+        const w = Math.min(te.target_weight, rounded);
+        if (w === te.target_weight) continue;
+        const invalid = validateExercisePrescription({
+          ...te, target_weight: w,
+          progression: te.progression == null ? null : JSON.parse(te.progression),
+        }, { modality: te.exercise_modality });
+        if (invalid) {
+          for (const field of invalid.fields) {
+            computedInvalid.add(`${d.day_label ?? d.name}/${te.exercise_name}.${field}`);
+          }
+          continue;
+        }
+        stmts.push(
+          db
+            .prepare(`UPDATE template_exercises SET target_weight=?2, updated_at=?3 WHERE id=?1
+              AND EXISTS (SELECT 1 FROM plans WHERE id=?4 AND user_id=?5 AND version=-?6 AND plan_write_nonce=?7)`)
+            .bind(te.id, w, ts, tree.id, userId, tree.version, nonce),
+        );
+        changes.push(`${d.day_label ?? d.name}/${te.exercise_name}: weight ${te.target_weight}→${w} ${unit}`);
+      } else {
+        const s = Math.max(1, Math.round(te.target_sets * setF));
+        if (s === te.target_sets) continue;
+        const invalid = validateExercisePrescription({
+          ...te, target_sets: s,
+          progression: te.progression == null ? null : JSON.parse(te.progression),
+        }, { modality: te.exercise_modality });
+        if (invalid) {
+          for (const field of invalid.fields) {
+            computedInvalid.add(`${d.day_label ?? d.name}/${te.exercise_name}.${field}`);
+          }
+          continue;
+        }
+        stmts.push(
+          db
+            .prepare(`UPDATE template_exercises SET target_sets=?2, updated_at=?3 WHERE id=?1
+              AND EXISTS (SELECT 1 FROM plans WHERE id=?4 AND user_id=?5 AND version=-?6 AND plan_write_nonce=?7)`)
+            .bind(te.id, s, ts, tree.id, userId, tree.version, nonce),
+        );
+        changes.push(`${d.day_label ?? d.name}/${te.exercise_name}: sets ${te.target_sets}→${s}`);
+      }
+    }
+  }
+  if (computedInvalid.size > 0) {
+    return {
+      error: 'invalid_fields', fields: [...computedInvalid].sort(), plan: tree,
+      changes: [], recurring: true,
+      affected_workouts: days.map((day) => day.day_label ?? day.name), no_op: true,
+    };
+  }
+  if (changes.length) {
+    const versionResultIndex = stmts.length;
+    const workouts = days.map((day) => day.day_label ?? day.name).join(', ');
+    const detail = `Recurring templates (${workouts}): ${changes.length} change(s): ${changes.join('; ')}`;
+    stmts.push(...preparePlanWriteFinish(db, tree, {
+      ...attribution,
+      note: attribution.note ? `${attribution.note} ${detail}` : detail,
+    }, ts, nonce));
+    const results = await runWorkoutWriteBatch<{ version: number }>(db, stmts);
+    if ((results[0]?.meta.changes ?? 0) !== 1 || !results[versionResultIndex]?.results[0]) {
+      const current = await getActivePlan(db, userId);
+      return {
+        conflict: true, current_version: current?.version ?? tree.version,
+        plan: null, changes: [], recurring: true,
+        affected_workouts: days.map((day) => day.day_label ?? day.name), no_op: false,
+      };
+    }
+    const committedVersion = tree.version + 1;
+    const committedPlan = await readCommittedSnapshotPlan(db, tree, committedVersion, ts);
+    if (!committedPlan) {
+      return {
+        plan: null, changes, recurring: true,
+        affected_workouts: days.map((day) => day.day_label ?? day.name), no_op: false,
+        acknowledged: true, refresh_required: true, version: committedVersion,
+      };
+    }
+    return {
+      plan: committedPlan,
+      changes, recurring: true,
+      affected_workouts: days.map((day) => day.day_label ?? day.name), no_op: false,
+    };
+  }
+  return {
+    plan: tree,
+    changes,
+    recurring: true,
+    affected_workouts: days.map((day) => day.day_label ?? day.name),
+    no_op: changes.length === 0,
+  };
+}
+
+export async function getHistory(
+  db: D1Database,
+  userId: string,
+  exerciseId: string,
+  from: number,
+  to: number,
+) {
+  const exercise =
+    (await db
+      .prepare('SELECT modality, unit, laterality, load_mode FROM exercises WHERE id = ?1')
+      .bind(exerciseId)
+      .first<MetricExercise>()) ?? {
+      modality: 'unknown',
+      unit: 'lb',
+      laterality: 'bilateral',
+      load_mode: 'total',
+    };
+  const sets = await db
+    .prepare(
+      `SELECT sl.*, s.date as session_date, s.notes AS session_notes,
+         s.perceived_fatigue AS session_perceived_fatigue FROM set_logs sl
+       JOIN sessions s ON s.id = sl.session_id
+       WHERE sl.user_id = ?1 AND s.user_id = ?1
+         AND sl.exercise_id = ?2 AND sl.deleted_at IS NULL
+         AND sl.is_warmup = 0 AND sl.logged_at BETWEEN ?3 AND ?4
+       ORDER BY sl.logged_at`,
+    )
+    .bind(userId, exerciseId, from, to)
+    .all<SetLogRow & { session_date: string; session_notes: string | null; session_perceived_fatigue: number | null }>();
+  const rowsBySession = new Map<string, (typeof sets.results)>();
+  for (const s of sets.results) {
+    const rows = rowsBySession.get(s.session_date) ?? [];
+    rows.push(s);
+    rowsBySession.set(s.session_date, rows);
+  }
+
+  const bySession = [...rowsBySession].map(([date, rows]) => {
+    const cohorts = metricCohorts(rows, exercise);
+    const repCohorts = cohorts.filter((cohort) => !cohort.is_timed);
+    const timedCohorts = cohorts.filter((cohort) => cohort.is_timed);
+    const estimated = rows.filter((row) => estimatedOneRepMax(row, exercise) != null);
+    // Each estimate is in its set's unit; rank kg and lb by physical load.
+    const pounds = (row: SetLogRow) => estimatedOneRepMax(row, exercise)!
+      / (loadUnit(row, exercise) === 'kg' ? 0.45359237 : 1);
+    const estimatedTop = estimated.length ? estimated.reduce((best, row) =>
+      pounds(row) > pounds(best) ? row : best) : null;
+    // Preserve conventional Epley summaries. Incompatible BW/hold conditions
+    // have no overall winner; callers use the explicitly keyed cohorts.
+    const top = cohorts.length === 1 ? cohorts[0]!.top : estimatedTop;
+    const volumes = new Map<string, number>();
+    for (const row of rows) {
+      const tonnage = positiveSetTonnage(row, exercise);
+      if (tonnage != null) volumes.set(loadUnit(row, exercise), (volumes.get(loadUnit(row, exercise)) ?? 0) + tonnage);
+    }
+    const byUnit = [...volumes].sort(([a], [b]) => a.localeCompare(b))
+      .map(([unit, value]) => ({ unit, value }));
+    return {
+      date, top,
+      /** Unit of top, and so of est_1rm. */
+      unit: top == null ? null : loadUnit(top, exercise),
+      notes: rows[0]!.session_notes,
+      perceived_fatigue: rows[0]!.session_perceived_fatigue,
+      metric: top == null ? 'mixed' : estimatedTop ? 'load' : cohorts[0]!.metric,
+      est_1rm: estimatedTop ? estimatedOneRepMax(estimatedTop, exercise) : null,
+      best_reps: exercise.modality === 'bw' && repCohorts.length === 1
+        ? repCohorts[0]!.best_reps : null,
+      total_reps: exercise.modality === 'bw'
+        ? repCohorts.reduce((sum, cohort) => sum + (cohort.total_reps ?? 0), 0) : null,
+      best_duration_s: timedCohorts.length === 1 ? timedCohorts[0]!.best_duration_s : null,
+      // A scalar only for one unit; lb and kg are never summed.
+      tonnage: byUnit.length === 1 ? byUnit[0]!.value : null,
+      tonnage_by_unit: byUnit,
+      tonnage_basis: 'external_load',
+      cohorts,
+    };
+  });
+  return {
+    exercise_id: exerciseId,
+    sets: sets.results,
+    by_session: bySession.sort((a, b) => a.date.localeCompare(b.date)),
+  };
+}
+
+export async function getVolume(
+  db: D1Database, userId: string, muscle: string, from: number, to: number,
+) {
+  const normalizedMuscle = muscle.trim().toLowerCase();
+  const known = await db
+    .prepare('SELECT 1 FROM exercises WHERE lower(primary_muscle) = ?1 LIMIT 1')
+    .bind(normalizedMuscle).first();
+  if (!known) return { error: 'unknown_muscle' as const, query: muscle };
+  const rows = await db.prepare(
+    // A loaded set's volume is in its own logged unit; zero load keeps the catalog unit.
+    `SELECT strftime('%Y-%W', s.date) AS week,
+            CASE WHEN sl.weight = 0 THEN e.unit WHEN sl.weight_unit = 'kg' THEN 'kg' ELSE 'lb' END AS load_unit,
+            COUNT(*) AS logged_working_sets, COUNT(sl.rpe) AS sets_with_effort,
+            SUM(CASE WHEN sl.weight > 0 AND sl.is_timed = 0 AND e.unit != 'sec' AND e.modality != 'cardio'
+                     THEN sl.weight * sl.reps
+                       * CASE WHEN e.laterality = 'unilateral' THEN 2 ELSE 1 END
+                       * CASE WHEN e.load_mode = 'per_hand' THEN 2 ELSE 1 END
+                     ELSE NULL END) AS external_load_volume,
+            SUM(CASE WHEN sl.weight > 0 AND sl.is_timed = 0 AND e.unit != 'sec' AND e.modality != 'cardio' THEN 1 ELSE 0 END) AS contributing_sets
+     FROM set_logs sl JOIN sessions s ON s.id = sl.session_id
+     JOIN exercises e ON e.id = sl.exercise_id
+     WHERE s.user_id = ?1 AND lower(e.primary_muscle) = ?2 AND sl.deleted_at IS NULL
+       AND s.status != 'discarded' AND sl.is_warmup = 0 AND sl.logged_at BETWEEN ?3 AND ?4
+     GROUP BY week, load_unit ORDER BY week, load_unit`,
+  ).bind(userId, normalizedMuscle, from, to).all<{
+    week: string; load_unit: string; logged_working_sets: number; sets_with_effort: number;
+    external_load_volume: number | null; contributing_sets: number;
+  }>();
+  const weeks = [...new Set(rows.results.map(row => row.week))];
+  return {
+    muscle_group: normalizedMuscle, muscle_attribution: 'primary_muscle_only' as const,
+    set_count_basis: 'logged_non_warmup_sets' as const,
+    hard_sets_meaning: 'Legacy alias of logged_working_sets; effort is not required. Not measured stimulus or complete muscle volume.',
+    tonnage_basis: 'external_load' as const,
+    buckets: weeks.map(week => {
+      const group = rows.results.filter(row => row.week === week);
+      const count = group.reduce((n, row) => n + row.logged_working_sets, 0);
+      const byUnit = group.filter(row => row.external_load_volume != null).map(row => ({
+        unit: row.load_unit, value: row.external_load_volume!, contributing_sets: row.contributing_sets,
+      }));
+      return { week, hard_sets: count, logged_working_sets: count,
+        sets_with_effort: group.reduce((n, row) => n + row.sets_with_effort, 0),
+        external_load_volume: byUnit,
+        // A legacy scalar is valid only for one known unit; never sum lb and kg.
+        tonnage: byUnit.length === 1 ? byUnit[0]!.value : null,
+        unit: byUnit.length === 1 ? byUnit[0]!.unit : null };
+    }),
+  };
+}
+
+// ---- weekly schedule + future-calendar projection ------------------------
+//
+// The recurring pattern lives in plans.meta JSON (frozen contract, see
+// migrations/0005). Schedule edits are plan-tree mutations: they bump
+// plans.version and use optimistic concurrency. The one-off planned/skip
+// session writes are append-only sessions rows and do NOT bump version.
+
+/**
+ * Replace the full weekly map. Resolves each value (id, day_label, or day
+ * name) to a workout_id belonging to the active plan; rejects any ref
+ * that doesn't resolve to a day in THIS plan (no partial write). Optimistic
+ * concurrency on expected_version. Bumps plans.version on success.
+ */
+export async function setPlanSchedule(
+  db: D1Database,
+  userId: string,
+  weekInput: Partial<Record<Weekday, string | null>>,
+  expectedVersion?: number | null,
+  expectedPlanId?: string | null,
+  attribution: PlanWriteAttribution = { actor: 'system', operation: 'set_schedule' },
+  /** Each weekday's activities besides its main workout, replacing the
+   *  saved ones; omitted keeps them (a caller that knows only `week`). */
+  extrasInput?: Partial<Record<Weekday, string[]>>,
+  /** Each weekday's optional times (workout ref → "HH:MM"), replacing the
+   *  saved ones; omitted keeps those still on their day. */
+  timesInput?: Partial<Record<Weekday, Record<string, string>>>,
+): Promise<
+  | { conflict: true; current_plan_id: string; current_version: number }
+  | { error: 'no_active_plan' }
+  | { error: 'unknown_day_ref'; ref: string }
+  | { error: 'too_many_extras'; weekday: Weekday; max: number }
+  | { error: 'time_not_on_day'; weekday: Weekday; ref: string }
+  | { ok: true; plan: PlanRow; schedule: WeeklySchedule; version: number }
+> {
+  const plan = await getActivePlan(db, userId);
+  if (!plan) return { error: 'no_active_plan' };
+  if (expectedPlanId != null && expectedPlanId !== plan.id) {
+    return {
+      conflict: true,
+      current_plan_id: plan.id,
+      current_version: plan.version,
+    };
+  }
+  if (expectedVersion != null && expectedVersion !== plan.version) {
+    return {
+      conflict: true,
+      current_plan_id: plan.id,
+      current_version: plan.version,
+    };
+  }
+  const days = await db
+    .prepare(`SELECT w.id, w.name, w.day_label
+      FROM workouts w WHERE w.plan_id = ?1 AND w.archived_at IS NULL AND w.one_time_date IS NULL`)
+    .bind(plan.id)
+    .all<{ id: string; name: string; day_label: string | null }>();
+  // Build resolution maps; id wins, then exact day_label, then exact name.
+  const byId = new Map(days.results.map((d) => [d.id, d.id]));
+  const liveWorkoutIds = new Set(days.results.map((d) => d.id));
+  const byLabel = new Map<string, string>();
+  const byName = new Map<string, string>();
+  for (const d of days.results) {
+    if (d.day_label) byLabel.set(d.day_label.toLowerCase(), d.id);
+    byName.set(d.name.toLowerCase(), d.id);
+  }
+  const resolved: ScheduleWeek = {
+    mon: null, tue: null, wed: null, thu: null, fri: null, sat: null, sun: null,
+  };
+  for (const wd of WEEKDAYS) {
+    const ref = weekInput[wd];
+    if (ref == null || ref === '') {
+      resolved[wd] = null;
+      continue;
+    }
+    const id =
+      byId.get(ref) ?? byLabel.get(ref.toLowerCase()) ?? byName.get(ref.toLowerCase());
+    if (!id) return { error: 'unknown_day_ref', ref };
+    resolved[wd] = id;
+  }
+  const meta = parsePlanMeta(plan.meta);
+  // Each full workout in extras starts an independent session on its date.
+  let extras: ScheduleExtras;
+  if (extrasInput === undefined) {
+    extras = {};
+    for (const wd of WEEKDAYS) {
+      const kept = (meta.schedule.extras?.[wd] ?? []).filter((id) => liveWorkoutIds.has(id));
+      if (kept.length > 0) extras[wd] = kept;
+    }
+  } else {
+    extras = {};
+    for (const wd of WEEKDAYS) {
+      const refs = extrasInput[wd] ?? [];
+      const ids: string[] = [];
+      for (const ref of refs) {
+        const id = byId.get(ref) ?? byLabel.get(ref.toLowerCase()) ?? byName.get(ref.toLowerCase());
+        if (!id) return { error: 'unknown_day_ref', ref };
+
+        if (id !== resolved[wd] && !ids.includes(id)) ids.push(id);
+      }
+      if (ids.length > MAX_SCHEDULE_EXTRAS) {
+        return { error: 'too_many_extras', weekday: wd, max: MAX_SCHEDULE_EXTRAS };
+      }
+      if (ids.length > 0) extras[wd] = ids;
+    }
+  }
+  const normalizedExtras = normalizeScheduleExtras(extras, resolved);
+  // Times belong to what a weekday holds. Omitted, the saved ones stay for
+  // whatever is still on its day; given, each ref must be on its weekday.
+  let times: ScheduleTimes | undefined = meta.schedule.times;
+  if (timesInput !== undefined) {
+    times = {};
+    for (const wd of WEEKDAYS) {
+      const held = new Set([resolved[wd], ...(normalizedExtras?.[wd] ?? [])]);
+      const kept: Record<string, string> = {};
+      for (const [ref, time] of Object.entries(timesInput[wd] ?? {})) {
+        const id = byId.get(ref) ?? byLabel.get(ref.toLowerCase()) ?? byName.get(ref.toLowerCase());
+        if (!id) return { error: 'unknown_day_ref', ref };
+        if (!held.has(id)) return { error: 'time_not_on_day', weekday: wd, ref };
+        kept[id] = time;
+      }
+      if (Object.keys(kept).length > 0) times[wd] = kept;
+    }
+  }
+  const normalizedTimes = normalizeScheduleTimes(times, resolved, normalizedExtras);
+  // schedule.version is a monotonic change counter for the schedule itself
+  // (distinct from plans.version): bump it on every successful write so
+  // clients can detect a schedule change without diffing the full week map.
+  const schedule: WeeklySchedule = {
+    version: meta.schedule.version + 1,
+    week: resolved,
+    ...(normalizedExtras ? { extras: normalizedExtras } : {}),
+    ...(normalizedTimes ? { times: normalizedTimes } : {}),
+  };
+  const ts = now();
+  // Gate on the read version (write-time optimistic concurrency) — same as
+  // writePlanMeta; a concurrent plan write → no row updated → 409.
+  const nonce = uuid();
+  const statements = preparePlanWriteStart(db, plan, attribution, ts, nonce);
+  statements.push(db.prepare(
+    `UPDATE plans SET meta=?2,updated_at=?3
+      WHERE id=?1 AND version=-?4 AND user_id=?5 AND status='active' AND plan_write_nonce=?6`,
+  ).bind(plan.id, serializePlanMeta(meta, schedule), ts, plan.version, userId, nonce));
+  const versionResultIndex = statements.length;
+  statements.push(...preparePlanWriteFinish(db, plan, attribution, ts, nonce));
+  const results = await runWorkoutWriteBatch<{ version: number }>(db, statements);
+  const row = results[versionResultIndex]?.results[0];
+  if ((results[0]?.meta.changes ?? 0) !== 1 || (results[2]?.meta.changes ?? 0) !== 1 || !row) {
+    const cur = await getActivePlan(db, userId);
+    return {
+      conflict: true,
+      current_plan_id: cur?.id ?? plan.id,
+      current_version: cur?.version ?? plan.version,
+    };
+  }
+  return {
+    ok: true,
+    plan: { ...plan, version: row.version, updated_at: ts },
+    schedule,
+    version: row.version,
+  };
+}
+
+// ---- authored-intent plan meta (race / periodization / trips / stress) ----
+// These ride the SAME versioned-document path as the weekly schedule
+// (docs/MULTISPORT.md §3-4): optimistic concurrency on plans.version, a single
+// UPDATE that bumps the version, and audit+note written by the MCP dispatch
+// layer. No new tables, no projection change — store authored truth in
+// plans.meta; the calendar derives from it later.
+
+const YMD = /^\d{4}-\d{2}-\d{2}$/;
+
+type PlanMetaWrite =
+  | { conflict: true; current_version: number }
+  | { error: string }
+  | { ok: true; version: number; meta: PlanMeta };
+
+/**
+ * Shared optimistic-concurrency writer for the authored-intent fields in
+ * plans.meta. Mirrors setPlanSchedule exactly. `mutate` edits the parsed meta
+ * in place; returning a string aborts the write with that error code (no
+ * partial write, no version bump).
+ */
+async function writePlanMeta(
+  db: D1Database,
+  userId: string,
+  expectedVersion: number | null | undefined,
+  mutate: (meta: PlanMeta) => string | void,
+  attribution: PlanWriteAttribution,
+): Promise<PlanMetaWrite> {
+  const plan = await getActivePlan(db, userId);
+  if (!plan) return { error: 'no_active_plan' };
+  if (expectedVersion != null && expectedVersion !== plan.version) {
+    return { conflict: true, current_version: plan.version };
+  }
+  const meta = parsePlanMeta(plan.meta);
+  const err = mutate(meta);
+  if (typeof err === 'string') return { error: err };
+  const ts = now();
+  // Enforce optimistic concurrency at WRITE time, not just the pre-check: gate
+  // the UPDATE on the version we read, so two concurrent meta writes off the
+  // same get_current_plan (e.g. set_race + add_trip) can't both pass and let
+  // the later one serialize a stale copy, silently dropping the other's
+  // changes. No row updated → another writer won → 409 (caller refetches).
+  const nonce = uuid();
+  const statements = preparePlanWriteStart(db, plan, attribution, ts, nonce);
+  statements.push(db.prepare(
+    `UPDATE plans SET meta=?2,updated_at=?3
+      WHERE id=?1 AND version=-?4 AND user_id=?5 AND plan_write_nonce=?6`,
+  ).bind(plan.id, serializePlanMeta(meta, meta.schedule), ts, plan.version, userId, nonce));
+  const versionResultIndex = statements.length;
+  statements.push(...preparePlanWriteFinish(db, plan, attribution, ts, nonce));
+  const results = await runWorkoutWriteBatch<{ version: number }>(db, statements);
+  const row = results[versionResultIndex]?.results[0];
+  if ((results[0]?.meta.changes ?? 0) !== 1 || (results[2]?.meta.changes ?? 0) !== 1 || !row) {
+    const cur = await getActivePlan(db, userId);
+    return { conflict: true, current_version: cur?.version ?? plan.version };
+  }
+  return { ok: true, version: row.version, meta };
+}
+
+/** A block as a client or the coach sends it (docs/plans/progressive-plans
+ * spec): workout references may be ids, labels or names, like set_schedule. */
+export interface ProgramInput {
+  name?: string | null;
+  start: string;
+  repeat?: boolean;
+  weeks: Array<{
+    label?: string | null;
+    week: Partial<Record<Weekday, string | null>>;
+    extras?: Partial<Record<Weekday, string[]>>;
+    /** Slot id → this week's targets (spec.md, P1). Steps are sent as the
+     * step array, like a slot's run_steps. */
+    targets?: Record<string, Record<string, unknown>>;
+  }>;
+}
+
+interface ProgramSlotRow {
+  id: string; exercise_id: string; modality: string; group_id: string | null;
+  target_sets: number; target_reps: number; target_reps_max: number | null;
+}
+
+export type GroupSetsMismatch = { error: 'group_sets_mismatch'; group_id: string; week: number };
+
+type WeekTargetsResult =
+  | { ok: true; targets: Record<string, SlotTargets> | undefined }
+  | { error: 'invalid_targets'; week: number; slot?: string; fields?: string[] }
+  | { error: 'unknown_slot'; slot: string; week: number }
+  | GroupSetsMismatch;
+
+type GroupedSlot = { id: string; group_id?: string | null; target_sets: number };
+
+/** A group's members share a round count, so a week must move them together:
+ * it gives every member the same `target_sets` or none of them. Naming them
+ * all keeps the week whole when a later write changes the slots' own count.
+ * Returns the first group this week would split. */
+function weekGroupSetsMismatch(targets: Record<string, SlotTargets> | undefined,
+  slots: Iterable<GroupedSlot>, week: number): GroupSetsMismatch | null {
+  const groups = new Map<string, { members: number; set: number; counts: Set<number> }>();
+  for (const slot of slots) {
+    if (!slot.group_id) continue;
+    const group = groups.get(slot.group_id) ?? { members: 0, set: 0, counts: new Set<number>() };
+    const override = targets?.[slot.id]?.target_sets;
+    group.members += 1;
+    if (override !== undefined) group.set += 1;
+    group.counts.add(override ?? slot.target_sets);
+    groups.set(slot.group_id, group);
+  }
+  for (const [groupId, group] of groups) {
+    if (group.counts.size > 1 || (group.set > 0 && group.set < group.members)) {
+      return { error: 'group_sets_mismatch', group_id: groupId, week };
+    }
+  }
+  return null;
+}
+
+/** The same check over every week of a stored block, for a write that
+ * changes which slots are grouped or their round counts. */
+function programGroupSetsMismatch(program: TrainingProgram | null | undefined,
+  slots: GroupedSlot[]): GroupSetsMismatch | null {
+  for (const [index, week] of (program?.weeks ?? []).entries()) {
+    const mismatch = week.targets ? weekGroupSetsMismatch(week.targets, slots, index) : null;
+    if (mismatch) return mismatch;
+  }
+  return null;
+}
+
+/** One slot's week targets as comparable text: known fields in a fixed order,
+ * run steps canonical when they parse. */
+function weekTargetKey(slotId: string, fields: Record<string, unknown>): string {
+  const parts: [string, unknown][] = [];
+  for (const field of SLOT_TARGET_FIELDS) {
+    let value = fields[field];
+    if (value === undefined) continue;
+    if (field === 'run_steps' && value !== null) {
+      const parsed = parseRunSteps(value);
+      value = parsed.ok ? JSON.stringify(parsed.items) : value;
+    }
+    parts.push([field, value]);
+  }
+  return JSON.stringify([slotId, parts]);
+}
+
+/** Every slot entry the stored block already holds, in any week. */
+function storedWeekTargetKeys(program: TrainingProgram | null | undefined): Set<string> {
+  const keys = new Set<string>();
+  for (const week of program?.weeks ?? []) {
+    for (const [slotId, fields] of Object.entries(week.targets ?? {})) {
+      keys.add(weekTargetKey(slotId, fields as Record<string, unknown>));
+    }
+  }
+  return keys;
+}
+
+/** Validate one week's slot targets against the plan's live slots, with the
+ * rules a slot's own targets follow, and canonicalize run steps. An entry the
+ * stored block already holds unchanged is dropped, not rejected, when its slot
+ * is gone or no longer accepts it (deleted, archived, swapped to another
+ * exercise), so resending a saved block never fails on targets the member did
+ * not touch. New or changed entries are checked strictly. */
+function resolveWeekTargets(raw: unknown, slots: Map<string, ProgramSlotRow>, week: number,
+  stored: Set<string> = new Set()): WeekTargetsResult {
+  if (raw == null) return { ok: true, targets: undefined };
+  if (typeof raw !== 'object' || Array.isArray(raw)) return { error: 'invalid_targets', week };
+  const entries = Object.entries(raw as Record<string, unknown>);
+  if (entries.length > MAX_PROGRAM_WEEK_TARGETS) return { error: 'invalid_targets', week };
+  const out: Record<string, SlotTargets> = {};
+  for (const [slotId, value] of entries) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return { error: 'invalid_targets', slot: slotId, week };
+    }
+    const fields = value as Record<string, unknown>;
+    const unchanged = stored.size > 0 && stored.has(weekTargetKey(slotId, fields))
+      && Object.keys(fields).every((key) => (SLOT_TARGET_FIELDS as readonly string[]).includes(key));
+    const slot = slots.get(slotId);
+    if (!slot) {
+      if (unchanged) continue;
+      return { error: 'unknown_slot', slot: slotId, week };
+    }
+    const unknown = Object.keys(fields).filter((key) => !(SLOT_TARGET_FIELDS as readonly string[]).includes(key));
+    const invalid = validateExercisePrescription(fields,
+      { partial: true, modality: slot.modality, exerciseId: slot.exercise_id });
+    const bad = new Set([...unknown, ...(invalid?.fields ?? [])]);
+    const reps = typeof fields.target_reps === 'number' ? fields.target_reps : slot.target_reps;
+    const repsMax = fields.target_reps_max !== undefined ? fields.target_reps_max : slot.target_reps_max;
+    if (typeof repsMax === 'number' && repsMax < reps) bad.add('target_reps_max');
+    if (bad.size > 0) {
+      if (unchanged) continue;
+      return { error: 'invalid_targets', slot: slotId, week, fields: [...bad].sort() };
+    }
+    const kept: SlotTargets = {};
+    for (const field of SLOT_TARGET_FIELDS) {
+      if (fields[field] === undefined) continue;
+      (kept as Record<string, unknown>)[field] = field === 'run_steps' ? serializeRunSteps(fields[field]) : fields[field];
+    }
+    if (Object.keys(kept).length > 0) out[slotId] = kept;
+  }
+  const mismatch = weekGroupSetsMismatch(out, slots.values(), week);
+  if (mismatch) return mismatch;
+  return { ok: true, targets: Object.keys(out).length > 0 ? out : undefined };
+}
+
+export type SetProgramResult =
+  | { conflict: true; current_version: number }
+  | { error: 'no_active_plan' | 'invalid_start' | 'invalid_weeks' | 'invalid_label' | 'invalid_name' }
+  | { error: 'unknown_day_ref'; ref: string; week: number }
+  | { error: 'too_many_extras'; weekday: Weekday; max: number; week: number }
+  | { error: 'invalid_weekday'; weekday: string; week: number }
+  | Exclude<WeekTargetsResult, { ok: true }>
+  | { ok: true; version: number; program: TrainingProgram | null };
+
+type ProgramResolveError = Exclude<SetProgramResult, { ok: true } | { conflict: true; current_version: number }>;
+
+/** Validate a block as sent and resolve its references against the plan's
+ * live workouts and slots (set_schedule's rules: an extra must be an
+ * activity, at most four a day). Shared by setProgram and the event builder. */
+async function resolveProgram(
+  db: D1Database,
+  plan: { id: string; meta: string | null },
+  input: ProgramInput,
+): Promise<{ program: TrainingProgram } | ProgramResolveError> {
+  const existing = parsePlanMeta(plan.meta).program;
+  if (typeof input.start !== 'string' || !YMD.test(input.start) || addDays(input.start, 0) !== input.start
+      || weekdayOf(input.start) !== 'mon') return { error: 'invalid_start' };
+  if (!Array.isArray(input.weeks) || input.weeks.length === 0 || input.weeks.length > MAX_PROGRAM_WEEKS) {
+    return { error: 'invalid_weeks' };
+  }
+  if (input.name != null && (typeof input.name !== 'string' || input.name.trim().length > MAX_PROGRAM_NAME)) {
+    return { error: 'invalid_name' };
+  }
+  const days = await db
+    .prepare(`SELECT w.id, w.name, w.day_label
+      FROM workouts w WHERE w.plan_id = ?1 AND w.archived_at IS NULL AND w.one_time_date IS NULL`)
+    .bind(plan.id)
+    .all<{ id: string; name: string; day_label: string | null }>();
+  const byId = new Map(days.results.map((d) => [d.id, d.id]));
+  const byLabel = new Map<string, string>();
+  const byName = new Map<string, string>();
+  for (const d of days.results) {
+    if (d.day_label) byLabel.set(d.day_label.toLowerCase(), d.id);
+    byName.set(d.name.toLowerCase(), d.id);
+  }
+  const resolve = (ref: string) =>
+    byId.get(ref) ?? byLabel.get(ref.toLowerCase()) ?? byName.get(ref.toLowerCase());
+  const slotRows = await db
+    .prepare(`SELECT te.id, te.exercise_id, e.modality, te.group_id, te.target_sets, te.target_reps,
+        te.target_reps_max
+      FROM template_exercises te JOIN workouts w ON w.id = te.workout_id
+      JOIN exercises e ON e.id = te.exercise_id
+      WHERE w.plan_id = ?1 AND w.archived_at IS NULL AND w.one_time_date IS NULL`)
+    .bind(plan.id)
+    .all<ProgramSlotRow>();
+  const slots = new Map(slotRows.results.map((row) => [row.id, row]));
+  const stored = storedWeekTargetKeys(existing);
+  const weeks: ProgramWeek[] = [];
+  for (const [index, item] of input.weeks.entries()) {
+    if (!item || typeof item !== 'object' || !item.week || typeof item.week !== 'object'
+        || Array.isArray(item.week)) {
+      return { error: 'invalid_weeks' };
+    }
+    // Only mon..sun: a misspelled day must not be saved as a rest day.
+    const strayDay = [...Object.keys(item.week), ...Object.keys(item.extras ?? {})]
+      .find((key) => !(WEEKDAYS as readonly string[]).includes(key));
+    if (strayDay !== undefined) return { error: 'invalid_weekday', weekday: strayDay, week: index };
+    if (item.label != null && (typeof item.label !== 'string' || item.label.trim().length > MAX_PROGRAM_LABEL)) {
+      return { error: 'invalid_label' };
+    }
+    const week: ScheduleWeek = { mon: null, tue: null, wed: null, thu: null, fri: null, sat: null, sun: null };
+    for (const wd of WEEKDAYS) {
+      const ref = item.week[wd];
+      if (ref == null || ref === '') continue;
+      if (typeof ref !== 'string') return { error: 'invalid_weeks' };
+      const id = resolve(ref);
+      if (!id) return { error: 'unknown_day_ref', ref, week: index };
+      week[wd] = id;
+    }
+    const extras: ScheduleExtras = {};
+    for (const wd of WEEKDAYS) {
+      const refs = item.extras?.[wd] ?? [];
+      if (!Array.isArray(refs)) return { error: 'invalid_weeks' };
+      const ids: string[] = [];
+      for (const ref of refs) {
+        const id = typeof ref === 'string' ? resolve(ref) : undefined;
+        if (!id) return { error: 'unknown_day_ref', ref: String(ref), week: index };
+        if (id !== week[wd] && !ids.includes(id)) ids.push(id);
+      }
+      if (ids.length > MAX_SCHEDULE_EXTRAS) {
+        return { error: 'too_many_extras', weekday: wd, max: MAX_SCHEDULE_EXTRAS, week: index };
+      }
+      if (ids.length > 0) extras[wd] = ids;
+    }
+    const normalized = normalizeScheduleExtras(extras, week);
+    const label = item.label?.trim() ?? '';
+    const targets = resolveWeekTargets(item.targets, slots, index, stored);
+    if (!('ok' in targets)) return targets;
+    weeks.push({ ...(label ? { label } : {}), week, ...(normalized ? { extras: normalized } : {}),
+      ...(targets.targets ? { targets: targets.targets } : {}) });
+  }
+  const name = input.name?.trim() ?? '';
+  return { program: { id: existing?.id ?? uuid(), ...(name ? { name } : {}), start: input.start,
+    repeat: input.repeat === true, weeks } };
+}
+
+/**
+ * Replace the plan's block of weeks, or clear it with null. Versioned like
+ * every plan write; references resolve against the plan's live workouts with
+ * set_schedule's rules (an extra must be an activity, at most four a day).
+ */
+export async function setProgram(
+  db: D1Database,
+  userId: string,
+  input: ProgramInput | null,
+  expectedVersion?: number | null,
+  attribution: PlanWriteAttribution = { actor: 'system', operation: 'set_program' },
+): Promise<SetProgramResult> {
+  const plan = await getActivePlan(db, userId);
+  if (!plan) return { error: 'no_active_plan' };
+  if (expectedVersion != null && expectedVersion !== plan.version) {
+    return { conflict: true, current_version: plan.version };
+  }
+  let program: TrainingProgram | null = null;
+  if (input != null) {
+    const resolved = await resolveProgram(db, plan, input);
+    if (!('program' in resolved)) return resolved;
+    program = resolved.program;
+  }
+  // Gate the write on the version the references were resolved against.
+  const res = await writePlanMeta(db, userId, plan.version, (meta) => {
+    if (program) meta.program = program;
+    else delete meta.program;
+  }, attribution);
+  return 'ok' in res ? { ok: true, version: res.version, program: res.meta.program ?? null }
+    : res as { conflict: true; current_version: number } | { error: 'no_active_plan' };
+}
+
+/** "Train for an event" (docs/plans/progressive-plans P3): the event and
+ * the few rules the member can change; everything else has a default. */
+export interface EventBuildInput {
+  /** The event; absent for "Keep building, no date" (`open`). */
+  race?: RaceGoal & { distance_m: number };
+  /** "Keep building, no date": a block of this many weeks with no event,
+   * stepping the long run up to `peak_m` (the ceiling) and holding there. */
+  open?: { weeks: number };
+  /** The member's today (device-local), for the default start and the
+   * longest run lately. */
+  today: string;
+  start?: string;
+  long_run_weekday: Weekday;
+  long_run_now_m?: number;
+  peak_m?: number;
+  easy_every?: number;
+  taper_weeks?: number;
+  shorten_other_runs?: boolean;
+  unit?: BuildUnit;
+  /** The day of the week's harder run; null for none, absent to suggest one. */
+  workout_weekday?: Weekday | null;
+}
+
+export interface EventBuildPreview {
+  start: string;
+  weeks: BuildWeekSummary[];
+  reached_peak: boolean;
+  /** The rules as applied, defaults filled in, so the app can show them. */
+  rules: {
+    long_run_weekday: Weekday;
+    long_run_now_m: number;
+    /** The longest run in the four weeks before today, if any. */
+    longest_recent_m: number | null;
+    peak_m: number;
+    easy_every: number;
+    taper_weeks: number;
+    shorten_other_runs: boolean;
+    unit: BuildUnit;
+    workout_weekday: Weekday | null;
+    /** 'goal' with a goal time (the plan aims at goal pace), else 'finish'. */
+    style: 'finish' | 'goal';
+    goal_pace_s_per_km: number | null;
+  };
+  /** Saving replaces a block the plan already has. */
+  replaces_block: boolean;
+  /** The plan version the preview was laid out from: save against it, so a
+   * change made meanwhile conflicts instead of being replaced unseen. */
+  plan_version: number;
+}
+
+export type EventBuildResult =
+  | { conflict: true; current_version: number }
+  | { error: 'no_active_plan' | 'event_in_past' | 'invalid_start' | 'event_before_start' | 'too_many_weeks'
+      | 'no_long_run' | 'no_workout_run' | 'goal_pace_out_of_range' }
+  | { error: 'long_run_shared' | 'workout_shared'; weekday: Weekday }
+  | ProgramResolveError
+  | { ok: true; preview: EventBuildPreview }
+  | { ok: true; preview: EventBuildPreview; version: number; program: TrainingProgram; race: RaceGoal | null };
+
+/** The longest run the member did in the four weeks before `today`, from
+ * every source they have (provider rows already de-duplicated). For the
+ * coach, WHOOP and Garmin rows never count (docs/plans/whoop,
+ * docs/plans/garmin: their data stays out of every coach tool). */
+async function longestRecentRun(db: D1Database, userId: string, today: string, coach: boolean): Promise<number | null> {
+  const row = await db
+    .prepare(`SELECT MAX(distance_m) AS longest FROM external_activities
+      WHERE user_id = ?1 AND deleted_at IS NULL AND kind = 'run' AND distance_m > 0
+        AND date >= ?2 AND date <= ?3${coach ? " AND source NOT IN ('whoop', 'garmin')" : ''}`)
+    .bind(userId, addDays(today, -28), today)
+    .first<{ longest: number | null }>();
+  return row?.longest != null && row.longest > 0 ? row.longest : null;
+}
+
+/**
+ * Lay out a block of weeks to an event by fixed rules, from the plan's
+ * repeating week. Without `save` it only previews. With it, the event and
+ * the block are written together in one versioned plan write, replacing any
+ * block already there; every week stays editable afterwards.
+ */
+export async function buildEventBlock(
+  db: D1Database,
+  userId: string,
+  input: EventBuildInput,
+  save: { expectedVersion: number; attribution: PlanWriteAttribution } | null,
+  options: { coach?: boolean } = {},
+): Promise<EventBuildResult> {
+  const plan = await getActivePlan(db, userId);
+  if (!plan) return { error: 'no_active_plan' };
+  if (save && save.expectedVersion !== plan.version) {
+    return { conflict: true, current_version: plan.version };
+  }
+  const { race, today, open } = input;
+  if (race && race.date < today) return { error: 'event_in_past' };
+  let start = input.start;
+  if (start === undefined) {
+    start = mondayOnOrAfter(today);
+    if (race && start > race.date) start = mondayOf(today);
+  }
+  const meta = parsePlanMeta(plan.meta);
+  const longestRecent = await longestRecentRun(db, userId, today, options.coach === true);
+  const unit = input.unit ?? 'mi';
+  const slots = await db
+    .prepare(`SELECT te.id, te.workout_id, te.run_steps, te.target_duration_s
+      FROM template_exercises te JOIN workouts w ON w.id = te.workout_id
+      WHERE w.plan_id = ?1 AND w.archived_at IS NULL AND w.one_time_date IS NULL AND te.exercise_id = ?2
+      ORDER BY te.workout_id, te.order_index`)
+    .bind(plan.id, RUN_EXERCISE_ID)
+    .all<{ id: string; workout_id: string; run_steps: string | null; target_duration_s: number | null }>();
+  // Within what a request may send, so a save can repeat the preview's value.
+  const clampDistance = (meters: number) => Math.min(BUILD_LIMITS.longRunMeters.max,
+    Math.max(BUILD_LIMITS.longRunMeters.min, Math.round(meters)));
+  const longRunNow = input.long_run_now_m ?? clampDistance(longestRecent ?? 5000);
+  const rules = {
+    start,
+    race_date: race?.date ?? '',
+    race_distance_m: race?.distance_m ?? 0,
+    long_run_weekday: input.long_run_weekday,
+    long_run_now_m: longRunNow,
+    // Without an event the ceiling defaults to 10 mi, or a third more than
+    // the longest run lately when that is already further.
+    peak_m: input.peak_m ?? (race ? defaultPeakMeters(race.distance_m)
+      : clampDistance(Math.max(16_093, longRunNow * 1.3))),
+    easy_every: input.easy_every ?? 4,
+    taper_weeks: input.taper_weeks ?? (race ? defaultTaperWeeks(race.distance_m) : 1),
+    shorten_other_runs: input.shorten_other_runs ?? true,
+    unit,
+    workout_weekday: input.workout_weekday !== undefined ? input.workout_weekday
+      : defaultWorkoutWeekday(input.long_run_weekday, meta.schedule.week, meta.schedule.extras, slots.results),
+    goal_time_s: race?.goal_time_s ?? null,
+    ...(open ? { open } : {}),
+  };
+  const name = race ? race.name.trim().slice(0, MAX_PROGRAM_NAME).trim() : 'Keep building';
+  const built = buildEventProgram(rules, name, meta.schedule.week, meta.schedule.extras, slots.results);
+  if (!('ok' in built)) return built;
+  const preview: EventBuildPreview = {
+    start,
+    weeks: built.weeks,
+    reached_peak: built.reached_peak,
+    rules: {
+      long_run_weekday: rules.long_run_weekday,
+      long_run_now_m: Math.round(rules.long_run_now_m),
+      longest_recent_m: longestRecent == null ? null : Math.round(longestRecent),
+      peak_m: Math.round(rules.peak_m),
+      easy_every: rules.easy_every,
+      taper_weeks: rules.taper_weeks,
+      shorten_other_runs: rules.shorten_other_runs,
+      unit,
+      workout_weekday: rules.workout_weekday,
+      style: rules.goal_time_s != null ? 'goal' : 'finish',
+      goal_pace_s_per_km: (() => {
+        const pace = goalPace(rules);
+        return pace == null ? null : Math.round(pace);
+      })(),
+    },
+    replaces_block: meta.program != null,
+    plan_version: plan.version,
+  };
+  if (!save) return { ok: true, preview };
+  const resolved = await resolveProgram(db, plan, built.program as unknown as ProgramInput);
+  if (!('program' in resolved)) return resolved;
+  const program = resolved.program;
+  // Gate the write on the version the block was built against.
+  const res = await writePlanMeta(db, userId, plan.version, (next) => {
+    // A block with no event leaves any saved event as it is.
+    if (race) next.race = race;
+    next.program = program;
+  }, save.attribution);
+  if (!('ok' in res)) return res as { conflict: true; current_version: number } | { error: 'no_active_plan' };
+  return { ok: true, preview, version: res.version, program: res.meta.program!, race: res.meta.race ?? null };
+}
+
+/** Set the goal A-race. Replaces any existing race. */
+export async function setRace(
+  db: D1Database,
+  userId: string,
+  race: RaceGoal,
+  expectedVersion?: number | null,
+  attribution: PlanWriteAttribution = { actor: 'system', operation: 'set_race' },
+) {
+  if (!YMD.test(race.date)) return { error: 'invalid_date' as const };
+  const res = await writePlanMeta(db, userId, expectedVersion, (meta) => {
+    meta.race = race;
+  }, attribution);
+  return 'ok' in res
+    ? { ok: true as const, version: res.version, race: res.meta.race ?? null }
+    : res;
+}
+
+/** Clear the goal race. With none set it writes nothing (no new version),
+ * so a retried clear answers the same way. */
+export async function clearRace(
+  db: D1Database,
+  userId: string,
+  expectedVersion?: number | null,
+  attribution: PlanWriteAttribution = { actor: 'system', operation: 'clear_race' },
+) {
+  const plan = await getActivePlan(db, userId);
+  if (!plan) return { error: 'no_active_plan' as const };
+  if (expectedVersion != null && expectedVersion !== plan.version) {
+    return { conflict: true as const, current_version: plan.version };
+  }
+  if (!parsePlanMeta(plan.meta).race) return { ok: true as const, version: plan.version, race: null };
+  const res = await writePlanMeta(db, userId, expectedVersion, (meta) => {
+    delete meta.race;
+  }, attribution);
+  return 'ok' in res ? { ok: true as const, version: res.version, race: null } : res;
+}
+
+/** Replace the periodization plan (full ordered phase array). */
+export async function setPeriodization(
+  db: D1Database,
+  userId: string,
+  phases: PeriodizationPhase[],
+  expectedVersion?: number | null,
+  attribution: PlanWriteAttribution = { actor: 'system', operation: 'set_periodization' },
+) {
+  for (const p of phases) {
+    if (!YMD.test(p.start) || !YMD.test(p.end)) return { error: 'invalid_date' as const };
+    // An inverted phase (start > end) covers no dates but would be stored as
+    // authored truth for Claude to reason over — reject it, same as trips
+    // (Codex #64 P2).
+    if (p.start > p.end) return { error: 'invalid_range' as const };
+  }
+  const res = await writePlanMeta(db, userId, expectedVersion, (meta) => {
+    meta.periodization = phases;
+  }, attribution);
+  return 'ok' in res
+    ? { ok: true as const, version: res.version, periodization: res.meta.periodization ?? [] }
+    : res;
+}
+
+/** Append a trip/blackout range; mints and returns its id. */
+export async function addTrip(
+  db: D1Database,
+  userId: string,
+  trip: Omit<Trip, 'id'>,
+  expectedVersion?: number | null,
+  attribution: PlanWriteAttribution = { actor: 'system', operation: 'add_trip' },
+) {
+  if (!YMD.test(trip.start) || !YMD.test(trip.end)) return { error: 'invalid_date' as const };
+  // YYYY-MM-DD sorts chronologically, so an inverted range (start > end) would
+  // store a trip the projection (date >= start && date <= end) can NEVER cover
+  // — a silent no-op. Reject it. (Codex #64 P2.)
+  if (trip.start > trip.end) return { error: 'invalid_range' as const };
+  const id = uuid();
+  const res = await writePlanMeta(db, userId, expectedVersion, (meta) => {
+    const trips = meta.trips ?? [];
+    trips.push({ ...trip, id });
+    meta.trips = trips;
+  }, attribution);
+  return 'ok' in res
+    ? { ok: true as const, version: res.version, id, trips: res.meta.trips ?? [] }
+    : res;
+}
+
+/** Patch one trip by id. Errors `trip_not_found` if absent. */
+export async function updateTrip(
+  db: D1Database,
+  userId: string,
+  tripId: string,
+  patch: Partial<Omit<Trip, 'id'>>,
+  expectedVersion?: number | null,
+  attribution: PlanWriteAttribution = { actor: 'system', operation: 'update_trip' },
+) {
+  if (patch.start && !YMD.test(patch.start)) return { error: 'invalid_date' as const };
+  if (patch.end && !YMD.test(patch.end)) return { error: 'invalid_date' as const };
+  const res = await writePlanMeta(db, userId, expectedVersion, (meta) => {
+    const trips = meta.trips ?? [];
+    const i = trips.findIndex((t) => t.id === tripId);
+    const existing = i < 0 ? undefined : trips[i];
+    if (!existing) return 'trip_not_found';
+    // Merge only the fields actually present — never clobber with undefined.
+    const merged: Trip = { ...existing, id: tripId };
+    if (patch.start !== undefined) merged.start = patch.start;
+    if (patch.end !== undefined) merged.end = patch.end;
+    if (patch.type !== undefined) merged.type = patch.type;
+    if (patch.can_train_light !== undefined) merged.can_train_light = patch.can_train_light;
+    if (patch.note !== undefined) merged.note = patch.note;
+    // Validate the RESULTING range (a patch may move only start or only end)
+    // — an inverted range covers no dates (Codex #64 P2).
+    if (merged.start > merged.end) return 'invalid_range';
+    trips[i] = merged;
+    meta.trips = trips;
+  }, attribution);
+  return 'ok' in res
+    ? { ok: true as const, version: res.version, trips: res.meta.trips ?? [] }
+    : res;
+}
+
+/** Remove one trip by id. Errors `trip_not_found` if absent. */
+export async function removeTrip(
+  db: D1Database,
+  userId: string,
+  tripId: string,
+  expectedVersion?: number | null,
+  attribution: PlanWriteAttribution = { actor: 'system', operation: 'remove_trip' },
+) {
+  const res = await writePlanMeta(db, userId, expectedVersion, (meta) => {
+    const trips = meta.trips ?? [];
+    if (!trips.some((t) => t.id === tripId)) return 'trip_not_found';
+    meta.trips = trips.filter((t) => t.id !== tripId);
+  }, attribution);
+  return 'ok' in res
+    ? { ok: true as const, version: res.version, trips: res.meta.trips ?? [] }
+    : res;
+}
+
+/** Replace the planning stress model. */
+export async function setStressModel(
+  db: D1Database,
+  userId: string,
+  model: StressModel,
+  expectedVersion?: number | null,
+  attribution: PlanWriteAttribution = { actor: 'system', operation: 'set_stress_model' },
+) {
+  const res = await writePlanMeta(db, userId, expectedVersion, (meta) => {
+    meta.stress_model = model;
+  }, attribution);
+  return 'ok' in res
+    ? { ok: true as const, version: res.version, stress_model: res.meta.stress_model ?? null }
+    : res;
+}
+
+/**
+ * Scrub schedule weekday entries whose workout_id is not in `liveIds`.
+ * Returns the cleaned schedule, or null if nothing changed. Caller decides
+ * whether to persist (used inside the plan-rebuild batch so it shares the
+ * single version bump).
+ */
+function scrubSchedule(
+  schedule: WeeklySchedule,
+  liveIds: Set<string>,
+): WeeklySchedule | null {
+  let changed = false;
+  const week: ScheduleWeek = { ...schedule.week };
+  const extras: ScheduleExtras = {};
+  for (const wd of WEEKDAYS) {
+    const v = week[wd];
+    if (v != null && !liveIds.has(v)) {
+      week[wd] = null;
+      changed = true;
+    }
+    const list = schedule.extras?.[wd] ?? [];
+    const kept = list.filter((id) => liveIds.has(id));
+    if (kept.length !== list.length) changed = true;
+    if (kept.length > 0) extras[wd] = kept;
+  }
+  if (!changed) return null;
+  const normalized = normalizeScheduleExtras(extras, week);
+  const times = normalizeScheduleTimes(schedule.times, week, normalized);
+  return { version: schedule.version + 1, week, ...(normalized ? { extras: normalized } : {}),
+    ...(times ? { times } : {}) };
+}
+
+/** The block with every week scrubbed like `scrubSchedule`, or null when
+ * nothing changed (docs/plans/progressive-plans P0). */
+function scrubProgram(program: TrainingProgram | undefined, liveIds: Set<string>): TrainingProgram | null {
+  if (!program) return null;
+  let changed = false;
+  const weeks = program.weeks.map((week) => {
+    const scrubbed = scrubSchedule({ version: 0, ...week }, liveIds);
+    if (!scrubbed) return week;
+    changed = true;
+    return { ...(week.label ? { label: week.label } : {}), week: scrubbed.week,
+      ...(scrubbed.extras ? { extras: scrubbed.extras } : {}), ...(week.targets ? { targets: week.targets } : {}) };
+  });
+  return changed ? { ...program, weeks } : null;
+}
+
+export type DeleteWorkoutResult =
+  | { ok: true; version: number }
+  | { error: 'day_not_found' }
+  | { error: 'day_in_progress' }
+  | PlanVersionConflict
+  | GroupConflict;
+
+/**
+ * Delete one workout from the active plan. Reads the plan row, checks the
+ * caller's expected version, then delegates to `deleteWorkoutAtVersion`.
+ */
+export async function deleteWorkout(
+  db: D1Database,
+  userId: string,
+  dayId: string,
+  expectedVersion?: number,
+  attribution: PlanWriteAttribution = { actor: 'system', operation: 'delete_day' },
+): Promise<DeleteWorkoutResult> {
+  const plan = await getActivePlan(db, userId);
+  if (!plan) return { error: 'day_not_found' };
+  if (expectedVersion !== undefined && expectedVersion !== plan.version) {
+    return { conflict: true, current_version: plan.version };
+  }
+  return deleteWorkoutAtVersion(db, userId, plan, dayId, attribution);
+}
+
+/**
+ * Delete one workout tied to the exact plan row the caller read and, in the
+ * same transaction, scrub any schedule entries pointing at it and bump
+ * plans.version exactly once. `plan.version` is the write-time fence.
+ */
+export async function deleteWorkoutAtVersion(
+  db: D1Database,
+  userId: string,
+  plan: PlanRow,
+  dayId: string,
+  attribution: PlanWriteAttribution = { actor: 'system', operation: 'delete_day' },
+): Promise<DeleteWorkoutResult> {
+  const writeVersion = plan.version;
+  const tree = await loadPlanTree(db, plan);
+  if (!tree.workouts.some((candidate) => candidate.id === dayId)) return { error: 'day_not_found' };
+  // Same `order_index, created_at, id` order the tree read uses, so the dense
+  // re-index below matches the former dedicated `remaining` query.
+  const remaining = tree.workouts.filter((candidate) => candidate.id !== dayId);
+  const groupInvalid = validatePlanExerciseGroups(remaining);
+  if (groupInvalid) return groupInvalid;
+  const meta = parsePlanMeta(plan.meta);
+  const liveIds = new Set(remaining.map((r) => r.id));
+  const scrubbed = scrubSchedule(meta.schedule, liveIds);
+  // A session may deliberately keep workout_id NULL and resolve its
+  // workout from the recurring schedule for that civil date. Treat those
+  // rows as references to this day too, using the same mon..sun rule as the
+  // calendar projection. The literal list is derived only from WEEKDAYS.
+  const scheduledWeekdayNumbers = WEEKDAYS.flatMap((weekday, index) =>
+    meta.schedule.week[weekday] === dayId ? [(index + 1) % 7] : [],
+  );
+  const matchesDeletedDay = (
+    alias: string,
+    dayParameter: string,
+    planParameter: string,
+  ): string => {
+    // Keep the plan identity explicit in both branches. Besides preventing an
+    // archived-plan row from participating, this keeps the numbered binding
+    // contract stable when the deleted day is no longer in the schedule.
+    const explicit = `(${alias}.workout_id = ${dayParameter} AND ${alias}.plan_id = ${planParameter})`;
+    if (scheduledWeekdayNumbers.length === 0) return explicit;
+    return `(${explicit} OR (${alias}.slot=0 AND ${alias}.kind='planned' AND ${alias}.workout_id IS NULL AND ${alias}.plan_id = ${planParameter} AND CAST(strftime('%w', ${alias}.date) AS INTEGER) IN (${scheduledWeekdayNumbers.join(',')})))`;
+  };
+  // Once a null-template session has started, its live set links are durable
+  // evidence of which template it is executing. The recurring schedule can be
+  // remapped while that workout is still active, so current weekday resolution
+  // alone is insufficient to protect the old day from deletion.
+  const activeSessionReferencesDeletedDay = (
+    alias: string,
+    dayParameter: string,
+    planParameter: string,
+  ): string => `(
+    ${matchesDeletedDay(alias, dayParameter, planParameter)}
+    OR EXISTS (
+      SELECT 1 FROM set_logs AS active_set
+      JOIN template_exercises AS active_slot
+        ON active_slot.id = active_set.template_exercise_id
+      WHERE active_set.session_id = ${alias}.id
+        AND active_set.deleted_at IS NULL
+        AND active_slot.workout_id = ${dayParameter}
+    )
+  )`;
+  const ts = now();
+  const nonce = uuid();
+  const stmts: D1PreparedStatement[] = [
+    ...preparePlanWriteStart(db, plan, attribution, ts, nonce),
+    // Preserve historical rows; only detach their pointers into the plan
+    // document before deleting that document node.
+    db
+      .prepare(
+        `UPDATE sessions
+            SET workout_id = NULL,
+                status = CASE WHEN status = 'planned' THEN 'skipped' ELSE status END,
+                updated_at = CASE
+                  WHEN workout_id IS NOT NULL OR status = 'planned' THEN ?5
+                  ELSE updated_at
+                END,
+                attempt = CASE WHEN status = 'planned' THEN attempt + 1 ELSE attempt END
+          WHERE user_id = ?1 AND ${matchesDeletedDay('sessions', '?2', '?3')}
+            AND status != 'in_progress'
+            AND EXISTS (
+              SELECT 1 FROM plans
+               WHERE id = ?3 AND user_id = ?1 AND status = 'active' AND version = ?4
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM sessions AS active_session
+               WHERE active_session.user_id = ?1
+                 AND ${activeSessionReferencesDeletedDay('active_session', '?2', '?3')}
+                 AND active_session.status = 'in_progress'
+            )`,
+      )
+      .bind(userId, dayId, plan.id, -writeVersion, ts),
+    db
+      .prepare(
+        `UPDATE set_logs
+            SET template_exercise_id = NULL,
+                updated_at = MAX(updated_at + 1, ?5)
+          WHERE template_exercise_id IN (
+            SELECT id FROM template_exercises WHERE workout_id = ?1
+          )
+            AND EXISTS (
+              SELECT 1 FROM plans
+               WHERE id = ?2 AND user_id = ?3 AND status = 'active' AND version = ?4
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM sessions AS active_session
+               WHERE active_session.user_id = ?3
+                 AND ${activeSessionReferencesDeletedDay('active_session', '?1', '?2')}
+                 AND active_session.status = 'in_progress'
+            )`,
+      )
+      .bind(dayId, plan.id, userId, -writeVersion, ts),
+    db
+      .prepare(
+        `DELETE FROM template_exercises WHERE workout_id = ?1
+          AND EXISTS (
+            SELECT 1 FROM plans
+             WHERE id = ?2 AND user_id = ?3 AND status = 'active' AND version = ?4
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM sessions AS active_session
+             WHERE active_session.user_id = ?3
+               AND ${activeSessionReferencesDeletedDay('active_session', '?1', '?2')}
+               AND active_session.status = 'in_progress'
+          )`,
+      )
+      .bind(dayId, plan.id, userId, -writeVersion),
+    db
+      .prepare(
+        `DELETE FROM workouts WHERE id = ?1 AND plan_id = ?2
+          AND EXISTS (
+            SELECT 1 FROM plans
+             WHERE id = ?2 AND user_id = ?3 AND status = 'active' AND version = ?4
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM sessions AS active_session
+             WHERE active_session.user_id = ?3
+               AND ${activeSessionReferencesDeletedDay('active_session', '?1', '?2')}
+               AND active_session.status = 'in_progress'
+          )`,
+      )
+      .bind(dayId, plan.id, userId, -writeVersion),
+    ...remaining.map((row, index) =>
+      db
+        .prepare(
+          `UPDATE workouts SET order_index = ?2, updated_at = ?3
+            WHERE id = ?1 AND plan_id = ?4
+              AND EXISTS (
+                SELECT 1 FROM plans
+                 WHERE id = ?4 AND user_id = ?5 AND status = 'active' AND version = ?6
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM sessions AS active_session
+                 WHERE active_session.user_id = ?5
+                   AND ${activeSessionReferencesDeletedDay('active_session', '?7', '?4')}
+                   AND active_session.status = 'in_progress'
+              )`,
+        )
+        .bind(row.id, index, ts, plan.id, userId, -writeVersion, dayId),
+    ),
+    db
+      .prepare(
+        `UPDATE plans SET meta = ?2, updated_at = ?3
+          WHERE id = ?1 AND user_id = ?4 AND status = 'active' AND version = ?5
+            AND plan_write_nonce = ?7
+            AND NOT EXISTS (
+              SELECT 1 FROM sessions AS active_session
+               WHERE active_session.user_id = ?4
+                 AND ${activeSessionReferencesDeletedDay('active_session', '?6', '?1')}
+                 AND active_session.status = 'in_progress'
+            )
+          `,
+      )
+      .bind(
+        plan.id,
+        serializePlanMeta({ ...meta, program: scrubProgram(meta.program, liveIds) ?? meta.program },
+          scrubbed ?? meta.schedule),
+        ts,
+        userId,
+        -writeVersion,
+        dayId,
+        nonce,
+      ),
+  ];
+  const documentUpdateIndex = stmts.length - 1;
+  const versionResultIndex = stmts.length;
+  stmts.push(...preparePlanWriteFinish(db, plan, attribution, ts, nonce));
+  const results = await runWorkoutWriteBatch<{ version: number }>(db, stmts);
+  const updatedPlan = results[versionResultIndex]?.results[0];
+  if ((results[0]?.meta.changes ?? 0) !== 1 || (results[documentUpdateIndex]?.meta.changes ?? 0) !== 1 || !updatedPlan) {
+    const active = await db
+      .prepare(
+        `SELECT 1 FROM sessions AS active_session
+          WHERE active_session.user_id = ?1
+            AND ${activeSessionReferencesDeletedDay('active_session', '?2', '?3')}
+            AND active_session.status = 'in_progress'
+          LIMIT 1`,
+      )
+      .bind(userId, dayId, plan.id)
+      .first();
+    if (active) return { error: 'day_in_progress' };
+    return currentPlanVersion(db, userId, writeVersion);
+  }
+  return { ok: true, version: updatedPlan.version };
+}
+
+export interface CalendarMoveInput {
+  id: string;
+  from_date: string;
+  to_date: string;
+  today: string;
+  workout_id: string;
+  expected_plan_id: string;
+  expected_version: number;
+  expected_from_attempt: number;
+  expected_to_attempt: number;
+}
+
+export interface CalendarMoveAcknowledgement {
+  ok: true;
+  from: SessionRow;
+  to: SessionRow;
+}
+
+/** Two date exceptions and their retry receipt commit together. Notes and
+ * fatigue remain on their original dates, as with a date assignment/removal. */
+export async function moveCalendarWorkout(db: D1Database, userId: string, input: CalendarMoveInput,
+  actor: AppClient = 'ios'): Promise<
+  CalendarMoveAcknowledgement | { error: 'calendar_move_conflict' | 'invalid_move' | 'idempotency_conflict' }
+> {
+  const args = JSON.stringify(input);
+  const receiptID = input.id;
+  const readReceipt = async () => {
+    const row = await db.prepare(
+      'SELECT user_id,tool,args,result FROM audit_log WHERE id=?1').bind(receiptID)
+      .first<{ user_id: string; tool: string; args: string; result: string }>();
+    if (!row) return null;
+    if (row.user_id !== userId || row.tool !== 'move_calendar_workout' || row.args !== args) {
+      return { error: 'idempotency_conflict' as const };
+    }
+    return JSON.parse(row.result).acknowledgement as CalendarMoveAcknowledgement;
+  };
+  const previous = await readReceipt();
+  if (previous) return previous;
+  if (input.from_date === input.to_date || input.from_date < input.today || input.to_date < input.today) {
+    return { error: 'invalid_move' };
+  }
+  const plan = await getPlanTree(db, userId);
+  if (!plan || plan.id !== input.expected_plan_id || plan.version !== input.expected_version
+      || !plan.workouts.some((workout) => workout.id === input.workout_id && workout.archived_at == null
+        // A one-time workout stays on its own date (workout-library P3).
+        && workout.one_time_date == null)) {
+    return { error: 'calendar_move_conflict' };
+  }
+  const rows = (await db.prepare(
+    'SELECT * FROM sessions WHERE user_id=?1 AND slot=0 AND date IN (?2,?3)')
+    .bind(userId, input.from_date, input.to_date).all<SessionRow>()).results;
+  if (rows.some(row => row.kind === 'freestyle' && row.status !== 'discarded')) {
+    return { error: 'calendar_move_conflict' };
+  }
+  const from = rows.find((row) => row.date === input.from_date);
+  const to = rows.find((row) => row.date === input.to_date);
+  if ((from?.attempt ?? 0) !== input.expected_from_attempt || (to?.attempt ?? 0) !== input.expected_to_attempt
+      || rows.some((row) => !['planned', 'skipped', 'discarded'].includes(row.status))) {
+    return { error: 'calendar_move_conflict' };
+  }
+  const meta = parsePlanMeta(plan.meta);
+  const project = (date: string) => projectCalendar(plan, meta.schedule, rows, date, date,
+    input.today, plan.workouts.filter(workout => workout.archived_at == null).map((workout) => workout.id), meta.trips,
+    [], [], meta.program ?? null)[0];
+  const origin = project(input.from_date);
+  const destination = project(input.to_date);
+  const resolvedWorkout = (cell: CalendarCell | undefined) => {
+    if (!cell || cell.suppresses_schedule_and_endurance) return null;
+    if (cell.status === 'skipped' || cell.status === 'rest') return null;
+    if (cell.workout_id) return cell.workout_id;
+    if (cell.real && cell.status === 'planned') {
+      const id = weekPatternOn(meta.schedule, meta.program, cell.date).week[weekdayOf(cell.date)];
+      return plan.workouts.some((workout) => workout.id === id) ? id : null;
+    }
+    return null;
+  };
+  if (!origin || !destination || origin.suppresses_schedule_and_endurance
+      || destination.suppresses_schedule_and_endurance || resolvedWorkout(origin) !== input.workout_id
+      || resolvedWorkout(destination) !== null) return { error: 'calendar_move_conflict' };
+
+  const ts = Math.max(now(), (from?.updated_at ?? 0) + 1, (to?.updated_at ?? 0) + 1);
+  const newRow = (date: string, old: SessionRow | undefined, workoutId: string | null): SessionRow => ({
+    kind: 'planned', id: old?.id ?? uuid(), user_id: userId, plan_id: plan.id, date,
+    workout_id: workoutId, status: workoutId ? 'planned' : 'skipped',
+    started_at: null, completed_at: null,
+    perceived_fatigue: old?.perceived_fatigue ?? null, notes: old?.notes ?? null,
+    runner_targets: null, exercise_swaps: null, created_at: old?.created_at ?? ts, updated_at: ts,
+    attempt: (old?.attempt ?? 0) + 1, write_protocol: old?.write_protocol ?? 'legacy',
+  });
+  const acknowledgement: CalendarMoveAcknowledgement = { ok: true,
+    from: newRow(input.from_date, from, null), to: newRow(input.to_date, to, input.workout_id) };
+  const nonce = uuid();
+  const conditions: string[] = [];
+  const bindings: unknown[] = [receiptID, userId, args, JSON.stringify({ nonce, acknowledgement }), ts,
+    plan.id, plan.version];
+  // Fence the observed assignment and annotations, including absence, in one transaction.
+  for (const [date, row] of [[input.from_date, from], [input.to_date, to]] as const) {
+    const index = bindings.length + 1;
+    bindings.push(date, JSON.stringify(row ? [row.id, row.attempt, row.status, row.workout_id, row.updated_at,
+      row.notes, row.perceived_fatigue] : null));
+    conditions.push(`COALESCE((SELECT json_array(id,attempt,status,workout_id,updated_at,notes,perceived_fatigue)
+      FROM sessions WHERE user_id=?2 AND slot=0 AND date=?${index}), 'null')=?${index + 1}`);
+  }
+  const actorIndex = bindings.push(actor);
+  const statements = [db.prepare(
+    `INSERT INTO audit_log (id,user_id,actor,tool,args,result,created_at)
+     SELECT ?1,?2,?${actorIndex},'move_calendar_workout',?3,?4,?5
+     WHERE EXISTS (SELECT 1 FROM plans WHERE id=?6 AND user_id=?2 AND status='active' AND version=?7)
+       AND ${conditions.join(' AND ')}
+     ON CONFLICT(id) DO NOTHING`).bind(...bindings)];
+  for (const row of [acknowledgement.from, acknowledgement.to]) {
+    statements.push(db.prepare(
+      `INSERT INTO sessions (id,user_id,plan_id,workout_id,date,status,started_at,completed_at,
+        perceived_fatigue,notes,runner_targets,created_at,updated_at,attempt,write_protocol)
+       SELECT ?1,?2,?3,?4,?5,?6,NULL,NULL,?13,?14,NULL,?7,?8,?9,?10
+       WHERE EXISTS (SELECT 1 FROM audit_log WHERE id=?11 AND user_id=?2 AND json_extract(result,'$.nonce')=?12)
+       ON CONFLICT(id) DO UPDATE SET
+         plan_id=excluded.plan_id,workout_id=excluded.workout_id,status=excluded.status,kind='planned',
+         started_at=NULL,completed_at=NULL,runner_targets=NULL,
+         updated_at=excluded.updated_at,attempt=excluded.attempt`)
+      .bind(row.id, row.user_id, row.plan_id, row.workout_id, row.date, row.status,
+        row.created_at, row.updated_at, row.attempt, row.write_protocol, receiptID, nonce,
+        row.perceived_fatigue, row.notes));
+  }
+  const results = await runWorkoutWriteBatch(db, statements);
+  if (results[0]?.meta.changes === 1) return acknowledgement;
+  return await readReceipt() ?? { error: 'calendar_move_conflict' };
+}
+
+/**
+ * One-off: pin a specific date to a day template (or clear to a bare planned
+ * session). Writes/updates a sessions row ONLY — append-only log, NO version
+ * bump. `day` accepts id, day_label, or day name.
+ */
+export async function setPlannedSession(
+  db: D1Database,
+  userId: string,
+  date: string,
+  day: string,
+  expectedAttempt?: number,
+  slot = 0,
+  additionalID?: string,
+): Promise<
+  | { error: 'no_active_plan' }
+  | { error: 'unknown_day_ref'; ref: string }
+  | { error: 'session_already_started'; status: 'in_progress' | 'completed' }
+  | SessionAttemptConflict
+  | SessionAttemptMissing
+  | SessionStateConflict
+  | PlanVersionConflict
+  | { ok: true; session: SessionRow }
+> {
+  assertSessionSlot(slot);
+  const plan = await getActivePlan(db, userId);
+  if (!plan) return { error: 'no_active_plan' };
+  // Additional creation accepts an exact workout id so its retry receipt
+  // remains meaningful after a rename, archive or plan UUID remap.
+  if (additionalID) {
+    if (!(await workoutFitsDate(db, plan.id, day, date))) return { error: 'unknown_day_ref', ref: day };
+    return { ok: true, session: await createAdditionalSession(db, userId, plan.id, date, day, additionalID, 'planned', false) };
+  }
+  // A one-time workout is reachable by exact id, and only on its own date.
+  const d = await db
+    .prepare(
+      "SELECT id FROM workouts WHERE plan_id = ?1 AND archived_at IS NULL AND ((id = ?2 AND (one_time_date IS NULL OR one_time_date = ?3)) OR (one_time_date IS NULL AND (lower(day_label) = lower(?2) OR lower(name) = lower(?2)))) ORDER BY id = ?2 DESC LIMIT 1",
+    )
+    .bind(plan.id, day, date)
+    .first<{ id: string }>();
+  if (!d) return { error: 'unknown_day_ref', ref: day };
+  const readExisting = () =>
+    db
+      .prepare(
+        'SELECT * FROM sessions WHERE user_id = ?1 AND date = ?2 AND slot = ?3 LIMIT 1',
+      )
+      .bind(userId, date, slot)
+      .first<SessionRow>();
+  const useExisting = async (
+    existing: SessionRow,
+  ): Promise<
+    | { ok: true; session: SessionRow }
+    | { error: 'session_already_started'; status: 'in_progress' | 'completed' }
+    | SessionAttemptConflict
+    | SessionStateConflict
+    | PlanVersionConflict
+  > => {
+    if (existing.kind === 'freestyle' && existing.status !== 'discarded') throw new Error('session_kind_conflict');
+    if (existing.status === 'in_progress' || existing.status === 'completed') {
+      return {
+        error: 'session_already_started',
+        status: existing.status as 'in_progress' | 'completed',
+      };
+    }
+    // An identical retry is idempotent even if the caller never received the
+    // first response's advanced assignment token. Every *different* date
+    // choice below advances attempt, so an old queued set/override cannot
+    // silently join the replacement assignment.
+    const assignmentUnchanged =
+      existing.plan_id === plan.id &&
+      existing.status === 'planned' &&
+      existing.workout_id === d.id;
+    if (assignmentUnchanged) return { ok: true, session: existing };
+
+    const casAttempt = expectedAttempt ?? 0;
+    if (existing.attempt !== casAttempt) {
+      return sessionAttemptConflict(casAttempt, existing);
+    }
+    const casStatus = existing.status;
+    const ts = now();
+    // The SQL CASE already flips the row to a sensible status; the bug was
+    // that the response object spread `...existing` and kept the OLD status
+    // (e.g. an agent saw `status: 'discarded'` with a past `started_at`
+    // while the DB was actually 'planned' now). Compute the new shape
+    // explicitly and persist BOTH started_at and completed_at resets when
+    // we're reviving a discarded row, mirroring getOrCreateSession's
+    // discard→planned resurrection (consistent revival rule across the
+    // two places that revive a discarded session).
+    const newStatus = 'planned';
+    // Every assignment change is a generation boundary. This includes
+    // planned A -> planned B and planned -> rest (in skipPlannedSession), not
+    // only discarded/skipped revival: otherwise two clients holding attempt 0
+    // can both win and an old queued set can land in the newly assigned day.
+    const reviving =
+      existing.status === 'discarded' || existing.status === 'skipped';
+    const newStartedAt = reviving ? null : existing.started_at;
+    const newCompletedAt = reviving ? null : existing.completed_at;
+    const newFatigue = reviving ? null : existing.perceived_fatigue;
+    const newNotes = reviving ? null : existing.notes;
+    const newAttempt = casAttempt + 1;
+    const updated = await runWorkoutWriteStatement(
+      db,
+      db.prepare(
+        `UPDATE sessions
+            SET plan_id = ?13, kind = 'planned',
+                workout_id = ?2,
+                status = ?3,
+                started_at = ?4,
+                completed_at = ?5,
+                perceived_fatigue = ?11,
+                notes = ?12,
+                updated_at = ?6,
+                attempt = ?7
+          WHERE id = ?1
+            AND user_id = ?8
+            AND status = ?9
+            AND attempt = ?10
+            AND EXISTS (
+              SELECT 1
+                FROM plans AS active_plan
+                JOIN workouts AS active_day
+                  ON active_day.plan_id = active_plan.id
+               WHERE active_plan.id = ?13
+                 AND active_plan.user_id = ?8
+                 AND active_plan.status = 'active'
+                 AND active_plan.version = ?14
+                 AND active_day.id = ?2
+            )`,
+      )
+      .bind(
+        existing.id,
+        d.id,
+        newStatus,
+        newStartedAt,
+        newCompletedAt,
+        ts,
+        newAttempt,
+        userId,
+        casStatus,
+        casAttempt,
+        newFatigue,
+        newNotes,
+        plan.id,
+        plan.version,
+      ),
+    );
+    if (updated.meta.changes === 0) {
+      const activePlan = await getActivePlan(db, userId);
+      if (activePlan?.id !== plan.id || activePlan.version !== plan.version) {
+        return { conflict: true, current_version: activePlan?.version ?? plan.version };
+      }
+      const current = await readExisting();
+      if (!current) throw new Error('session_update_conflict_without_winner');
+      if (current.attempt !== casAttempt) {
+        return sessionAttemptConflict(casAttempt, current);
+      }
+      return sessionStateConflict(casStatus, current);
+    }
+    const session: SessionRow = {
+      ...existing,
+      kind: 'planned',
+      plan_id: plan.id,
+      workout_id: d.id,
+      status: newStatus,
+      started_at: newStartedAt,
+      completed_at: newCompletedAt,
+      perceived_fatigue: newFatigue,
+      notes: newNotes,
+      updated_at: ts,
+      attempt: newAttempt,
+      write_protocol: existing.write_protocol,
+    };
+    return { ok: true, session };
+  };
+  const existing = await readExisting();
+  if (existing) return useExisting(existing);
+  if (slot !== 0) return { error: 'session_attempt_missing', expected_attempt: expectedAttempt ?? 0 };
+  if (expectedAttempt !== undefined && expectedAttempt !== 0) {
+    return { error: 'session_attempt_missing', expected_attempt: expectedAttempt };
+  }
+
+  const ts = now();
+  const s: SessionRow = {
+    slot,
+    id: uuid(),
+    user_id: userId,
+    plan_id: plan.id,
+    workout_id: d.id,
+    date,
+    status: 'planned',
+    started_at: null,
+    completed_at: null,
+    perceived_fatigue: null,
+    notes: null,
+    created_at: ts,
+    updated_at: ts,
+    // Attempt zero is the explicit "no date assignment observed" token.
+    // Persist the first concrete assignment as generation one so a second
+    // concurrent creator carrying zero loses the CAS in useExisting().
+    attempt: 1,
+    write_protocol: 'legacy',
+  };
+  const inserted = await runWorkoutWriteStatement(
+    db,
+    db.prepare(
+      `INSERT INTO sessions
+       (id,user_id,plan_id,workout_id,date,status,started_at,completed_at,perceived_fatigue,notes,created_at,updated_at,attempt,write_protocol)
+       SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14
+        WHERE EXISTS (
+          SELECT 1
+            FROM plans AS active_plan
+            JOIN workouts AS active_day
+              ON active_day.plan_id = active_plan.id
+           WHERE active_plan.id = ?3
+             AND active_plan.user_id = ?2
+             AND active_plan.status = 'active'
+             AND active_plan.version = ?15
+             AND active_day.id = ?4
+        )
+       ON CONFLICT DO NOTHING`,
+    )
+    .bind(
+      s.id,
+      s.user_id,
+      s.plan_id,
+      s.workout_id,
+      s.date,
+      s.status,
+      s.started_at,
+      s.completed_at,
+      s.perceived_fatigue,
+      s.notes,
+      s.created_at,
+      s.updated_at,
+      s.attempt,
+      s.write_protocol,
+      plan.version,
+    ),
+  );
+  if (inserted.meta.changes > 0) return { ok: true, session: s };
+
+  const activePlan = await getActivePlan(db, userId);
+  if (activePlan?.id !== plan.id || activePlan.version !== plan.version) {
+    return { conflict: true, current_version: activePlan?.version ?? plan.version };
+  }
+  const winner = await readExisting();
+  if (!winner) throw new Error('session_create_conflict_without_winner');
+  return useExisting(winner);
+}
+
+/**
+ * One-off: mark a specific date a rest/skip day. Writes/updates a sessions
+ * row with status 'skipped' — append-only, NO version bump.
+ */
+export async function skipPlannedSession(
+  db: D1Database,
+  userId: string,
+  date: string,
+  expectedAttempt?: number,
+  slot = 0,
+): Promise<
+  | { error: 'no_active_plan' }
+  | { error: 'session_already_started'; status: 'in_progress' | 'completed' }
+  | SessionAttemptConflict
+  | SessionAttemptMissing
+  | SessionStateConflict
+  | PlanVersionConflict
+  | { ok: true; session: SessionRow }
+> {
+  assertSessionSlot(slot);
+  const plan = await getActivePlan(db, userId);
+  if (!plan) return { error: 'no_active_plan' };
+  const readExisting = () =>
+    db
+      .prepare(
+        'SELECT * FROM sessions WHERE user_id = ?1 AND date = ?2 AND slot = ?3 LIMIT 1',
+      )
+      .bind(userId, date, slot)
+      .first<SessionRow>();
+  const useExisting = async (
+    existing: SessionRow,
+  ): Promise<
+    | { error: 'session_already_started'; status: 'in_progress' | 'completed' }
+    | SessionAttemptConflict
+    | SessionStateConflict
+    | PlanVersionConflict
+    | { ok: true; session: SessionRow }
+  > => {
+    // A skip may only override a planned (or absent) session. If the date
+    // already has a started/finished workout, skipping it would hide logged
+    // sets and destroy visible history for a mis-dated skip. Reject and
+    // leave the row untouched — Claude must explicitly intend something
+    // else. The MCP wrapper still audits this rejection (audit-on-write).
+    if (existing.kind === 'freestyle' && existing.status !== 'discarded') throw new Error('session_kind_conflict');
+    if (existing.status === 'in_progress' || existing.status === 'completed') {
+      return {
+        error: 'session_already_started',
+        status: existing.status as 'in_progress' | 'completed',
+      };
+    }
+    const assignmentUnchanged =
+      existing.plan_id === plan.id && existing.status === 'skipped';
+    if (assignmentUnchanged) return { ok: true, session: existing };
+
+    const casAttempt = expectedAttempt ?? 0;
+    if (existing.attempt !== casAttempt) {
+      return sessionAttemptConflict(casAttempt, existing);
+    }
+    const casStatus = existing.status;
+    const ts = now();
+    const newAttempt = casAttempt + 1;
+    const updated = await runWorkoutWriteStatement(
+      db,
+      db.prepare(
+        `UPDATE sessions
+            SET plan_id = ?6, kind = 'planned',
+                workout_id = NULL,
+                status = 'skipped',
+                updated_at = ?2,
+                attempt = ?7
+          WHERE id = ?1
+            AND user_id = ?3
+            AND status = ?4
+            AND attempt = ?5
+            AND EXISTS (
+              SELECT 1 FROM plans AS active_plan
+               WHERE active_plan.id = ?6
+                 AND active_plan.user_id = ?3
+                 AND active_plan.status = 'active'
+                 AND active_plan.version = ?8
+            )`,
+      )
+      .bind(
+        existing.id,
+        ts,
+        userId,
+        casStatus,
+        casAttempt,
+        plan.id,
+        newAttempt,
+        plan.version,
+      ),
+    );
+    if (updated.meta.changes === 0) {
+      const activePlan = await getActivePlan(db, userId);
+      if (activePlan?.id !== plan.id || activePlan.version !== plan.version) {
+        return { conflict: true, current_version: activePlan?.version ?? plan.version };
+      }
+      const current = await readExisting();
+      if (!current) throw new Error('session_update_conflict_without_winner');
+      if (current.attempt !== casAttempt) {
+        return sessionAttemptConflict(casAttempt, current);
+      }
+      if (current.status === 'in_progress' || current.status === 'completed') {
+        return {
+          error: 'session_already_started',
+          status: current.status,
+        };
+      }
+      return sessionStateConflict(casStatus, current);
+    }
+    return {
+      ok: true,
+      session: {
+        ...existing,
+        kind: 'planned',
+        plan_id: plan.id,
+        workout_id: null,
+        status: 'skipped',
+        updated_at: ts,
+        attempt: newAttempt,
+        write_protocol: existing.write_protocol,
+      },
+    };
+  };
+  const existing = await readExisting();
+  if (existing) return useExisting(existing);
+  if (slot !== 0) return { error: 'session_attempt_missing', expected_attempt: expectedAttempt ?? 0 };
+  if (expectedAttempt !== undefined && expectedAttempt !== 0) {
+    return { error: 'session_attempt_missing', expected_attempt: expectedAttempt };
+  }
+
+  const ts = now();
+  const s: SessionRow = {
+    slot,
+    id: uuid(),
+    user_id: userId,
+    plan_id: plan.id,
+    workout_id: null,
+    date,
+    status: 'skipped',
+    started_at: null,
+    completed_at: null,
+    perceived_fatigue: null,
+    notes: null,
+    created_at: ts,
+    updated_at: ts,
+    attempt: 1,
+    write_protocol: 'legacy',
+  };
+  const inserted = await runWorkoutWriteStatement(
+    db,
+    db.prepare(
+      `INSERT INTO sessions
+       (id,user_id,plan_id,workout_id,date,status,started_at,completed_at,perceived_fatigue,notes,created_at,updated_at,attempt,write_protocol)
+       SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14
+        WHERE EXISTS (
+          SELECT 1 FROM plans AS active_plan
+           WHERE active_plan.id = ?3
+             AND active_plan.user_id = ?2
+             AND active_plan.status = 'active'
+             AND active_plan.version = ?15
+        )
+       ON CONFLICT DO NOTHING`,
+    )
+    .bind(
+      s.id,
+      s.user_id,
+      s.plan_id,
+      s.workout_id,
+      s.date,
+      s.status,
+      s.started_at,
+      s.completed_at,
+      s.perceived_fatigue,
+      s.notes,
+      s.created_at,
+      s.updated_at,
+      s.attempt,
+      s.write_protocol,
+      plan.version,
+    ),
+  );
+  if (inserted.meta.changes > 0) return { ok: true, session: s };
+
+  const activePlan = await getActivePlan(db, userId);
+  if (activePlan?.id !== plan.id || activePlan.version !== plan.version) {
+    return { conflict: true, current_version: activePlan?.version ?? plan.version };
+  }
+  const winner = await readExisting();
+  if (!winner) throw new Error('session_create_conflict_without_winner');
+  return useExisting(winner);
+}
+
+/** Resolve the caller-owned plan and live workout IDs for any calendar read. */
+async function readCalendarPlan(
+  db: D1Database,
+  userId: string,
+): Promise<Omit<StrengthCalendarInputs, 'sessions'> | null> {
+  const plan = await getActivePlan(db, userId);
+  if (!plan) return null;
+  const meta = parsePlanMeta(plan.meta);
+  const schedule = meta.schedule;
+  const trips = meta.trips ?? [];
+  const liveDays = await db
+    .prepare(`SELECT w.id,
+        EXISTS (SELECT 1 FROM template_exercises te WHERE te.workout_id = w.id) AS has_exercises
+      FROM workouts w WHERE w.plan_id = ?1 AND w.archived_at IS NULL`)
+    .bind(plan.id)
+    .all<{ id: string; has_exercises: number }>();
+  // Extras are activities only; one that has gained exercises since it was
+  // saved is not projected (it would need its own session on the date).
+  const activities = new Set(liveDays.results.map((r) => r.id));
+  const activityExtras = (pattern: { week: ScheduleWeek; extras?: ScheduleExtras }) =>
+    normalizeScheduleExtras(Object.fromEntries(Object.entries(pattern.extras ?? {})
+      .map(([wd, ids]) => [wd, ids.filter((id) => activities.has(id))])), pattern.week);
+  const extras = activityExtras(schedule);
+  const { extras: _saved, ...rest } = schedule;
+  void _saved;
+  // A block's weeks follow the same activity-only extras rule.
+  const program = meta.program ? { ...meta.program, weeks: meta.program.weeks.map((week) => {
+    const kept = activityExtras(week);
+    const { extras: _weekExtras, ...base } = week;
+    void _weekExtras;
+    return { ...base, ...(kept ? { extras: kept } : {}) };
+  }) } : null;
+  return {
+    plan,
+    schedule: { ...rest, ...(extras ? { extras } : {}) },
+    program,
+    trips,
+    liveDayIds: liveDays.results.map((r) => r.id),
+  };
+}
+
+async function readCalendarSessions(db: D1Database, userId: string, fromDate: string, toDate: string): Promise<SessionRow[]> {
+  // Sessions use skipped/discarded statuses, not a deleted_at column. The
+  // projection owns their visibility and includes past completed history.
+  const rows = await db
+    .prepare('SELECT * FROM sessions WHERE user_id = ?1 AND date >= ?2 AND date <= ?3 ORDER BY date')
+    .bind(userId, fromDate, toDate)
+    .all<SessionRow>();
+  return rows.results;
+}
+
+/** Read the projection inputs for [fromDate, toDate]. Null when the user has
+ *  no active plan — the projection is empty in that case. */
+async function readCalendarInputs(
+  db: D1Database,
+  userId: string,
+  fromDate: string,
+  toDate: string,
+): Promise<CalendarInputs | null> {
+  const planInputs = await readCalendarPlan(db, userId);
+  if (!planInputs) return null;
+  // Endurance feeds for the composite projection. Planned events drive
+  // today+ bricks/doubles; completed actuals drive past endurance items.
+  // Both are soft-deleted caches — exclude tombstones. The window matches
+  // the sessions window (the projection clamps the span itself).
+  const plannedEvents = await db
+    .prepare(
+      `SELECT id, date, kind, title, planned_duration_sec, training_load
+         FROM external_events
+        WHERE user_id = ?1 AND deleted_at IS NULL
+          AND date >= ?2 AND date <= ?3`,
+    )
+    .bind(userId, fromDate, toDate)
+    .all<ProjectionEvent>();
+  const completedActivities = await db
+    .prepare(
+      `SELECT id, date, kind, name, moving_time_sec, training_load
+         FROM external_activities
+        WHERE user_id = ?1 AND deleted_at IS NULL
+          AND date >= ?2 AND date <= ?3`,
+    )
+    .bind(userId, fromDate, toDate)
+    .all<ProjectionActivity>();
+  const sessions = await readCalendarSessions(db, userId, fromDate, toDate);
+  return {
+    ...planInputs,
+    plannedEvents: plannedEvents.results,
+    completedActivities: completedActivities.results,
+    sessions,
+  };
+}
+
+export async function getProjectedCalendar(
+  db: D1Database,
+  userId: string,
+  fromDate: string,
+  toDate: string,
+  today: string,
+): Promise<CalendarCell[]> {
+  const inputs = await readCalendarInputs(db, userId, fromDate, toDate);
+  return inputs ? projectCalendarWindow(inputs, fromDate, toDate, today) : [];
+}
+
+
+
+/** A completed activity pushed from the iOS app's HealthKit reader. Mirrors
+ *  the intervals-derived CompletedActivity shape but `id` is the CLIENT-supplied
+ *  idempotency key (the HKWorkout UUID), not a provider-side external id. */
+export interface HealthKitActivityInput {
+  id: string; // client UUID = HKWorkout.uuid = idempotency key
+  date: string; // device-local YYYY-MM-DD (workout start), verbatim
+  // UTC-like encoding of that same local wall clock; its date must agree.
+  start_date_local_ms: number | null;
+  start_date_utc_ms?: number | null;
+  source_timezone?: string | null;
+  kind: string; // normalized lowercase (run|ride|walk|…)
+  name: string | null;
+  moving_time_sec: number | null;
+  elapsed_time_sec: number | null;
+  distance_m: number | null;
+  average_watts: number | null;
+  average_hr: number | null;
+  max_hr: number | null;
+  calories: number | null;
+  elevation_gain_m: number | null;
+  raw: string | null;
+  /** Samples recorded inside the workout, `t` in seconds from its start.
+   * Absent (an older app) keeps the stored summaries; present replaces them,
+   * including with none when no stream is dense enough. */
+  streams?: HealthKitStreams;
+  /** A swim's detail (src/swimDetail.ts): absent keeps what is stored, null
+   * clears it, a detail replaces it. */
+  swim?: SwimDetail | null;
+  /** Apple Watch's effort score, 1–10: absent keeps what is stored, null
+   * clears it. */
+  provider_effort?: number | null;
+}
+export interface HealthKitStreams {
+  heart_rate?: readonly Sample[];
+  power?: readonly Sample[];
+}
+export {
+  DIAGNOSTICS_EXCLUDED_SOURCES,
+  DIAGNOSTICS_LOOKUPS,
+  diagnosticsActivities,
+  diagnosticsActivity,
+  diagnosticsAudit,
+  diagnosticsDays,
+  diagnosticsRecordings,
+  diagnosticsReport,
+  diagnosticsReportScreenshot,
+  diagnosticsReports,
+  diagnosticsSessions,
+  diagnosticsSince,
+  diagnosticsSync,
+  recordDiagnosticsRead,
+} from './services/diagnostics';
+export type { DiagnosticsActor, DiagnosticsLookup } from './services/diagnostics';
+export {
+  memberUsage,
+  memberUsageDays,
+  parseIosUserAgent,
+  recordAppUse,
+  resetAppUseThrottle,
+} from './services/memberUsage';
+export type { AppUseClient } from './services/memberUsage';
+export { submitProblemReport } from './services/problemReports';
+export type { ProblemReportScreenshot, SubmitProblemReportResult } from './services/problemReports';
+export type { SyncStatus, SyncResult, SyncDeps, ActivitySyncDeps, IntervalsImportResult, IntervalsConnectionStatus, IntervalsUserCreds, ActivityDedupeWindow } from './services/intervalsSync';
+export const { syncExternalEvents, getUpcomingRides, reconcileIntervalsConnection, syncExternalActivities, getRecentActivities, resolveIntervalsCredential } = createIntervalsSyncService({
+  getUserIntervalsCreds: getStoredUserIntervalsCreds, findOwnerRow, userHasTouchedIntervalsCreds,
+  seedOwnerIntervalsCredsFromEnv, ensureOwnerUser, getIntervalsConnectionStatus,
+  getUserTimezone, todayInTz, dedupeHealthKitAgainstIntervals, refreshActivityLoads,
+});
+export type {
+  EnduranceActivityInput, EnduranceLogResult, IntervalsDeleteResult, RecordedRunCopyDeleteResult, RecordedRunInput,
+  RecordedRunUploadResult,
+} from './services/intervalsActivityWrite';
+export { MAX_RECORDING_BYTES, recordingFormat } from './services/intervalsActivityWrite';
+export { refreshActivityLoads, setActivityEffort } from './services/activityLoad';
+export type {
+  PendingWhoopCredential, RecoveryDayView, WhoopStatus, WhoopSyncResult, WhoopSyncStatus,
+} from './services/whoop';
+export { retireWhoopDuplicates, WHOOP_EVENT_MAX_DAYS, WHOOP_SYNC_DAYS } from './services/whoop';
+export const {
+  createWhoopOAuthState, consumeWhoopOAuthState, createWhoopOAuthCompletion, finishWhoopOAuth, getWhoopStatus,
+  disconnectWhoop, whoopAccessToken, syncWhoop, syncWhoopEvent, findWhoopMember, listWhoopMembersDue,
+  listRecoveryDays,
+} = createWhoopService({
+  dedupe: (db, userId) => dedupeHealthKitAgainstIntervals(db, userId),
+  refreshActivityLoads, getUserTimezone, localTime: fitLocalTime,
+});
+export type { GarminFileMeta, GarminFileRun, GarminStatus, PendingGarminCredential } from './services/garmin';
+export { GARMIN_FILES_PER_RUN } from './services/garmin';
+export const {
+  createGarminOAuthState, consumeGarminOAuthState, createGarminOAuthCompletion, finishGarminOAuth, getGarminStatus,
+  disconnectGarmin, garminAccessToken, queueGarminActivityFiles, handleGarminDeregistrations,
+  handleGarminPermissionChanges, refreshGarminPermissions, processGarminFiles, hasGarminFilesDue,
+} = createGarminService({
+  dedupe: (db, userId) => dedupeHealthKitAgainstIntervals(db, userId),
+  importActivity: importGarminActivity,
+});
+
+/** Add a threshold, then recompute the member's activity loads. A retry of
+ * an already stored threshold recomputes too, so a refresh that failed after
+ * the insert committed is completed by the client's retry. */
+export async function saveAthleteThreshold(db: D1Database, userId: string, input: ThresholdInput) {
+  const result = await addAthleteThreshold(db, userId, input, input.source ?? 'member');
+  if (result.ok) await refreshActivityLoads(db, userId);
+  return result;
+}
+
+/** Soft-delete a threshold, then recompute the member's activity loads. */
+export async function removeAthleteThreshold(db: D1Database, userId: string, id: string) {
+  const result = await deleteAthleteThreshold(db, userId, id);
+  if (result.ok) await refreshActivityLoads(db, userId);
+  return result;
+}
+
+export {
+  addAthleteThreshold,
+  deleteAthleteThreshold,
+  getAthleteThresholds,
+  getThresholdSuggestions,
+  parseThresholdInput,
+  isCivilDate,
+  type AthleteThreshold,
+  type ThresholdsView,
+  type ThresholdSuggestion,
+} from './services/athleteThresholds';
+export const {
+  logEnduranceActivity, deleteIntervalsActivityByExternalId, uploadRecordedRun, deleteRecordedRunUpload,
+} = createIntervalsActivityWriteService({
+  resolveIntervalsCredential, syncExternalActivities,
+});
+export const { getIntervalsActivityRoute, getIntervalsActivityStreams } = createIntervalsRouteService({ resolveIntervalsCredential });
+export type { IntervalsRouteResult, IntervalsStreamsResult } from './services/intervalsRoute';
+
+/** HealthKit encodes the device-local wall clock as UTC-like epoch ms. */
+export function healthKitDateMatchesStart(date: string, startMs: number | null): boolean {
+  if (startMs === null) return true;
+  if (!Number.isSafeInteger(startMs)) return false;
+  const parsed = new Date(startMs);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === date;
+}
+
+/** A conservative native match needs one completed workout with both absolute
+ * start and end within two minutes. Missing/ambiguous timing stays unmatched.
+ * The prefix distinguishes a session identity from an external-activity id. */
+function nativeHealthKitWinnerSQL(a: string): string {
+  return `(SELECT 'session:' || MIN(s.id) FROM sessions s
+    WHERE s.user_id = ${a}.user_id AND s.status = 'completed'
+      AND ${a}.kind = 'strength' AND ${a}.elapsed_time_sec > 0
+      AND s.started_at IS NOT NULL AND s.completed_at >= s.started_at
+      AND s.started_at BETWEEN ${a}.start_date_utc_ms - 120000 AND ${a}.start_date_utc_ms + 120000
+      AND ABS(s.completed_at - (${a}.start_date_utc_ms + ${a}.elapsed_time_sec * 1000)) <= 120000
+    HAVING COUNT(*) = 1)`;
+}
+
+/** Runs inside the source/session transaction, so completion/discard and the
+ * external tombstone become visible together. The prior-change guard keeps
+ * rejected session CAS writes side-effect-free. Only native matches or rows
+ * previously retired by this path are managed; Intervals' rule stays intact. */
+function reconcileNativeHealthKitStatement(
+  db: D1Database,
+  userId: string,
+  ts: number,
+  requirePriorChange = false,
+): D1PreparedStatement {
+  const native = nativeHealthKitWinnerSQL('h');
+  return db.prepare(`WITH desired AS MATERIALIZED (
+    SELECT h.id, COALESCE(${native}, (
+      SELECT id FROM (
+        SELECT i.id,
+          CASE WHEN i.start_date_utc_ms IS NOT NULL AND h.start_date_utc_ms IS NOT NULL
+            THEN 0 ELSE 1 END AS clock_priority,
+          CASE WHEN i.start_date_utc_ms IS NOT NULL AND h.start_date_utc_ms IS NOT NULL
+            THEN i.start_date_utc_ms ELSE i.start_date_local_ms END AS candidate_start,
+          ABS(CASE WHEN i.start_date_utc_ms IS NOT NULL AND h.start_date_utc_ms IS NOT NULL
+            THEN i.start_date_utc_ms - h.start_date_utc_ms
+            ELSE i.start_date_local_ms - h.start_date_local_ms END) AS delta
+        FROM external_activities i WHERE i.user_id = h.user_id AND i.source IN ('intervals', 'fit', 'recording', 'whoop', 'garmin')
+          AND i.deleted_at IS NULL AND i.kind = h.kind
+      ) WHERE delta <= 120000 ORDER BY clock_priority, delta, candidate_start, id LIMIT 1
+    )) AS winner
+    FROM external_activities h WHERE h.user_id = ?1 AND h.source = 'healthkit'
+      AND (h.deleted_at IS NULL OR h.duplicate_of IS NOT NULL)
+      AND (${native} IS NOT NULL OR h.duplicate_of LIKE 'session:%')
+      ${requirePriorChange ? 'AND changes() > 0' : ''}
+  ) UPDATE external_activities SET
+    duplicate_of = (SELECT winner FROM desired WHERE desired.id = external_activities.id),
+    canonical = CASE WHEN (SELECT winner FROM desired WHERE desired.id = external_activities.id) IS NULL THEN 1 ELSE 0 END,
+    deleted_at = CASE WHEN (SELECT winner FROM desired WHERE desired.id = external_activities.id) IS NULL THEN NULL ELSE MAX(synced_at + 1, ?2) END,
+    synced_at = MAX(synced_at + 1, ?2)
+  WHERE id IN (SELECT id FROM desired) AND (
+    duplicate_of IS NOT (SELECT winner FROM desired WHERE desired.id = external_activities.id)
+    OR (deleted_at IS NULL) != ((SELECT winner FROM desired WHERE desired.id = external_activities.id) IS NULL)
+  )`).bind(userId, ts);
+}
+
+/**
+ * Keep, replace or clear a swim's detail (sport-activities P4, migration
+ * 0072) for the member's activity `activityId`, only while the member hasn't
+ * deleted it. Null clears it.
+ */
+function keepSwimStatement(
+  db: D1Database,
+  userId: string,
+  activityId: string,
+  swim: SwimDetail | null,
+): D1PreparedStatement {
+  if (swim === null) {
+    return db.prepare('DELETE FROM activity_swims WHERE activity_id = ?1 AND user_id = ?2').bind(activityId, userId);
+  }
+  return db
+    .prepare(
+      `INSERT INTO activity_swims (activity_id,user_id,location,pool_length_m,pool_unit,length_count,detail,created_at)
+       SELECT a.id, a.user_id, ?3, ?4, ?5, ?6, ?7, ?8 FROM external_activities a
+        WHERE a.id = ?1 AND a.user_id = ?2
+          AND (a.deleted_at IS NULL OR a.duplicate_of IS NOT NULL)
+       ON CONFLICT(activity_id) DO UPDATE SET
+         location = excluded.location, pool_length_m = excluded.pool_length_m, pool_unit = excluded.pool_unit,
+         length_count = excluded.length_count, detail = excluded.detail, created_at = excluded.created_at
+        WHERE activity_swims.user_id = excluded.user_id AND activity_swims.detail IS NOT excluded.detail`,
+    )
+    .bind(activityId, userId, swim.location, swim.pool_length_m, swim.pool_unit, swim.lengths.length,
+      JSON.stringify(swim), now());
+}
+
+/**
+ * Upsert an Apple Health (HealthKit) workout PUSHED from the iOS app into the
+ * external_activities cache. Apple Health is ON-DEVICE only — the Worker can
+ * never read HealthKit — so unlike the intervals PULL path this is a client
+ * push: the phone reads HKWorkout and POSTs it here (POST /api/activities/healthkit).
+ *
+ * source='healthkit'. The PK embeds the user + the client id (the HKWorkout
+ * UUID), making it the idempotency key: a re-push (iOS outbox retry, or a later
+ * anchored sync that re-sees the same workout) lands on ON CONFLICT and UPDATEs
+ * the stats in place (HealthKit can revise a workout's totals) rather than
+ * duplicating. PUSH rows are NEVER reconcile-soft-deleted — the intervals sync's
+ * windowed tombstoning is source-scoped to 'intervals' (migration 0027), and a
+ * HealthKit deletion is an explicit future delete path, not a windowed reconcile.
+ *
+ * training_load / intensity stay NULL: HealthKit carries no native load. The
+ * effective load comes from refreshActivityLoads (migration 0060) using the
+ * member's athlete_thresholds, and stays NULL without usable data.
+ */
+export async function upsertHealthKitActivity(
+  db: D1Database,
+  userId: string,
+  input: HealthKitActivityInput,
+): Promise<ExternalActivityRow> {
+  if (!healthKitDateMatchesStart(input.date, input.start_date_local_ms)) {
+    throw new Error('healthkit_date_start_mismatch');
+  }
+  if (!validActivitySourceTime(input.start_date_utc_ms, input.source_timezone, input.date, input.start_date_local_ms)) {
+    throw new Error('healthkit_source_time_invalid');
+  }
+  const id = `healthkit:activity:${userId}:${input.id}`;
+  const ts = now();
+  // Reduced here, never stored as samples: refreshActivityLoads rescores
+  // from these threshold-independent figures (migration 0061).
+  const streamsSent = input.streams !== undefined;
+  const npW = input.streams?.power ? powerStreamSummary(input.streams.power, input.moving_time_sec) : null;
+  const hr = input.streams?.heart_rate ? heartRateStreamSummary(input.streams.heart_rate, input.moving_time_sec) : null;
+  // The sport comes from the HealthKit type the app keeps in `raw`, so older
+  // builds that only send a coarse kind still get named sports. Apple Health
+  // workouts carry no name of their own; an older app called every other
+  // sport "Workout", which gives way to the sport's name.
+  const sport = sportForHealthKitType(healthKitTypeOf(input.raw), input.kind);
+  const name = (input.name === null || input.name === 'Workout') && sport !== 'other'
+    ? sportLabel(sport) : input.name;
+  // The heart rate is also kept as a series for the workout's chart
+  // (run-detail-charts P3). Streams sent without heart rate clear it; a push
+  // with no streams keeps it, like the summaries.
+  const heartRate = streamsSent && input.streams?.heart_rate
+    ? encodeHeartRate(input.streams.heart_rate, input.start_date_utc_ms ?? null) : null;
+  // A ride's power is kept the same way (P7), on the same clock.
+  const powerSeries = streamsSent && input.kind === 'ride' && input.streams?.power
+    ? encodePowerSeries(input.streams.power, [], input.start_date_utc_ms ?? null) : null;
+  const heartRateStatements = [
+    ...(heartRate ? [keepHeartRateStatement(db, userId, id, heartRate, { replace: true })] : []),
+    ...(powerSeries ? [keepPowerSeriesStatement(db, userId, id, powerSeries, { replace: true })] : []),
+    db
+      .prepare(
+        `DELETE FROM activity_power_series
+          WHERE activity_id = ?1 AND user_id = ?2
+            AND (?3 = 1 OR NOT EXISTS (
+              SELECT 1 FROM external_activities a
+               WHERE a.id = ?1 AND a.user_id = ?2
+                 AND (a.deleted_at IS NULL OR a.duplicate_of IS NOT NULL)))`,
+      )
+      .bind(id, userId, streamsSent && !powerSeries ? 1 : 0),
+    db
+      .prepare(
+        `DELETE FROM activity_heart_rates
+          WHERE activity_id = ?1 AND user_id = ?2
+            AND (?3 = 1 OR NOT EXISTS (
+              SELECT 1 FROM external_activities a
+               WHERE a.id = ?1 AND a.user_id = ?2
+                 AND (a.deleted_at IS NULL OR a.duplicate_of IS NOT NULL)))`,
+      )
+      .bind(id, userId, streamsSent && !heartRate ? 1 : 0),
+  ];
+  await db.batch([
+    db
+    .prepare(
+      `INSERT INTO external_activities
+         (id,user_id,source,external_id,date,start_date_local_ms,kind,name,
+          moving_time_sec,elapsed_time_sec,distance_m,average_watts,
+          weighted_avg_watts,average_hr,max_hr,training_load,intensity,
+          calories,elevation_gain_m,raw,synced_at,deleted_at,canonical,duplicate_of,start_date_utc_ms,source_timezone,
+          stream_np_w,stream_hr_rms,stream_hr_sec,sport,provider_effort)
+       VALUES (?1,?2,'healthkit',?3,?4,?5,?6,?7,?8,?9,?10,?11,NULL,?12,?13,NULL,NULL,
+               ?14,?15,?16,?17,NULL,1,NULL,?18,?19,?20,?21,?22,?24,?25)
+       ON CONFLICT(id) DO UPDATE SET
+         start_date_utc_ms=COALESCE(external_activities.start_date_utc_ms, excluded.start_date_utc_ms),
+         source_timezone=CASE WHEN external_activities.start_date_utc_ms IS NULL
+           AND external_activities.start_date_local_ms IS excluded.start_date_local_ms
+           THEN excluded.source_timezone ELSE external_activities.source_timezone END,
+         kind=excluded.kind,
+         sport=excluded.sport,
+         name=excluded.name,
+         moving_time_sec=excluded.moving_time_sec,
+         elapsed_time_sec=excluded.elapsed_time_sec,
+         distance_m=excluded.distance_m,
+         average_watts=excluded.average_watts,
+         average_hr=excluded.average_hr,
+         max_hr=excluded.max_hr,
+         calories=excluded.calories,
+         elevation_gain_m=excluded.elevation_gain_m,
+         raw=excluded.raw,
+         stream_np_w=CASE WHEN ?23 THEN excluded.stream_np_w ELSE external_activities.stream_np_w END,
+         stream_hr_rms=CASE WHEN ?23 THEN excluded.stream_hr_rms ELSE external_activities.stream_hr_rms END,
+         stream_hr_sec=CASE WHEN ?23 THEN excluded.stream_hr_sec ELSE external_activities.stream_hr_sec END,
+         provider_effort=CASE WHEN ?26 THEN excluded.provider_effort ELSE external_activities.provider_effort END,
+         synced_at=CASE
+           WHEN excluded.synced_at > external_activities.synced_at THEN excluded.synced_at
+           ELSE external_activities.synced_at + 1
+         END,
+         deleted_at=NULL,
+         canonical=1,
+         duplicate_of=NULL
+       -- A workout the member deleted (a tombstone with no duplicate_of,
+       -- left by deleting a recorded run) is never revived by a push.
+       WHERE NOT (external_activities.deleted_at IS NOT NULL AND external_activities.duplicate_of IS NULL) AND (
+         (external_activities.start_date_utc_ms IS NULL AND excluded.start_date_utc_ms IS NOT NULL) OR
+         external_activities.kind IS NOT excluded.kind OR
+         external_activities.sport IS NOT excluded.sport OR
+         external_activities.name IS NOT excluded.name OR
+         external_activities.moving_time_sec IS NOT excluded.moving_time_sec OR
+         external_activities.elapsed_time_sec IS NOT excluded.elapsed_time_sec OR
+         external_activities.distance_m IS NOT excluded.distance_m OR
+         external_activities.average_watts IS NOT excluded.average_watts OR
+         external_activities.average_hr IS NOT excluded.average_hr OR
+         external_activities.max_hr IS NOT excluded.max_hr OR
+         external_activities.calories IS NOT excluded.calories OR
+         external_activities.elevation_gain_m IS NOT excluded.elevation_gain_m OR
+         (?23 AND (external_activities.stream_np_w IS NOT excluded.stream_np_w OR
+           external_activities.stream_hr_rms IS NOT excluded.stream_hr_rms OR
+           external_activities.stream_hr_sec IS NOT excluded.stream_hr_sec)) OR
+         (?26 AND external_activities.provider_effort IS NOT excluded.provider_effort))`,
+    )
+    .bind(
+      id,
+      userId,
+      input.id,
+      input.date,
+      input.start_date_local_ms,
+      input.kind,
+      name,
+      input.moving_time_sec,
+      input.elapsed_time_sec,
+      input.distance_m,
+      input.average_watts,
+      input.average_hr,
+      input.max_hr,
+      input.calories,
+      input.elevation_gain_m,
+      input.raw,
+      ts,
+      input.start_date_utc_ms ?? null,
+      input.source_timezone ?? null,
+      npW,
+      hr?.rms_bpm ?? null,
+      hr ? Math.round(hr.seconds) : null,
+      streamsSent ? 1 : 0,
+      sport,
+      input.provider_effort ?? null,
+      input.provider_effort !== undefined ? 1 : 0,
+    ),
+    reconcileNativeHealthKitStatement(db, userId, ts),
+    ...heartRateStatements,
+    ...(input.swim === undefined ? [] : [keepSwimStatement(db, userId, id, input.swim)]),
+  ]);
+  // Existing cross-source dedup: if this workout also exists from
+  // intervals.icu, retire the HealthKit copy so it isn't shown/counted twice.
+  // Runs AFTER the upsert so a real HealthKit revision resets prior provenance
+  // and is immediately re-deduped. An identical retry does not update/reset the
+  // row; this idempotent pass therefore preserves an already-retired duplicate.
+  await dedupeHealthKitAgainstIntervals(db, userId);
+  // A revision keeps the first push's civil date (see ON CONFLICT above), so
+  // refresh the stored row's date, not the date this push sent.
+  const stored = await db
+    .prepare('SELECT date FROM external_activities WHERE id = ?1 AND user_id = ?2')
+    .bind(id, userId)
+    .first<{ date: string }>();
+  if (stored) await refreshActivityLoads(db, userId, { fromDate: stored.date, toDate: stored.date });
+  const row = await db
+    .prepare('SELECT * FROM external_activities WHERE id = ?1 AND user_id = ?2')
+    .bind(id, userId)
+    .first<ExternalActivityRow>();
+  if (!row) throw new Error('healthkit_activity_insert_failed');
+  return row;
+}
+
+const FIT_KIND_NAMES: Record<string, string> = {
+  ride: 'Ride', run: 'Run', swim: 'Swim', walk: 'Walk', hike: 'Hike', row: 'Row', ski: 'Ski',
+  elliptical: 'Elliptical',
+};
+
+/** Civil date and local wall clock for a .fit workout: the device's own
+ * offset when the file records it, otherwise the member's timezone, else UTC.
+ * Returns a source zone `validActivitySourceTime` accepts. */
+export function fitLocalTime(startUtcMs: number, offsetSec: number | null, zone: string | null) {
+  const fixed = (offsetMinutes: number) => {
+    const sign = offsetMinutes < 0 ? '-' : '+';
+    const abs = Math.abs(offsetMinutes);
+    const localMs = startUtcMs + offsetMinutes * 60_000;
+    return {
+      date: new Date(localMs).toISOString().slice(0, 10),
+      localMs,
+      zone: `GMT${sign}${String(Math.floor(abs / 60)).padStart(2, '0')}${String(abs % 60).padStart(2, '0')}`,
+    };
+  };
+  if (offsetSec !== null) return fixed(Math.round(offsetSec / 60));
+  if (zone) {
+    try {
+      const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+        timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+      }).formatToParts(startUtcMs).map(p => [p.type, p.value]));
+      const date = `${parts.year}-${parts.month}-${parts.day}`;
+      const localMs = Date.parse(`${date}T${parts.hour}:${parts.minute}:${parts.second}Z`)
+        + ((startUtcMs % 1000) + 1000) % 1000;
+      if (Number.isFinite(localMs)) return { date, localMs, zone };
+    } catch {
+      // An unknown zone falls through to UTC.
+    }
+  }
+  return fixed(0);
+}
+
+export interface FitImportResult {
+  activity: ExternalActivityRow;
+  /** The same workout was already imported from a .fit file. */
+  deduplicated: boolean;
+}
+
+/**
+ * Store a workout read from an uploaded .fit file
+ * (docs/plans/endurance-training-load P4) as an external activity with
+ * source='fit'. `clientId` (a client UUID) is the idempotency key; the same
+ * workout uploaded again under another id returns the stored one. The
+ * samples are reduced to the same threshold-independent summaries Apple
+ * Health streams use (migration 0061), and the device's normalized power is
+ * kept as the source's figure. Cross-source dedup then shows the workout
+ * once: an intervals.icu copy wins, and this copy wins over Apple Health's.
+ */
+export async function importFitActivity(
+  db: D1Database,
+  userId: string,
+  clientId: string,
+  fit: FitActivity,
+  name: string | null,
+): Promise<FitImportResult> {
+  const id = `fit:activity:${userId}:${clientId}`;
+  const findStored = () => db
+    .prepare(
+      `SELECT * FROM external_activities
+        WHERE user_id = ?1 AND source = 'fit'
+          AND (id = ?2 OR ((deleted_at IS NULL OR duplicate_of IS NOT NULL)
+                           AND kind = ?3 AND start_date_utc_ms = ?4))
+        ORDER BY id = ?2 DESC LIMIT 1`,
+    )
+    .bind(userId, id, fit.kind, fit.start_utc_ms)
+    .first<ExternalActivityRow>();
+  // A first attempt can store the row and then fail before reconciling it;
+  // finishing that work here makes a retry converge. Both steps are
+  // idempotent, so a completed import is left as it is.
+  const returnStored = async (stored: ExternalActivityRow): Promise<FitImportResult> => {
+    await dedupeHealthKitAgainstIntervals(db, userId);
+    await refreshActivityLoads(db, userId, { fromDate: stored.date, toDate: stored.date });
+    const current = await db
+      .prepare('SELECT * FROM external_activities WHERE id = ?1 AND user_id = ?2')
+      .bind(stored.id, userId)
+      .first<ExternalActivityRow>();
+    return { activity: current ?? stored, deduplicated: true };
+  };
+  // Its heart rate on timer time, kept for the workout's chart (P3).
+  const heartRate = encodeHeartRate(fit.hr, fit.start_utc_ms);
+  // Its power and cadence, kept for a ride's charts (P7).
+  const powerSeries = fitPowerSeries(fit);
+  const existing = await findStored();
+  if (existing) {
+    // The same file uploaded again adds the series to a workout imported
+    // before Tres Fort kept one; a series already kept is never replaced.
+    const keep = [
+      ...(heartRate ? [keepHeartRateStatement(db, userId, existing.id, heartRate, { replace: false })] : []),
+      ...(powerSeries ? [keepPowerSeriesStatement(db, userId, existing.id, powerSeries, { replace: false })] : []),
+    ];
+    if (keep.length) await db.batch(keep);
+    return returnStored(existing);
+  }
+
+  const local = fitLocalTime(fit.start_utc_ms, fit.local_offset_sec, await getUserTimezone(db, userId));
+  const moving = fit.timer_sec === null ? null : Math.round(fit.timer_sec);
+  const hr = fit.hr.length > 0 ? heartRateStreamSummary(fit.hr, moving) : null;
+  const npW = fit.power.length > 0 ? powerStreamSummary(fit.power, moving) : null;
+  const intOrNull = (v: number | null) => (v === null ? null : Math.round(v));
+  const ts = now();
+  const insert = db
+    .prepare(
+      `INSERT INTO external_activities
+         (id,user_id,source,external_id,date,start_date_local_ms,kind,name,
+          moving_time_sec,elapsed_time_sec,distance_m,average_watts,
+          weighted_avg_watts,average_hr,max_hr,training_load,intensity,
+          calories,elevation_gain_m,raw,synced_at,deleted_at,canonical,duplicate_of,
+          start_date_utc_ms,source_timezone,stream_np_w,stream_hr_rms,stream_hr_sec,sport)
+       VALUES (?1,?2,'fit',?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,NULL,NULL,
+               ?15,?16,?17,?18,NULL,1,NULL,?19,?20,?21,?22,?23,?24)
+       ON CONFLICT DO NOTHING`,
+    )
+    .bind(
+      id, userId, clientId, local.date, local.localMs, fit.kind,
+      name ?? (fit.sport !== 'other' ? sportLabel(fit.sport) : null) ?? FIT_KIND_NAMES[fit.kind] ?? 'Workout',
+      moving, intOrNull(fit.elapsed_sec), fit.distance_m, fit.avg_power, fit.normalized_power,
+      fit.avg_hr, intOrNull(fit.max_hr), intOrNull(fit.calories), fit.ascent_m,
+      JSON.stringify({ source: 'fit' }), ts,
+      fit.start_utc_ms, local.zone, npW, hr?.rms_bpm ?? null, hr ? Math.round(hr.seconds) : null,
+      fit.sport,
+    );
+  const [inserted] = await db.batch([
+    insert,
+    ...(heartRate ? [keepHeartRateStatement(db, userId, id, heartRate, { replace: false })] : []),
+    ...(powerSeries ? [keepPowerSeriesStatement(db, userId, id, powerSeries, { replace: false })] : []),
+  ]);
+  // Losing a race to the same client id or, through migration 0062's
+  // unique index, to the same workout uploaded under another id.
+  if ((inserted!.meta.changes ?? 0) === 0) {
+    const winner = await findStored();
+    if (!winner) throw new Error('fit_activity_insert_failed');
+    return returnStored(winner);
+  }
+  await dedupeHealthKitAgainstIntervals(db, userId);
+  await refreshActivityLoads(db, userId, { fromDate: local.date, toDate: local.date });
+  const row = await db
+    .prepare('SELECT * FROM external_activities WHERE id = ?1 AND user_id = ?2')
+    .bind(id, userId)
+    .first<ExternalActivityRow>();
+  if (!row) throw new Error('fit_activity_insert_failed');
+  return { activity: row, deduplicated: false };
+}
+
+/**
+ * Remove a workout the member imported from a .fit file. The row is
+ * tombstoned (it reaches clients through /api/state) and is no longer a
+ * dedup winner, so an Apple Health copy it had hidden comes back. Returns
+ * false when the member has no such import.
+ */
+export async function deleteFitActivity(db: D1Database, userId: string, clientId: string): Promise<boolean> {
+  const ts = now();
+  const [result] = await db.batch([
+    db
+      .prepare(
+        `UPDATE external_activities
+            SET deleted_at = CASE WHEN ?3 > synced_at THEN ?3 ELSE synced_at + 1 END,
+                synced_at = CASE WHEN ?3 > synced_at THEN ?3 ELSE synced_at + 1 END,
+                canonical = 1,
+                duplicate_of = NULL
+          WHERE id = ?1 AND user_id = ?2 AND source = 'fit'
+            AND (deleted_at IS NULL OR duplicate_of IS NOT NULL)`,
+      )
+      .bind(`fit:activity:${userId}:${clientId}`, userId, ts),
+    db
+      .prepare('DELETE FROM activity_heart_rates WHERE activity_id = ?1 AND user_id = ?2')
+      .bind(`fit:activity:${userId}:${clientId}`, userId),
+    db
+      .prepare('DELETE FROM activity_power_series WHERE activity_id = ?1 AND user_id = ?2')
+      .bind(`fit:activity:${userId}:${clientId}`, userId),
+  ]);
+  if ((result!.meta.changes ?? 0) === 0) return false;
+  await dedupeHealthKitAgainstIntervals(db, userId);
+  return true;
+}
+
+/**
+ * Store a workout file Garmin pushed (docs/plans/garmin P2) as an external
+ * activity with source='garmin', the same way an uploaded .fit file is
+ * stored. Garmin Connect's activity id is the idempotency key. The insert is
+ * fenced by the connection the file was announced to and by its activity
+ * permission, so neither a disconnect nor a member's withdrawn sharing is
+ * undone by an import already running. Garmin rows stay private and out of
+ * MCP (Garmin's license; see the plan).
+ */
+export async function importGarminActivity(
+  db: D1Database,
+  userId: string,
+  connectionId: string,
+  activityId: string,
+  w: GarminWorkout,
+  meta: GarminFileMeta,
+): Promise<'imported' | 'existing' | 'disconnected'> {
+  const id = `garmin:${userId}:${activityId}`;
+  const local = fitLocalTime(w.start_utc_ms, w.local_offset_sec, await getUserTimezone(db, userId));
+  const raw = JSON.stringify({
+    source: 'garmin', device_name: meta.deviceName, activity_type: meta.activityType, manual: meta.manual,
+  });
+  const insert = db
+    .prepare(
+      `INSERT INTO external_activities
+         (id,user_id,source,external_id,date,start_date_local_ms,kind,name,
+          moving_time_sec,elapsed_time_sec,distance_m,average_watts,
+          weighted_avg_watts,average_hr,max_hr,training_load,intensity,
+          calories,elevation_gain_m,raw,synced_at,deleted_at,canonical,duplicate_of,
+          start_date_utc_ms,source_timezone,stream_np_w,stream_hr_rms,stream_hr_sec,sport)
+       SELECT ?1,?2,'garmin',?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,NULL,NULL,
+              ?15,?16,?17,?18,NULL,1,NULL,?19,?20,?21,?22,?23,?24
+        WHERE EXISTS (SELECT 1 FROM provider_connections
+                       WHERE user_id = ?2 AND provider = 'garmin' AND connection_id = ?25
+                         AND ${GARMIN_ACTIVITY_PERMISSION_SQL})
+       ON CONFLICT(id) DO UPDATE SET deleted_at = NULL, synced_at = MAX(external_activities.synced_at + 1, excluded.synced_at)
+        WHERE external_activities.deleted_at IS NOT NULL AND external_activities.duplicate_of IS NULL`,
+    )
+    .bind(
+      id, userId, activityId, local.date, local.localMs, w.kind,
+      meta.activityName ?? (w.sport !== 'other' ? sportLabel(w.sport) : null) ?? FIT_KIND_NAMES[w.kind] ?? 'Workout',
+      w.moving_sec, w.elapsed_sec, w.distance_m, w.avg_power, w.normalized_power,
+      w.avg_hr, w.max_hr, w.calories, w.ascent_m,
+      raw, now(),
+      w.start_utc_ms, local.zone, w.stream_np_w, w.stream_hr_rms, w.stream_hr_sec,
+      w.sport, connectionId,
+    );
+  const [inserted] = await db.batch([
+    insert,
+    ...(w.heart_rate ? [keepHeartRateStatement(db, userId, id, w.heart_rate, { replace: false })] : []),
+    ...(w.power_series ? [keepPowerSeriesStatement(db, userId, id, w.power_series, { replace: false })] : []),
+  ]);
+  if ((inserted!.meta.changes ?? 0) === 0) {
+    const stored = await db
+      .prepare(`SELECT 1 AS found FROM external_activities WHERE id = ?1 AND user_id = ?2`)
+      .bind(id, userId)
+      .first<{ found: number }>();
+    if (!stored) return 'disconnected';
+  }
+  // Also on a retry that finds the row: an earlier attempt may have stored it
+  // and failed before deduplicating and scoring it.
+  await dedupeHealthKitAgainstIntervals(db, userId);
+  await refreshActivityLoads(db, userId, { fromDate: local.date, toDate: local.date });
+  return (inserted!.meta.changes ?? 0) === 0 ? 'existing' : 'imported';
+}
+
+/** Heart rate after a run recorded in the app (docs/plans/run-recorder P7):
+ * at the stop, and one and two minutes later, in whole bpm. */
+export interface HeartRateRecovery {
+  at_stop: number;
+  after_60s: number | null;
+  after_120s: number | null;
+}
+
+/**
+ * Keep a workout's heart-rate series (docs/plans/run-detail-charts P3,
+ * migration 0068) for the member's activity `activityId`, only while the
+ * member hasn't deleted it. `replace` lets a later Apple Health push revise
+ * it; a recording's or a .fit import's first series is kept.
+ */
+function keepHeartRateStatement(
+  db: D1Database,
+  userId: string,
+  activityId: string,
+  series: EncodedHeartRate,
+  { replace }: { replace: boolean },
+): D1PreparedStatement {
+  const conflict = replace
+    ? `ON CONFLICT(activity_id) DO UPDATE SET
+         point_count = excluded.point_count, series = excluded.series, created_at = excluded.created_at
+        WHERE activity_heart_rates.user_id = excluded.user_id
+          AND activity_heart_rates.series IS NOT excluded.series`
+    : 'ON CONFLICT DO NOTHING';
+  return db
+    .prepare(
+      `INSERT INTO activity_heart_rates (activity_id,user_id,point_count,series,created_at)
+       SELECT a.id, a.user_id, ?3, ?4, ?5 FROM external_activities a
+        WHERE a.id = ?1 AND a.user_id = ?2
+          AND (a.deleted_at IS NULL OR a.duplicate_of IS NOT NULL)
+       ${conflict}`,
+    )
+    .bind(activityId, userId, series.dt.length, JSON.stringify(series), now());
+}
+
+/**
+ * Keep a ride's power and cadence series (run-detail-charts P7, migration
+ * 0074), the same way as its heart rate: only while the member hasn't
+ * deleted the workout, and replaced only by a later Apple Health push.
+ */
+function keepPowerSeriesStatement(
+  db: D1Database,
+  userId: string,
+  activityId: string,
+  series: EncodedPowerSeries,
+  { replace }: { replace: boolean },
+): D1PreparedStatement {
+  const conflict = replace
+    ? `ON CONFLICT(activity_id) DO UPDATE SET
+         point_count = excluded.point_count, series = excluded.series, created_at = excluded.created_at
+        WHERE activity_power_series.user_id = excluded.user_id
+          AND activity_power_series.series IS NOT excluded.series`
+    : 'ON CONFLICT DO NOTHING';
+  return db
+    .prepare(
+      `INSERT INTO activity_power_series (activity_id,user_id,point_count,series,created_at)
+       SELECT a.id, a.user_id, ?3, ?4, ?5 FROM external_activities a
+        WHERE a.id = ?1 AND a.user_id = ?2
+          AND (a.deleted_at IS NULL OR a.duplicate_of IS NOT NULL)
+       ${conflict}`,
+    )
+    .bind(activityId, userId, powerSeriesPoints(series), JSON.stringify(series), now());
+}
+
+/** Forget the power series of every activity the member deleted. */
+function forgetPowerSeriesStatement(db: D1Database, userId: string): D1PreparedStatement {
+  return db
+    .prepare(
+      `DELETE FROM activity_power_series
+        WHERE user_id = ?1 AND activity_id IN (
+          SELECT id FROM external_activities
+           WHERE user_id = ?1 AND deleted_at IS NOT NULL AND duplicate_of IS NULL)`,
+    )
+    .bind(userId);
+}
+
+/** Forget the heart-rate series of every activity the member deleted. */
+function forgetHeartRatesStatement(db: D1Database, userId: string): D1PreparedStatement {
+  return db
+    .prepare(
+      `DELETE FROM activity_heart_rates
+        WHERE user_id = ?1 AND activity_id IN (
+          SELECT id FROM external_activities
+           WHERE user_id = ?1 AND deleted_at IS NOT NULL AND duplicate_of IS NULL)`,
+    )
+    .bind(userId);
+}
+
+/**
+ * Keep a planned run's laps (planned-runs P9, migration 0069) for the
+ * member's recording `activityId`, only while the member hasn't deleted it.
+ * The first laps kept stay.
+ */
+function keepLapsStatement(
+  db: D1Database,
+  userId: string,
+  activityId: string,
+  laps: RunLap[],
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO activity_laps (activity_id,user_id,lap_count,laps,created_at)
+       SELECT a.id, a.user_id, ?3, ?4, ?5 FROM external_activities a
+        WHERE a.id = ?1 AND a.user_id = ?2 AND a.source = 'recording'
+          AND (a.deleted_at IS NULL OR a.duplicate_of IS NOT NULL)
+       ON CONFLICT DO NOTHING`,
+    )
+    .bind(activityId, userId, laps.length, serializeRunLaps(laps), now());
+}
+
+/**
+ * Keep what the recorder saw (run-recorder P5(e), migration 0076) for the
+ * member's recording `activityId`, only while the member hasn't deleted it.
+ * The first diagnostics kept stay.
+ */
+function keepDiagnosticsStatement(
+  db: D1Database,
+  userId: string,
+  activityId: string,
+  diagnostics: RecordingDiagnostics,
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO recording_diagnostics (activity_id,user_id,pause_count,fix_count,diagnostics,created_at)
+       SELECT a.id, a.user_id, ?3, ?4, ?5, ?6 FROM external_activities a
+        WHERE a.id = ?1 AND a.user_id = ?2 AND a.source = 'recording'
+          AND (a.deleted_at IS NULL OR a.duplicate_of IS NOT NULL)
+       ON CONFLICT DO NOTHING`,
+    )
+    .bind(
+      activityId, userId, diagnostics.pauses.length, diagnostics.speeds?.dt_ms.length ?? 0,
+      serializeRecordingDiagnostics(diagnostics), now(),
+    );
+}
+
+export interface RecordedRunStoreResult {
+  activity: ExternalActivityRow;
+  /** This recording was already stored. */
+  deduplicated: boolean;
+  /** The member deleted this recording; nothing was stored again. */
+  deleted: boolean;
+}
+
+/**
+ * Keep a run recorded in the app (docs/plans/run-recorder P5): its totals as
+ * an external activity with source='recording', scored from its heart rate
+ * like a .fit import, and its GPS route in activity_routes (migration 0063).
+ * `recordingId` (the client UUID) is the idempotency key. A recording the
+ * member deleted is not stored again. Cross-source dedup then shows the run
+ * once: an intervals.icu copy wins, and this copy wins over Apple Health's.
+ */
+export async function storeRecordedRun(
+  db: D1Database,
+  userId: string,
+  input: {
+    recording_id: string;
+    date: string;
+    name: string | null;
+    run: TcxRun;
+    recovery?: HeartRateRecovery | null;
+    /** Meters climbed while moving, from the iPhone's barometer (P7). */
+    elevation_gain_m?: number | null;
+    /** A planned run's laps, one per step it ran (planned-runs P9). */
+    laps?: RunLap[] | null;
+    /** Pauses and GPS speed readings the recorder saw (P5(e)). */
+    diagnostics?: RecordingDiagnostics | null;
+  },
+): Promise<RecordedRunStoreResult> {
+  const recordingId = input.recording_id.toLowerCase();
+  const id = `recording:activity:${userId}:${recordingId}`;
+  const read = () => db
+    .prepare('SELECT * FROM external_activities WHERE id = ?1 AND user_id = ?2')
+    .bind(id, userId)
+    .first<ExternalActivityRow>();
+  const memberDeleted = (row: ExternalActivityRow) => row.deleted_at !== null && row.duplicate_of === null;
+  // A first attempt can store the run and then fail before reconciling it;
+  // finishing that work here makes a retry converge.
+  const returnStored = async (stored: ExternalActivityRow): Promise<RecordedRunStoreResult> => {
+    if (memberDeleted(stored)) return { activity: stored, deduplicated: true, deleted: true };
+    await dedupeHealthKitAgainstIntervals(db, userId);
+    await refreshActivityLoads(db, userId, { fromDate: stored.date, toDate: stored.date });
+    return { activity: (await read()) ?? stored, deduplicated: true, deleted: false };
+  };
+  const recovery = input.recovery ?? null;
+  const elevationGain = input.elevation_gain_m ?? null;
+  const heartRate = encodeHeartRate(input.run.hr, input.run.hr_start_ms);
+  const laps = input.laps && input.laps.length > 0 ? input.laps : null;
+  const diagnostics = input.diagnostics ?? null;
+  const existing = await read();
+  if (existing) {
+    // Likewise the diagnostics of a build that didn't send them.
+    if (diagnostics && !memberDeleted(existing)) {
+      await keepDiagnosticsStatement(db, userId, id, diagnostics).run();
+    }
+    // A retry can carry the laps of a build that didn't send them; laps
+    // already kept are never replaced.
+    if (laps && !memberDeleted(existing)) await keepLapsStatement(db, userId, id, laps).run();
+    // A retry can carry the heart rate a first attempt from an older build
+    // didn't keep; a series already kept is never replaced.
+    if (heartRate && !memberDeleted(existing)) {
+      await keepHeartRateStatement(db, userId, id, heartRate, { replace: false }).run();
+    }
+    // A retry can carry the recovery an earlier attempt didn't have yet;
+    // a value already kept is never replaced.
+    if (recovery && !memberDeleted(existing) && existing.recovery_hr_at_stop == null) {
+      await db
+        .prepare(
+          `UPDATE external_activities
+              SET recovery_hr_at_stop = ?3, recovery_hr_after_60s = ?4, recovery_hr_after_120s = ?5
+            WHERE id = ?1 AND user_id = ?2 AND recovery_hr_at_stop IS NULL`,
+        )
+        .bind(id, userId, recovery.at_stop, recovery.after_60s, recovery.after_120s)
+        .run();
+    }
+    // Likewise the climb from a build that read the barometer.
+    if (elevationGain !== null && !memberDeleted(existing) && existing.elevation_gain_m == null) {
+      await db
+        .prepare(
+          `UPDATE external_activities SET elevation_gain_m = ?3
+            WHERE id = ?1 AND user_id = ?2 AND elevation_gain_m IS NULL`,
+        )
+        .bind(id, userId, elevationGain)
+        .run();
+    }
+    return returnStored(existing);
+  }
+
+  const { run } = input;
+  // The member's timezone follows the device (X-Device-TZ on every request).
+  const local = fitLocalTime(run.start_utc_ms, null, await getUserTimezone(db, userId));
+  const moving = run.moving_sec === null ? null : Math.round(run.moving_sec);
+  const hr = run.hr.length > 0 ? heartRateStreamSummary(run.hr, moving) : null;
+  const route = encodeRoute(run.segments);
+  const ts = now();
+  const statements = [
+    db
+      .prepare(
+        `INSERT INTO external_activities
+           (id,user_id,source,external_id,date,start_date_local_ms,kind,name,
+            moving_time_sec,elapsed_time_sec,distance_m,average_watts,
+            weighted_avg_watts,average_hr,max_hr,training_load,intensity,
+            calories,elevation_gain_m,raw,synced_at,deleted_at,canonical,duplicate_of,
+            start_date_utc_ms,source_timezone,stream_np_w,stream_hr_rms,stream_hr_sec,sport,
+            recovery_hr_at_stop,recovery_hr_after_60s,recovery_hr_after_120s)
+         VALUES (?1,?2,'recording',?3,?4,?5,'run',?6,?7,?8,?9,NULL,NULL,?10,?11,NULL,NULL,
+                 ?12,?22,?13,?14,NULL,1,NULL,?15,?16,NULL,?17,?18,'run',?19,?20,?21)
+         ON CONFLICT DO NOTHING`,
+      )
+      .bind(
+        id, userId, recordingId, input.date, local.localMs, input.name ?? 'Run',
+        moving, run.elapsed_sec === null ? null : Math.round(run.elapsed_sec), run.distance_m,
+        run.avg_hr, run.max_hr === null ? null : Math.round(run.max_hr),
+        run.calories === null ? null : Math.round(run.calories),
+        JSON.stringify({ source: 'recording' }), ts,
+        run.start_utc_ms, local.zone, hr?.rms_bpm ?? null, hr ? Math.round(hr.seconds) : null,
+        recovery?.at_stop ?? null, recovery?.after_60s ?? null, recovery?.after_120s ?? null,
+        elevationGain,
+      ),
+  ];
+  if (route) {
+    statements.push(
+      db
+        .prepare(
+          `INSERT INTO activity_routes (activity_id,user_id,point_count,route,created_at)
+           SELECT ?1,?2,?3,?4,?5 WHERE changes() > 0
+           ON CONFLICT DO NOTHING`,
+        )
+        .bind(id, userId, routePointCount(route), JSON.stringify(route), ts),
+    );
+  }
+  if (heartRate) statements.push(keepHeartRateStatement(db, userId, id, heartRate, { replace: false }));
+  if (laps) statements.push(keepLapsStatement(db, userId, id, laps));
+  if (diagnostics) statements.push(keepDiagnosticsStatement(db, userId, id, diagnostics));
+  const [inserted] = await db.batch(statements);
+  // Losing a race to the same recording id.
+  if ((inserted!.meta.changes ?? 0) === 0) {
+    const winner = await read();
+    if (!winner) throw new Error('recorded_run_insert_failed');
+    return returnStored(winner);
+  }
+  await dedupeHealthKitAgainstIntervals(db, userId);
+  await refreshActivityLoads(db, userId, { fromDate: input.date, toDate: input.date });
+  const row = await read();
+  if (!row) throw new Error('recorded_run_insert_failed');
+  return { activity: row, deduplicated: false, deleted: false };
+}
+
+export interface StoredActivityRoute {
+  /** The activity that carries the route: the recording, or the Apple
+   * Health run, behind the activity asked for or the activity itself. */
+  activity_id: string;
+  source: 'recording' | 'healthkit';
+  /** The run recorded in the app; null for an Apple Health run. */
+  recording_id: string | null;
+  /** Null for a run recorded without GPS fixes. */
+  route: EncodedRoute | null;
+  /** The recorded run's heart rate after the stop (P7); null for a Health
+   * route or a run recorded without it. */
+  heart_rate_recovery: HeartRateRecovery | null;
+  /** A planned run's laps, one per step it ran (planned-runs P9); null for
+   * a Health route or a run recorded without a plan. */
+  laps: RunLap[] | null;
+}
+
+/**
+ * The route Tres Fort keeps for one of the member's activities. First the
+ * run recorded in the app behind it, with its route when it has one: the
+ * recording itself, or the recording that dedup hid behind this activity
+ * (an intervals.icu copy of the same run). Then the route the app sent for
+ * an Apple Health run (docs/plans/run-recorder P6(b)): the Health run itself
+ * or one dedup hid behind this activity. Null when Tres Fort keeps none.
+ * Only the member's own activities and routes are ever read.
+ */
+export async function getActivityRoute(
+  db: D1Database,
+  userId: string,
+  activityId: string,
+): Promise<StoredActivityRoute | null> {
+  const row = await db
+    .prepare(
+      `SELECT a.id AS activity_id, a.source, a.external_id, r.route,
+              a.recovery_hr_at_stop, a.recovery_hr_after_60s, a.recovery_hr_after_120s,
+              l.laps
+         FROM external_activities a
+         LEFT JOIN activity_routes r ON r.activity_id = a.id AND r.user_id = a.user_id
+         LEFT JOIN activity_laps l ON l.activity_id = a.id AND l.user_id = a.user_id
+        WHERE a.user_id = ?1
+          AND (a.id = ?2 OR a.duplicate_of = ?2)
+          AND (a.deleted_at IS NULL OR a.duplicate_of IS NOT NULL)
+          AND (a.source = 'recording' OR (a.source = 'healthkit' AND r.route IS NOT NULL))
+        ORDER BY a.source = 'recording' DESC, a.id = ?2 DESC, r.route IS NOT NULL DESC, a.id
+        LIMIT 1`,
+    )
+    .bind(userId, activityId)
+    .first<{
+      activity_id: string;
+      source: 'recording' | 'healthkit';
+      external_id: string;
+      route: string | null;
+      recovery_hr_at_stop: number | null;
+      recovery_hr_after_60s: number | null;
+      recovery_hr_after_120s: number | null;
+      laps: string | null;
+    }>();
+  if (!row) return null;
+  return {
+    activity_id: row.activity_id,
+    source: row.source,
+    recording_id: row.source === 'recording' ? row.external_id : null,
+    route: row.route === null ? null : parseStoredRoute(row.route),
+    heart_rate_recovery: row.source === 'recording' && row.recovery_hr_at_stop !== null
+      ? {
+          at_stop: row.recovery_hr_at_stop,
+          after_60s: row.recovery_hr_after_60s,
+          after_120s: row.recovery_hr_after_120s,
+        }
+      : null,
+    laps: row.source === 'recording' && row.laps !== null ? parseRunLaps(row.laps) : null,
+  };
+}
+
+/** A swim's detail and what it adds up to (sport-activities P4). */
+export interface StoredActivitySwim {
+  activity_id: string;
+  swim: SwimDetail;
+  summary: SwimSummary;
+}
+
+/**
+ * The swim detail Tres Fort keeps for one of the member's activities: its
+ * own, or that of an Apple Health copy dedup hid behind it. Null when none is
+ * kept. Private to the member, like a run's laps.
+ */
+export async function getActivitySwim(
+  db: D1Database,
+  userId: string,
+  activityId: string,
+): Promise<StoredActivitySwim | null> {
+  const row = await db
+    .prepare(
+      `SELECT a.id AS activity_id, s.detail
+         FROM external_activities a
+         JOIN activity_swims s ON s.activity_id = a.id AND s.user_id = a.user_id
+        WHERE a.user_id = ?1
+          AND (a.id = ?2 OR a.duplicate_of = ?2)
+          AND (a.deleted_at IS NULL OR a.duplicate_of IS NOT NULL)
+        ORDER BY a.id = ?2 DESC, s.length_count DESC, a.id
+        LIMIT 1`,
+    )
+    .bind(userId, activityId)
+    .first<{ activity_id: string; detail: string }>();
+  const swim = row ? parseStoredSwimDetail(row.detail) : null;
+  return row && swim ? { activity_id: row.activity_id, swim, summary: summarizeSwim(swim) } : null;
+}
+
+export type ActivityStreamsResult =
+  | { ok: true; activity_id: string; source: 'intervals' | 'recording' | 'healthkit' | 'fit' | 'garmin'; streams: ActivityStreams }
+  | { ok: false; reason: 'not_found' | 'unavailable' };
+
+/**
+ * The heart-rate series Tres Fort keeps for one of the member's workouts
+ * (run-detail-charts P3): the activity's own, or one dedup hid behind it.
+ * `preferred` (the activity whose route is drawn) comes first, then a run
+ * recorded in the app. Null when none is kept.
+ */
+async function getStoredHeartRate(
+  db: D1Database,
+  userId: string,
+  activityId: string,
+  preferred: string | null,
+): Promise<{ activity_id: string; source: 'recording' | 'healthkit' | 'fit' | 'garmin'; series: EncodedHeartRate } | null> {
+  const row = await db
+    .prepare(
+      `SELECT a.id AS activity_id, a.source, h.series
+         FROM external_activities a
+         JOIN activity_heart_rates h ON h.activity_id = a.id AND h.user_id = a.user_id
+        WHERE a.user_id = ?1
+          AND (a.id = ?2 OR a.duplicate_of = ?2)
+          AND (a.deleted_at IS NULL OR a.duplicate_of IS NOT NULL)
+          AND a.source IN ('recording','fit','garmin','healthkit')
+        ORDER BY a.id IS ?3 DESC, a.source = 'recording' DESC, a.source IN ('fit','garmin') DESC, a.id = ?2 DESC, a.id
+        LIMIT 1`,
+    )
+    .bind(userId, activityId, preferred)
+    .first<{ activity_id: string; source: 'recording' | 'healthkit' | 'fit' | 'garmin'; series: string }>();
+  const series = row ? parseStoredHeartRate(row.series) : null;
+  return row && series ? { activity_id: row.activity_id, source: row.source, series } : null;
+}
+
+/**
+ * The power and cadence series Tres Fort keeps for one of the member's
+ * rides (run-detail-charts P7): the activity's own, or one dedup hid behind
+ * it, `preferred` first. Null when none is kept.
+ */
+async function getStoredPowerSeries(
+  db: D1Database,
+  userId: string,
+  activityId: string,
+  preferred: string | null,
+): Promise<{ activity_id: string; source: 'healthkit' | 'fit' | 'garmin'; series: EncodedPowerSeries } | null> {
+  const row = await db
+    .prepare(
+      `SELECT a.id AS activity_id, a.source, p.series
+         FROM external_activities a
+         JOIN activity_power_series p ON p.activity_id = a.id AND p.user_id = a.user_id
+        WHERE a.user_id = ?1
+          AND (a.id = ?2 OR a.duplicate_of = ?2)
+          AND (a.deleted_at IS NULL OR a.duplicate_of IS NOT NULL)
+          AND a.source IN ('fit','garmin','healthkit')
+        ORDER BY a.id IS ?3 DESC, a.source IN ('fit','garmin') DESC, a.id = ?2 DESC, a.id
+        LIMIT 1`,
+    )
+    .bind(userId, activityId, preferred)
+    .first<{ activity_id: string; source: 'healthkit' | 'fit' | 'garmin'; series: string }>();
+  const series = row ? parseStoredPowerSeries(row.series) : null;
+  return row && series ? { activity_id: row.activity_id, source: row.source, series } : null;
+}
+
+/**
+ * Pace, heart rate and elevation series for one of the member's activities
+ * (docs/plans/run-detail-charts P0, P3), with a ride's power and cadence
+ * (P6 from intervals.icu, P7 from the series Tres Fort keeps). An intervals.icu activity is read
+ * from intervals.icu, which has the watch's heart rate; when intervals.icu
+ * can't give one, or for a run recorded in the app or an Apple Health run,
+ * the route Tres Fort keeps gives pace and elevation and the heart-rate
+ * series it keeps gives heart rate. Only the member's own activities are
+ * ever read, and nothing is stored.
+ */
+export async function getActivityStreams(
+  db: D1Database,
+  env: Env,
+  userId: string,
+  activityId: string,
+  deps: { fetcher?: Fetcher } = {},
+): Promise<ActivityStreamsResult> {
+  const provider = await getIntervalsActivityStreams(db, env, userId, activityId, deps);
+  if (provider.ok) return { ok: true, activity_id: activityId, source: 'intervals', streams: provider.streams };
+  const stored = await getActivityRoute(db, userId, activityId);
+  const heart = await getStoredHeartRate(db, userId, activityId, stored?.activity_id ?? null);
+  const track = stored?.route ? trackFromRoute(stored.route) : [];
+  // Heart rate's clock starts at the workout's start, a route's at its first
+  // fix: move the readings onto the route's clock. Time before the first
+  // fix is taken as moving, as a run starts before GPS locks on.
+  const shift = stored?.route && heart?.series.start_ms != null
+    ? (stored.route.start_ms - heart.series.start_ms) / 1000 : 0;
+  const readings = heart ? decodeHeartRate(heart.series).map((r) => ({ t: r.t - shift, v: r.v })) : [];
+  // A ride's kept power and cadence (P7), with zones from the member's FTP
+  // on the ride's date, moved onto the route's clock like heart rate.
+  const power = await getStoredPowerSeries(db, userId, activityId, heart?.activity_id ?? stored?.activity_id ?? null);
+  const ride = power
+    ? await db.prepare('SELECT kind, date FROM external_activities WHERE id = ?1 AND user_id = ?2')
+      .bind(activityId, userId).first<{ kind: string; date: string }>()
+    : null;
+  const ftpW = ride?.kind === 'ride' && power?.series.power
+    ? thresholdOn(await listAthleteThresholds(db, userId), 'ride', 'ftp_w', ride.date) : null;
+  const powerShift = stored?.route && power?.series.start_ms != null
+    ? (stored.route.start_ms - power.series.start_ms) / 1000 : 0;
+  const powerOptions = (by: number) => power ? {
+    power: decodeValues(power.series.power).map((r) => ({ t: r.t - by, v: r.v })),
+    cadence: decodeValues(power.series.cadence).map((r) => ({ t: r.t - by, v: r.v })),
+    powerClock: 'moving' as const,
+    ftpW,
+  } : {};
+  const withRoute = track.length > 0 || heart || power
+    ? buildActivityStreams(track, readings, { heartRateClock: 'moving', ...powerOptions(powerShift) })
+    : null;
+  if (stored?.route && withRoute) {
+    return { ok: true, activity_id: stored.activity_id, source: stored.source, streams: withRoute };
+  }
+  // No route, or one too short to chart (a single fix): heart rate and
+  // power alone, on their own clock.
+  const kept = heart ?? power;
+  const keptOnly = kept && track.length > 0
+    ? buildActivityStreams([], heart ? decodeHeartRate(heart.series) : [],
+      { heartRateClock: 'moving', ...powerOptions(0) })
+    : withRoute;
+  if (kept && keptOnly) return { ok: true, activity_id: kept.activity_id, source: kept.source, streams: keptOnly };
+  return { ok: false, reason: provider.reason };
+}
+
+export type HealthKitRouteResult =
+  | { ok: true; activity_id: string; point_count: number }
+  /** No such Apple Health activity of the member's (not pushed yet, or deleted). */
+  | { ok: false; error: 'not_found' }
+  /** Only runs and swims (an open-water swim's track) keep a route; the
+   * error keeps its name for older apps. */
+  | { ok: false; error: 'not_a_run' }
+  /** No valid point. */
+  | { ok: false; error: 'invalid_route' };
+
+/**
+ * Keep the GPS route Apple Health saved with one of the member's runs
+ * (docs/plans/run-recorder P6(b)) or open-water swims (sport-activities P4),
+ * by its Health workout id. The app sends routes only for runs another app
+ * recorded; the recorder's own runs keep
+ * theirs through POST /api/activities/recordings. The route is re-encoded,
+ * so invalid points are dropped and a very long one is thinned, and a later
+ * send replaces it. Private to the member like a recorded route; the
+ * account export includes it and account deletion removes it.
+ */
+export async function saveHealthKitRoute(
+  db: D1Database,
+  userId: string,
+  healthWorkoutId: string,
+  route: EncodedRoute,
+): Promise<HealthKitRouteResult> {
+  const encoded = encodeRoute(decodeRoute(route));
+  if (!encoded) return { ok: false, error: 'invalid_route' };
+  const find = `SELECT id, kind FROM external_activities
+                 WHERE user_id = ?1 AND source = 'healthkit' AND lower(external_id) = lower(?2)
+                   AND (deleted_at IS NULL OR duplicate_of IS NOT NULL)`;
+  const found = await db.prepare(find).bind(userId, healthWorkoutId).first<{ id: string; kind: string }>();
+  if (!found) return { ok: false, error: 'not_found' };
+  if (found.kind !== 'run' && found.kind !== 'swim') return { ok: false, error: 'not_a_run' };
+  const pointCount = routePointCount(encoded);
+  // Checked again in the write, so a run deleted in between keeps no route.
+  const saved = await db
+    .prepare(
+      `INSERT INTO activity_routes (activity_id,user_id,point_count,route,created_at)
+       SELECT a.id, a.user_id, ?3, ?4, ?5 FROM external_activities a
+        WHERE a.id = ?6 AND a.user_id = ?1 AND a.source = 'healthkit' AND a.kind IN ('run', 'swim')
+          AND (a.deleted_at IS NULL OR a.duplicate_of IS NOT NULL)
+       ON CONFLICT(activity_id) DO UPDATE SET
+         point_count = excluded.point_count, route = excluded.route, created_at = excluded.created_at
+        WHERE activity_routes.user_id = excluded.user_id`,
+    )
+    .bind(userId, healthWorkoutId, pointCount, JSON.stringify(encoded), now(), found.id)
+    .run();
+  if (!saved.meta.changes) return { ok: false, error: 'not_found' };
+  return { ok: true, activity_id: found.id, point_count: pointCount };
+}
+
+/** A run recorded in the app that the member can still delete: shown, or
+ * hidden behind its intervals.icu copy. */
+export async function getRecordedRun(
+  db: D1Database,
+  userId: string,
+  recordingId: string,
+): Promise<{ id: string; date: string } | null> {
+  return db
+    .prepare(
+      `SELECT id, date FROM external_activities
+        WHERE id = ?1 AND user_id = ?2 AND source = 'recording'
+          AND (deleted_at IS NULL OR duplicate_of IS NOT NULL)`,
+    )
+    .bind(`recording:activity:${userId}:${recordingId.toLowerCase()}`, userId)
+    .first<{ id: string; date: string }>();
+}
+
+/**
+ * Remove a run recorded in the app from Tres Fort, by its recording id
+ * (docs/plans/run-recorder P5(d)): the activity is tombstoned (it reaches
+ * clients through /api/state), its route is deleted outright, and the
+ * cached intervals.icu copy is tombstoned (the caller has already deleted
+ * it on intervals.icu). `healthWorkoutIds` names the Apple Health workouts
+ * the recorder saved for this run, which the app deletes from Health: their
+ * synced copies are tombstoned for good, so dedup doesn't bring them back.
+ * Only a Health copy of this run can be named: one dedup hid behind the
+ * recording or its intervals.icu copy, or one starting within the dedup
+ * tolerance of the recording. A named workout Apple Health hasn't synced yet
+ * gets a tombstone now, so its first push stays deleted
+ * (`upsertHealthKitActivity` never revives a member's deletion). Returns
+ * null when the member has no such recording.
+ */
+export async function deleteRecordedRun(
+  db: D1Database,
+  userId: string,
+  recordingId: string,
+  { healthWorkoutIds = [] }: { healthWorkoutIds?: string[] } = {},
+): Promise<{ health_removed: number } | null> {
+  const id = `recording:activity:${userId}:${recordingId.toLowerCase()}`;
+  const intervalsCopy = `tresfort:recording:${recordingId.toLowerCase()}`;
+  const ts = now();
+  const tombstone = `deleted_at = CASE WHEN ?3 > synced_at THEN ?3 ELSE synced_at + 1 END,
+                synced_at = CASE WHEN ?3 > synced_at THEN ?3 ELSE synced_at + 1 END,
+                canonical = 1,
+                duplicate_of = NULL`;
+  const [updated, , , , health] = await db.batch([
+    db
+      .prepare(
+        `UPDATE external_activities
+            SET ${tombstone}
+          WHERE id = ?1 AND user_id = ?2 AND source = 'recording'
+            AND (deleted_at IS NULL OR duplicate_of IS NOT NULL)`,
+      )
+      .bind(id, userId, ts),
+    db.prepare('DELETE FROM activity_routes WHERE activity_id = ?1 AND user_id = ?2').bind(id, userId),
+    db.prepare('DELETE FROM activity_laps WHERE activity_id = ?1 AND user_id = ?2').bind(id, userId),
+    db.prepare('DELETE FROM recording_diagnostics WHERE activity_id = ?1 AND user_id = ?2').bind(id, userId),
+    db
+      .prepare(
+        `UPDATE external_activities
+            SET ${tombstone}
+          WHERE user_id = ?2 AND source = 'healthkit'
+            AND lower(external_id) IN (SELECT lower(value) FROM json_each(?4))
+            AND (deleted_at IS NULL OR duplicate_of IS NOT NULL)
+            AND (duplicate_of = ?1
+              OR duplicate_of IN (SELECT i.id FROM external_activities i
+                                   WHERE i.user_id = ?2 AND i.source = 'intervals'
+                                     AND json_extract(i.raw, '$.external_id') = ?5)
+              OR EXISTS (SELECT 1 FROM external_activities rec
+                          WHERE rec.id = ?1 AND rec.user_id = ?2
+                            AND rec.start_date_utc_ms IS NOT NULL
+                            AND external_activities.start_date_utc_ms IS NOT NULL
+                            AND ABS(external_activities.start_date_utc_ms - rec.start_date_utc_ms) <= ?6))`,
+      )
+      .bind(id, userId, ts, JSON.stringify(healthWorkoutIds), intervalsCopy, ACTIVITY_DEDUP_TOLERANCE_MS),
+    db
+      .prepare(
+        `INSERT INTO external_activities
+           (id,user_id,source,external_id,date,start_date_local_ms,kind,name,raw,
+            synced_at,deleted_at,canonical,duplicate_of,start_date_utc_ms,source_timezone)
+         SELECT 'healthkit:activity:' || ?2 || ':' || named.value, ?2, 'healthkit', named.value,
+                rec.date, rec.start_date_local_ms, rec.kind, NULL, NULL,
+                ?3, ?3, 1, NULL, rec.start_date_utc_ms, rec.source_timezone
+           FROM json_each(?4) AS named
+           JOIN external_activities rec ON rec.id = ?1 AND rec.user_id = ?2 AND rec.source = 'recording'
+          WHERE NOT EXISTS (SELECT 1 FROM external_activities h
+                             WHERE h.user_id = ?2 AND h.source = 'healthkit'
+                               AND lower(h.external_id) = lower(named.value))
+         ON CONFLICT DO NOTHING`,
+      )
+      .bind(id, userId, ts, JSON.stringify(healthWorkoutIds)),
+    db
+      .prepare(
+        `UPDATE external_activities
+            SET ${tombstone}
+          WHERE user_id = ?2 AND source = 'intervals' AND deleted_at IS NULL
+            AND json_extract(raw, '$.external_id') = ?4`,
+      )
+      .bind(id, userId, ts, intervalsCopy),
+    // The recording's heart rate, and that of the Apple Health copies just
+    // tombstoned, and those copies' power.
+    forgetHeartRatesStatement(db, userId),
+    forgetPowerSeriesStatement(db, userId),
+  ]);
+  if ((updated!.meta.changes ?? 0) === 0) return null;
+  await dedupeHealthKitAgainstIntervals(db, userId);
+  return { health_removed: health!.meta.changes ?? 0 };
+}
+
+/** Existing cross-source matching tolerance, applied to the shared clock:
+ * source instants when both are known, otherwise legacy local wall time. */
+export const ACTIVITY_DEDUP_TOLERANCE_MS = 2 * 60 * 1000;
+
+/**
+ * Cross-source dedup: retire HealthKit activities that duplicate an
+ * intervals.icu activity for the same user. The same physical workout can
+ * arrive from BOTH sources (e.g. a Zwift ride synced into intervals AND mirrored
+ * into Apple Health); without this it would be shown and counted twice.
+ *
+ * Rule (deterministic, order-independent — so it's correct whichever source
+ * lands first): a non-deleted `healthkit` row is a duplicate of a non-deleted
+ * `intervals` row when they share the same `kind` and start within
+ * ACTIVITY_DEDUP_TOLERANCE_MS, comparing source instants when BOTH are known.
+ * Only a missing instant permits the legacy local-clock comparison; different
+ * known instants must not match merely because the wall clocks agree (DST).
+ * Absolute matches take priority over legacy matches, then selection is stable
+ * by (absolute delta, candidate start on the selected clock, id), ascending.
+ * Intervals wins this pair (richer data — power,
+ * native TSS), so the HealthKit copy is the one retired. A unique native
+ * strength match takes precedence and is excluded at both read and write time.
+ *
+ * "Retire" = soft-delete the loser (set deleted_at) + record provenance
+ * (canonical=0, duplicate_of=<intervals id>). Using deleted_at as the exclusion
+ * mechanism means every existing read path (getRecentActivities, projectCalendar,
+ * group feed/stats/series — all already filter deleted_at) and the /api/state
+ * tombstone delta Just Work with no new filters and no iOS change. synced_at is
+ * advanced so the change reaches incremental sync clients.
+ *
+ * BIDIRECTIONAL (Codex P2 follow-up): this is a full reconciliation by default,
+ * not a one-way retire. A caller that changed only a bounded date range may
+ * provide a HealthKit candidate range plus a wider intervals-winner range
+ * without scanning unrelated history. It also RESTORES a previously-retired
+ * HealthKit row when its intervals winner later disappears (the activity is
+ * removed upstream → the intervals sync soft-deletes the canonical row, then
+ * calls this). Without restoration, both copies stay hidden until the phone
+ * re-pushes the workout. A HealthKit row soft-deleted for any OTHER reason
+ * (duplicate_of IS NULL) is left untouched — we only manage rows WE retired.
+ *
+ * Idempotent: only state CHANGES emit a write (no synced_at churn in steady
+ * state). Deterministic + order-independent — called from BOTH write paths (the
+ * HealthKit push and the intervals sync) so it converges whichever source lands
+ * (or leaves) first. Surfacing the duplicate's provenance in the UI ("also from
+ * Apple Health") is a future enhancement (needs an iOS field).
+ */
+export async function dedupeHealthKitAgainstIntervals(
+  db: D1Database,
+  userId: string,
+  window?: ActivityDedupeWindow,
+  expectedIntervalsFence?: { generation: number; attempt: number },
+): Promise<number> {
+  // Uploaded .fit files (P4 of docs/plans/endurance-training-load) and runs
+  // recorded in the app (docs/plans/run-recorder P5) sit between the two:
+  // intervals.icu wins over their copy, and their copy wins over Apple
+  // Health's. Those passes run first so a row retired by intervals.icu is no
+  // longer a winner for the HealthKit pass.
+  // A workout Garmin pushed directly (docs/plans/garmin) yields to its
+  // intervals.icu copy while intervals.icu still sends one, and to a run
+  // recorded in the app; it wins over an uploaded .fit file and Apple Health.
+  const recording = await retireSourceDuplicates(db, userId, 'recording', ['intervals'], window, expectedIntervalsFence);
+  const garmin = await retireSourceDuplicates(
+    db, userId, 'garmin', ['intervals', 'recording'], window, expectedIntervalsFence);
+  const fit = await retireSourceDuplicates(db, userId, 'fit', ['intervals', 'garmin'], window, expectedIntervalsFence);
+  // WHOOP's own workouts (docs/plans/whoop) yield to a watch, file, recording
+  // or Tres Fort session they overlap, and win over Apple Health's copy,
+  // which is often one WHOOP wrote there itself.
+  const whoop = await retireWhoopDuplicates(db, userId);
+  const healthKit = await retireSourceDuplicates(
+    db, userId, 'healthkit', ['intervals', 'fit', 'recording', 'whoop', 'garmin'], window, expectedIntervalsFence);
+  // Last, the Apple Health rows still shown are matched with each other.
+  const copies = await retireHealthKitCopies(db, userId, window);
+  return recording + garmin + fit + whoop + healthKit + copies;
+}
+
+/** A `duplicate_of` naming another Apple Health row (retireHealthKitCopies). */
+function isHealthKitCopy(duplicateOf: string | null): boolean {
+  return duplicateOf !== null && duplicateOf.startsWith('healthkit:');
+}
+
+/**
+ * Apple Health can hold one workout several times, each copy with its own
+ * workout id: Garmin Connect, for one, has written the same run into Health
+ * many times over, and Strava adds its own copy of a run Garmin recorded.
+ * Every id is a row here, so without this pass each copy was listed and
+ * counted. Copies follow the cross-source rule: the same `kind`, starting
+ * within ACTIVITY_DEDUP_TOLERANCE_MS on the shared clock (source instants
+ * when both are known, otherwise local wall time).
+ *
+ * One copy stays shown: the one carrying the most data, then the lowest id,
+ * so the choice doesn't depend on push order. Power and heart-rate stream
+ * summaries count most, since they score the load and can't be moved to
+ * another copy; then a known start instant, heart rate, distance, calories,
+ * power and elevation. The others are
+ * retired the same reversible way as cross-source duplicates (deleted_at,
+ * canonical=0, duplicate_of=<the shown copy>), and come back when the shown
+ * copy goes. Rows another rule manages are left alone: those hidden behind
+ * an intervals.icu, .fit or recorded copy, those matched to a native
+ * session, and those the member deleted.
+ */
+export async function retireHealthKitCopies(
+  db: D1Database,
+  userId: string,
+  window?: ActivityDedupeWindow,
+): Promise<number> {
+  // A bounded caller changed only one date range: copies are read over its
+  // wider range, so a copy across a date line is still seen, and only rows
+  // in the changed range are written.
+  const dateClause = window ? ' AND date >= ?2 AND date <= ?3' : '';
+  const statement = db.prepare(
+    `SELECT id, kind, date, start_date_local_ms, start_date_utc_ms, deleted_at, duplicate_of,
+            10 * ((stream_np_w IS NOT NULL) + (stream_hr_rms IS NOT NULL))
+              + (start_date_utc_ms IS NOT NULL) + (average_hr IS NOT NULL)
+              + (distance_m IS NOT NULL AND distance_m > 0) + (calories IS NOT NULL)
+              + (average_watts IS NOT NULL) + (elevation_gain_m IS NOT NULL) AS richness
+       FROM external_activities
+      WHERE user_id = ?1 AND source = 'healthkit'
+        AND (start_date_local_ms IS NOT NULL OR start_date_utc_ms IS NOT NULL)
+        AND (deleted_at IS NULL OR duplicate_of LIKE 'healthkit:%')
+        AND ${nativeHealthKitWinnerSQL('external_activities')} IS NULL${dateClause}`,
+  );
+  const rows = (
+    await (window
+      ? statement.bind(userId, window.intervalsFromDate, window.intervalsToDate)
+      : statement.bind(userId))
+      .all<{
+        id: string;
+        kind: string;
+        date: string;
+        start_date_local_ms: number | null;
+        start_date_utc_ms: number | null;
+        deleted_at: number | null;
+        duplicate_of: string | null;
+        richness: number;
+      }>()
+  ).results;
+  if (rows.length === 0) return 0;
+
+  // Richest first, then by id: each row joins the nearest shown copy already
+  // chosen, or becomes one itself. Shown copies are kept sorted by start on
+  // each clock, so a lookup reads only those within the tolerance.
+  rows.sort((a, b) => b.richness - a.richness || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  type Shown = { id: string; start: number; hasInstant: boolean };
+  const byInstant = new Map<string, Shown[]>();
+  const byLocal = new Map<string, Shown[]>();
+  const firstAtOrAfter = (list: Shown[], start: number) => {
+    let low = 0;
+    let high = list.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (list[middle]!.start < start) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  };
+  const insert = (clock: Map<string, Shown[]>, kind: string, item: Shown) => {
+    const list = clock.get(kind) ?? [];
+    list.splice(firstAtOrAfter(list, item.start), 0, item);
+    clock.set(kind, list);
+  };
+  const nearest = (list: Shown[] | undefined, start: number | null, accept: (c: Shown) => boolean) => {
+    if (!list || start === null) return null;
+    let best: Shown | null = null;
+    let bestDelta = Infinity;
+    for (let i = firstAtOrAfter(list, start - ACTIVITY_DEDUP_TOLERANCE_MS); i < list.length; i += 1) {
+      const candidate = list[i]!;
+      if (candidate.start > start + ACTIVITY_DEDUP_TOLERANCE_MS) break;
+      const delta = Math.abs(candidate.start - start);
+      if (accept(candidate) && delta < bestDelta) {
+        best = candidate;
+        bestDelta = delta;
+      }
+    }
+    return best;
+  };
+  const winnerOf = new Map<string, string | null>();
+  for (const row of rows) {
+    // Source instants decide when both are known; only a missing instant
+    // falls back to local wall time, as in the cross-source rule.
+    const best = row.start_date_utc_ms !== null
+      ? nearest(byInstant.get(row.kind), row.start_date_utc_ms, () => true)
+        ?? nearest(byLocal.get(row.kind), row.start_date_local_ms, c => !c.hasInstant)
+      : nearest(byLocal.get(row.kind), row.start_date_local_ms, () => true);
+    winnerOf.set(row.id, best?.id ?? null);
+    if (best) continue;
+    const hasInstant = row.start_date_utc_ms !== null;
+    if (hasInstant) insert(byInstant, row.kind, { id: row.id, start: row.start_date_utc_ms!, hasInstant });
+    if (row.start_date_local_ms !== null) {
+      insert(byLocal, row.kind, { id: row.id, start: row.start_date_local_ms, hasInstant });
+    }
+  }
+
+  const ts = now();
+  // Copies shown again go first, so a copy hidden behind one of them in
+  // the same batch finds it shown.
+  const restores: D1PreparedStatement[] = [];
+  const retires: D1PreparedStatement[] = [];
+  const dateOf = new Map(rows.map(r => [r.id, r.date]));
+  const touched: string[] = [];
+  for (const row of rows) {
+    if (window && (row.date < window.healthKitFromDate || row.date > window.healthKitToDate)) continue;
+    const winner = winnerOf.get(row.id) ?? null;
+    if (winner !== null && row.duplicate_of !== winner) {
+      // Hide this copy behind the shown one, or point it at a new one. Both
+      // rows are checked again in the write.
+      retires.push(
+        db
+          .prepare(
+            `UPDATE external_activities
+                SET deleted_at = COALESCE(deleted_at, CASE WHEN ?3 > synced_at THEN ?3 ELSE synced_at + 1 END),
+                    synced_at = CASE WHEN ?3 > synced_at THEN ?3 ELSE synced_at + 1 END,
+                    canonical = 0,
+                    duplicate_of = ?4
+              WHERE id = ?1 AND user_id = ?2 AND source = 'healthkit'
+                AND (deleted_at IS NULL OR duplicate_of LIKE 'healthkit:%')
+                AND ${nativeHealthKitWinnerSQL('external_activities')} IS NULL
+                AND EXISTS (SELECT 1 FROM external_activities w
+                             WHERE w.id = ?4 AND w.user_id = ?2 AND w.source = 'healthkit'
+                               AND w.deleted_at IS NULL)`,
+          )
+          .bind(row.id, userId, ts, winner),
+      );
+      touched.push(row.date, dateOf.get(winner)!);
+    } else if (winner === null && row.deleted_at !== null) {
+      // The copy it was hidden behind is gone, so this one is shown again.
+      restores.push(
+        db
+          .prepare(
+            `UPDATE external_activities
+                SET deleted_at = NULL,
+                    synced_at = CASE WHEN ?3 > synced_at THEN ?3 ELSE synced_at + 1 END,
+                    canonical = 1,
+                    duplicate_of = NULL
+              WHERE id = ?1 AND user_id = ?2 AND source = 'healthkit'
+                AND deleted_at IS NOT NULL AND duplicate_of LIKE 'healthkit:%'`,
+          )
+          .bind(row.id, userId, ts),
+      );
+      touched.push(row.date);
+    }
+  }
+  const stmts = [...restores, ...retires];
+  if (stmts.length === 0) return 0;
+  const results = await db.batch(stmts);
+  const changed = results.reduce((total, result) => total + (result.meta.changes ?? 0), 0);
+  // An effort rating moves with the copy shown, and so does the load it
+  // gives: rescore the days whose shown copy changed, which a push alone
+  // would not reach for older history.
+  if (changed > 0) {
+    touched.sort();
+    await refreshActivityLoads(db, userId, { fromDate: touched[0], toDate: touched[touched.length - 1] });
+  }
+  return changed;
+}
+
+/** One pass of the rule above: live `loser` rows matching a live row of any
+ * `winners` source are retired; rows this pass retired are restored when
+ * their winner is gone. */
+async function retireSourceDuplicates(
+  db: D1Database,
+  userId: string,
+  loser: 'healthkit' | 'fit' | 'recording' | 'garmin',
+  winners: readonly ('intervals' | 'fit' | 'recording' | 'whoop' | 'garmin')[],
+  window?: ActivityDedupeWindow,
+  expectedIntervalsFence?: { generation: number; attempt: number },
+): Promise<number> {
+  const winnerSources = winners.map(w => `'${w}'`).join(', ');
+  const dateClause = window ? ' AND date >= ?2 AND date <= ?3' : '';
+  // HealthKit rows we manage: currently live (candidates to retire) OR
+  // previously retired BY US as a dup (deleted_at + duplicate_of set →
+  // candidates to RESTORE if their winner is gone).
+  const hkStatement = db.prepare(
+    `SELECT id, kind, start_date_local_ms, start_date_utc_ms, deleted_at, duplicate_of
+       FROM external_activities
+      WHERE user_id = ?1 AND source = '${loser}'
+        AND (start_date_local_ms IS NOT NULL OR start_date_utc_ms IS NOT NULL)
+        AND (deleted_at IS NULL OR duplicate_of IS NOT NULL)
+        AND ${nativeHealthKitWinnerSQL('external_activities')} IS NULL${dateClause}`,
+  );
+  const hk = (
+    await (window
+      ? hkStatement.bind(userId, window.healthKitFromDate, window.healthKitToDate)
+      : hkStatement.bind(userId))
+      .all<{
+        id: string;
+        kind: string;
+        start_date_local_ms: number | null;
+        start_date_utc_ms: number | null;
+        deleted_at: number | null;
+        duplicate_of: string | null;
+      }>()
+  ).results;
+  if (hk.length === 0) return 0;
+  // Live intervals winners (NOT early-returned on empty: with no live winner,
+  // any retired dup must be RESTORED).
+  const ivStatement = db.prepare(
+    `SELECT id, kind, start_date_local_ms, start_date_utc_ms FROM external_activities
+      WHERE user_id = ?1 AND source IN (${winnerSources}) AND deleted_at IS NULL
+        AND (start_date_local_ms IS NOT NULL OR start_date_utc_ms IS NOT NULL)${dateClause}`,
+  );
+  const iv = (
+    await (window
+      ? ivStatement.bind(userId, window.intervalsFromDate, window.intervalsToDate)
+      : ivStatement.bind(userId))
+      .all<{ id: string; kind: string; start_date_local_ms: number | null; start_date_utc_ms: number | null }>()
+  ).results;
+
+  // Index candidates by kind and time once. The old nested scan compared every
+  // HealthKit row with every intervals row (O(H*I)); the sorted buckets make
+  // each nearest-match lookup O(log I + candidates within the tolerance).
+  type Candidate = { id: string; start: number };
+  type ClockIndex = Map<string, Candidate[]>;
+  const absolute: ClockIndex = new Map();
+  const local: ClockIndex = new Map();
+  const legacyLocal: ClockIndex = new Map();
+  const index = (clock: ClockIndex, kind: string, id: string, start: number | null) => {
+    if (start === null) return;
+    const candidates = clock.get(kind) ?? [];
+    candidates.push({ id, start });
+    clock.set(kind, candidates);
+  };
+  for (const candidate of iv) {
+    index(absolute, candidate.kind, candidate.id, candidate.start_date_utc_ms);
+    index(local, candidate.kind, candidate.id, candidate.start_date_local_ms);
+    if (candidate.start_date_utc_ms === null) {
+      index(legacyLocal, candidate.kind, candidate.id, candidate.start_date_local_ms);
+    }
+  }
+  for (const clock of [absolute, local, legacyLocal]) {
+    for (const candidates of clock.values()) {
+      candidates.sort((a, b) => a.start - b.start || (a.id < b.id ? -1 : 1));
+    }
+  }
+  const nearest = (clock: ClockIndex, kind: string, start: number | null): Candidate | null => {
+    if (start === null) return null;
+    let best: Candidate | null = null;
+    let bestDelta = Infinity;
+    const candidates = clock.get(kind) ?? [];
+    const earliest = start - ACTIVITY_DEDUP_TOLERANCE_MS;
+    const latest = start + ACTIVITY_DEDUP_TOLERANCE_MS;
+    let low = 0;
+    let high = candidates.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (candidates[middle]!.start < earliest) low = middle + 1;
+      else high = middle;
+    }
+    for (let i = low; i < candidates.length; i += 1) {
+      const v = candidates[i]!;
+      if (v.start > latest) break;
+      const delta = Math.abs(v.start - start);
+      // Buckets are sorted by start then id, so equal deltas keep the first.
+      if (delta < bestDelta) {
+        bestDelta = delta;
+        best = v;
+      }
+    }
+    return best;
+  };
+
+  const ts = now();
+  const stmts: D1PreparedStatement[] = [];
+  for (const h of hk) {
+    const best = h.start_date_utc_ms === null
+      ? nearest(local, h.kind, h.start_date_local_ms)
+      : nearest(absolute, h.kind, h.start_date_utc_ms)
+        ?? nearest(legacyLocal, h.kind, h.start_date_local_ms);
+    const isRetiredDup = h.deleted_at != null && h.duplicate_of != null;
+    if (best && !isRetiredDup) {
+      // Live HealthKit row duplicating a live intervals activity → retire it.
+      const statement = db.prepare(
+            `UPDATE external_activities
+                SET deleted_at = CASE
+                      WHEN ?2 > synced_at THEN ?2 ELSE synced_at + 1
+                    END,
+                    synced_at = CASE
+                      WHEN ?2 > synced_at THEN ?2 ELSE synced_at + 1
+                    END,
+                    canonical = 0,
+                    duplicate_of = ?3
+              WHERE id = ?1 AND ${nativeHealthKitWinnerSQL('external_activities')} IS NULL${
+                expectedIntervalsFence === undefined
+                  ? ''
+                  : ` AND EXISTS (
+                          SELECT 1 FROM users
+                           WHERE id = ?4 AND intervals_credential_generation = ?5
+                             AND intervals_activities_sync_attempt = ?6
+                        )`
+              }`,
+      );
+      stmts.push(
+        expectedIntervalsFence === undefined
+          ? statement.bind(h.id, ts, best.id)
+          : statement.bind(
+              h.id,
+              ts,
+              best.id,
+              userId,
+              expectedIntervalsFence.generation,
+              expectedIntervalsFence.attempt,
+            ),
+      );
+    } else if (best && h.duplicate_of !== best.id) {
+      // The row is already retired, but the deterministic winner changed.
+      // Advance the tombstone watermark so downstream clients receive the
+      // corrected provenance instead of retaining a stale duplicate_of.
+      const statement = db.prepare(
+            `UPDATE external_activities
+                SET synced_at = CASE
+                      WHEN ?2 > synced_at THEN ?2 ELSE synced_at + 1
+                    END,
+                    duplicate_of = ?3
+              WHERE id = ?1 AND ${nativeHealthKitWinnerSQL('external_activities')} IS NULL${
+                expectedIntervalsFence === undefined
+                  ? ''
+                  : ` AND EXISTS (
+                          SELECT 1 FROM users
+                           WHERE id = ?4 AND intervals_credential_generation = ?5
+                             AND intervals_activities_sync_attempt = ?6
+                        )`
+              }`,
+      );
+      stmts.push(
+        expectedIntervalsFence === undefined
+          ? statement.bind(h.id, ts, best.id)
+          : statement.bind(
+              h.id,
+              ts,
+              best.id,
+              userId,
+              expectedIntervalsFence.generation,
+              expectedIntervalsFence.attempt,
+            ),
+      );
+    } else if (!best && isRetiredDup && !isHealthKitCopy(h.duplicate_of)) {
+      // We retired this as a dup but its intervals winner is gone → restore it
+      // as the surviving copy so the workout doesn't vanish. A row hidden
+      // behind another Apple Health copy is left to retireHealthKitCopies.
+      const statement = db.prepare(
+            `UPDATE external_activities
+                SET deleted_at = NULL,
+                    synced_at = CASE
+                      WHEN ?2 > synced_at THEN ?2 ELSE synced_at + 1
+                    END,
+                    canonical = 1,
+                    duplicate_of = NULL
+              WHERE id = ?1 AND ${nativeHealthKitWinnerSQL('external_activities')} IS NULL${
+                expectedIntervalsFence === undefined
+                  ? ''
+                  : ` AND EXISTS (
+                          SELECT 1 FROM users
+                           WHERE id = ?3 AND intervals_credential_generation = ?4
+                             AND intervals_activities_sync_attempt = ?5
+                        )`
+              }`,
+      );
+      stmts.push(
+        expectedIntervalsFence === undefined
+          ? statement.bind(h.id, ts)
+          : statement.bind(
+              h.id,
+              ts,
+              userId,
+              expectedIntervalsFence.generation,
+              expectedIntervalsFence.attempt,
+            ),
+      );
+    }
+    // else: already correct (live with no match, or retired with winner still
+    // present) → no-op, so steady-state syncs don't churn synced_at.
+  }
+  if (stmts.length === 0) return 0;
+  const results = await db.batch(stmts);
+  return results.reduce((total, result) => total + (result.meta.changes ?? 0), 0);
+}
+
+/**
+ * Data-layer convenience: collect lift dates from the projected calendar in
+ * a window and run detectConflicts against the live ride cache. Pure read.
+ */
+export async function getRideConflicts(
+  db: D1Database,
+  userId: string,
+  fromDate: string,
+  toDate: string,
+  today: string,
+): Promise<DayConflict[]> {
+  const planInputs = await readCalendarPlan(db, userId);
+  if (!planInputs) return [];
+  // Only real strength rows and planned-event load affect conflicts. Full
+  // calendar reads still load both endurance feeds for presentation.
+  const sessions = await readCalendarSessions(db, userId, fromDate, addDays(toDate, 1));
+  const events = await db
+    .prepare(
+      `SELECT id, date, training_load, planned_duration_sec
+         FROM external_events
+        WHERE user_id = ?1 AND deleted_at IS NULL
+          AND date >= ?2 AND date <= ?3`,
+    )
+    .bind(userId, fromDate, addDays(toDate, 1))
+    .all<Pick<ExternalEventRow, 'id' | 'date' | 'training_load' | 'planned_duration_sec'>>();
+  return projectRideConflicts(
+    { ...planInputs, sessions }, events.results, fromDate, toDate, today,
+  );
+}
+
+// ---- M4: group feed + stats ---------------------------------------------
+//
+// Group accountability surface. The feed merges three sources into a single
+// time-ordered stream of FeedItems (session | ride | activity); the stats
+// roll up per-member workout_count + streak_days over a rolling window.
+//
+// Privacy contract (do not break — this is the trust substrate that lets
+// the feature ship):
+//   * Strength sessions: SHARE date, completed_at, day_name, set_count,
+//     duration_sec, per-exercise top set (exercise name + load/reps or hold
+//     duration per compatible load/mode, plus Epley only for conventional
+//     positive-load rep work). HIDE
+//     session.notes, session.perceived_fatigue, every
+//     set's `notes`, every set's `rpe`.
+//   * Intervals.icu rides: SHARE all the ride metrics (these are not
+//     personal). Soft-deleted rows are excluded.
+//   * Activities (M3): SHARE type, title, duration_minutes, notes (the
+//     user-authored notes ARE the description of what they did — sharing
+//     them is the point). Soft-deleted rows are excluded.
+//
+// Wire shape matches `.context/m5-ios-spec.md` §5 verbatim: discriminated
+// on `type` with nested `session`/`ride`/`activity` inner objects, plus
+// `id, user_id, user_display_name, occurred_at, date` at the top level.
+// `is_me` is server-stamped so the iOS client does not have to compare
+// user ids manually.
+
+const FEED_LIMIT_MAX = 100;
+
+/** Per-feed-item shapes the wire emits. Matches iOS m5-ios-spec.md §5. */
+export interface FeedSessionItem {
+  type: 'session';
+  id: string;
+  user_id: string;
+  user_display_name: string;
+  is_me: boolean;
+  date: string;
+  occurred_at: number;
+  session: {
+    day_name: string | null;
+    day_label: string | null;
+    duration_sec: number | null;
+    set_count: number;
+    cohort_top_sets: FeedSessionItem['session']['top_sets'];
+    top_sets: Array<{
+      cohort_key: string;
+      exercise_id: string;
+      laterality: string;
+      load_mode: string;
+      exercise: string;
+      weight: number;
+      reps: number;
+      unit: string | null;
+      modality: string;
+      duration_s: number | null;
+      is_timed: boolean;
+      /** Kept numeric for installed iOS clients whose decoder predates the
+       * metric fields. Zero means unavailable; current clients hide it. */
+      est_1rm: number;
+    }>;
+  };
+}
+export interface FeedRideItem {
+  type: 'ride';
+  id: string;
+  user_id: string;
+  user_display_name: string;
+  is_me: boolean;
+  date: string;
+  occurred_at: number;
+  ride: {
+    source_attribution?: string;
+    kind: string;
+    /** What it was (soccer, swim, …; src/sports.ts); null before migration 0064 ran. */
+    sport: string | null;
+    name: string | null;
+    distance_m: number | null;
+    moving_time_sec: number | null;
+    average_watts: number | null;
+    training_load: number | null;
+    elevation_gain_m: number | null;
+  };
+}
+export interface FeedActivityItem {
+  type: 'activity';
+  id: string;
+  user_id: string;
+  user_display_name: string;
+  is_me: boolean;
+  date: string;
+  occurred_at: number;
+  activity: {
+    kind: string;
+    title: string | null;
+    duration_min: number | null;
+    notes: string | null;
+  };
+}
+export type FeedItem = FeedSessionItem | FeedRideItem | FeedActivityItem;
+
+/**
+ * Two-character avatar initials from a display name. "Sarah Kim" -> "SK",
+ * "nick" -> "N", "" -> "?". Pure, locale-stable (uppercased once at the
+ * end). Per-member initials live on MemberStat so the iOS chip strip
+ * doesn't have to recompute.
+ */
+function avatarInitials(name: string | null | undefined): string {
+  const s = (name ?? '').trim();
+  if (s.length === 0) return '?';
+  // Split on whitespace, take first letter of first two non-empty words.
+  const words = s.split(/\s+/).filter((w) => w.length > 0);
+  if (words.length === 0) return '?';
+  if (words.length === 1) return words[0]!.charAt(0).toUpperCase();
+  return (words[0]!.charAt(0) + words[1]!.charAt(0)).toUpperCase();
+}
+
+/**
+ * Resolve effective display name for a member. Order:
+ *   1. per-group nickname (group_members.display_name)
+ *   2. user's global display name (users.display_name)
+ *   3. email prefix (everything before '@')
+ *   4. literal "Member"
+ * Pure function; the caller pre-joins the three input columns.
+ */
+function resolveDisplayName(
+  perGroup: string | null,
+  global: string | null,
+  email: string | null,
+): string {
+  if (perGroup && perGroup.length > 0) return perGroup;
+  if (global && global.length > 0) return global;
+  if (email && email.length > 0) {
+    const at = email.indexOf('@');
+    const pre = at > 0 ? email.slice(0, at) : email;
+    if (pre.length > 0) return pre;
+  }
+  return 'Member';
+}
+
+export interface MemberStat {
+  source_attribution?: string;
+  streak_source_attribution?: string;
+  user_id: string;
+  display_name: string;
+  avatar_initials: string;
+  is_me: boolean;
+  workout_count: number;
+  streak_days: number;
+  last_active: number | null;
+}
+
+/**
+ * Group feed. Returns up to `limit` FeedItems strictly OLDER than the
+ * cursor (when both `sinceMs` and `sinceId` are null → no upper bound,
+ * get the most recent N). Items are ordered by `(occurred_at, id)` DESC.
+ *
+ * The cursor is COMPOSITE on `(occurred_at, id)` so ties at the page
+ * boundary don't drop items: when N rows share an occurred_at timestamp
+ * (bulk sync / two activities logged in the same millisecond), a plain
+ * "occurred_at < since" cursor would skip every remaining tied row. The
+ * filter is "occurred_at < ?upper OR (occurred_at = ?upper AND id < ?upperId)".
+ *
+ * NOTE: callers MUST enforce group membership BEFORE calling this — the
+ * function itself trusts the caller has done the auth check. Same pattern
+ * as createInvite / setGroupDisplayName.
+ */
+export async function getGroupFeed(
+  db: D1Database,
+  groupId: string,
+  sinceMs: number | null,
+  sinceId: string | null,
+  limit: number,
+  callerUserId: string,
+): Promise<FeedItem[]> {
+  const cap = Math.max(1, Math.min(limit, FEED_LIMIT_MAX));
+  // Composite upper-bound cursor. `upper` is the timestamp; `upperId` is
+  // the tiebreaker for items with that exact timestamp. When sinceMs is
+  // null we treat the timestamp as infinity (no upper bound) and the
+  // tiebreaker is irrelevant.
+  //
+  // When the caller passes since but NO since_id (a legacy/first-page
+  // request), we deliberately collapse to STRICT `occurred_at < upper`
+  // semantics — the tiebreaker would otherwise return rows the previous
+  // page already returned (their occurred_at = upper). We do this by
+  // setting upperId to the empty string: SQLite's lexicographic `id < ''`
+  // is always false for non-empty UUIDs, so the tiebreaker OR branch is
+  // dead. Composite cursor only activates when the caller passes BOTH.
+  const upper = sinceMs ?? Number.MAX_SAFE_INTEGER;
+  const upperId = sinceId ?? '';
+
+  // 1. Resolve group members + their effective display names + email
+  //    fallback. Join into a single row per user_id for the join later.
+  const memberRows = { results: await visibleGroupMembers(db, groupId, callerUserId) };
+  if (memberRows.results.length === 0) return [];
+
+  const memberMeta = new Map<string, { displayName: string }>();
+  const memberIds: string[] = [];
+  for (const m of memberRows.results) {
+    memberMeta.set(m.user_id, {
+      displayName: sharedText(resolveDisplayName(m.per_group_name, m.global_name, m.email), 'Member')!,
+    });
+    memberIds.push(m.user_id);
+  }
+
+  const placeholders = memberIds.map((_, i) => `?${i + 1}`).join(',');
+
+  // Over-pull each source by `cap` so the post-merge slice still has
+  // enough items in the worst case (one source dominates the window).
+  // The merge-then-slice keeps the SQL simple at the cost of fetching up
+  // to 3*cap rows. Friends/family scale: <10 members, ~30 limit → trivial.
+  const sourceLimit = cap;
+
+  // 2a. Strength sessions. We surface "item timestamp" = completed_at if
+  //     the session is completed, else created_at — sessions still
+  //     in_progress show as "currently doing X" rows so groupmates see
+  //     today's lift as it's happening. Discarded sessions are excluded.
+  const sessionRows = await db
+    .prepare(
+      `SELECT s.id,
+              s.user_id,
+              s.date,
+              s.status,
+              s.completed_at,
+              s.created_at,
+              s.workout_id,
+              dt.name AS day_name,
+              dt.day_label AS day_label,
+              s.started_at,
+              COALESCE(s.completed_at, s.created_at) AS occurred_at
+         FROM sessions s
+         LEFT JOIN workouts dt ON dt.id = s.workout_id
+        WHERE s.user_id IN (${placeholders})
+          -- Codex PR#36 P2: opening Today calls getOrCreateSession which
+          -- creates status='planned' rows BEFORE any set is logged. Those
+          -- aren't activity, they're intent — keep them out of the feed
+          -- so a groupmate who just glanced at Today doesn't show up as
+          -- a 0-set "session" item. Only started/completed sessions are
+          -- real activity worth surfacing.
+          AND s.status IN ('in_progress', 'completed')
+          AND (
+            COALESCE(s.completed_at, s.created_at) < ?${memberIds.length + 1}
+            OR (
+              COALESCE(s.completed_at, s.created_at) = ?${memberIds.length + 1}
+              AND s.id < ?${memberIds.length + 2}
+            )
+          )
+        ORDER BY occurred_at DESC, s.id DESC
+        LIMIT ?${memberIds.length + 3}`,
+    )
+    .bind(...memberIds, upper, upperId, sourceLimit)
+    .all<{
+      id: string;
+      user_id: string;
+      date: string;
+      status: string;
+      completed_at: number | null;
+      created_at: number;
+      workout_id: string | null;
+      day_name: string | null;
+      day_label: string | null;
+      started_at: number | null;
+      occurred_at: number;
+    }>();
+
+  // 2b. Top sets — single query keyed by session_id IN (...). Aggregating
+  //     in JS keeps the SQL portable; D1 (SQLite) doesn't have window
+  //     functions on every version path. Warmups excluded; soft-deleted
+  //     sets excluded. We pre-join exercises so we get the display name.
+  const sessionIds = sessionRows.results.map((s) => s.id);
+  const topSetsBySession = new Map<string, FeedSessionItem['session']['top_sets']>();
+  const setCountBySession = new Map<string, number>();
+  if (sessionIds.length > 0) {
+    const setPlaceholders = sessionIds.map((_, i) => `?${i + 1}`).join(',');
+    const sets = await db
+      .prepare(
+        `SELECT sl.session_id,
+                sl.exercise_id,
+                sl.weight,
+                sl.weight_unit,
+                sl.reps,
+                sl.duration_s,
+                sl.is_timed,
+                e.name AS exercise_name,
+                e.unit AS exercise_unit,
+                e.modality AS exercise_modality,
+                e.laterality, e.load_mode
+           FROM set_logs sl
+           JOIN exercises e ON e.id = sl.exercise_id
+          WHERE sl.session_id IN (${setPlaceholders})
+            AND sl.deleted_at IS NULL
+            AND sl.is_warmup = 0`,
+      )
+      .bind(...sessionIds)
+      .all<{
+        session_id: string;
+        exercise_id: string;
+        weight: number;
+        weight_unit: 'lb' | 'kg';
+        reps: number;
+        duration_s: number | null;
+        is_timed: number;
+        exercise_name: string;
+        exercise_unit: string;
+        exercise_modality: string;
+        laterality: string;
+        load_mode: string;
+      }>();
+    const acc = new Map<string, Map<string, typeof sets.results>>();
+    for (const row of sets.results) {
+      setCountBySession.set(row.session_id, (setCountBySession.get(row.session_id) ?? 0) + 1);
+      const perSession = acc.get(row.session_id) ?? new Map();
+      const candidates = perSession.get(row.exercise_id) ?? [];
+      candidates.push(row);
+      perSession.set(row.exercise_id, candidates);
+      acc.set(row.session_id, perSession);
+    }
+    for (const [sid, perExercise] of acc) {
+      const list = [...perExercise.values()].flatMap((rows) => {
+        const exercise = rows[0]!;
+        return metricCohorts(rows, {
+          modality: exercise.exercise_modality, unit: exercise.exercise_unit,
+          laterality: exercise.laterality, load_mode: exercise.load_mode,
+        }).map((cohort) => ({
+          cohort_key: cohort.key,
+          exercise_id: exercise.exercise_id,
+          exercise: exercise.exercise_name,
+          // The cohort's own logged unit (24 kg stays kg), never the catalog's.
+          unit: cohort.unit,
+          modality: exercise.exercise_modality,
+          laterality: exercise.laterality,
+          load_mode: exercise.load_mode,
+          weight: cohort.top.weight,
+          reps: cohort.top.reps,
+          duration_s: cohort.top.duration_s,
+          is_timed: cohort.is_timed,
+          // Installed clients require a number: zero is the unavailable sentinel.
+          est_1rm: cohort.est_1rm ?? 0,
+        }));
+      });
+      list.sort((a, b) => a.exercise.localeCompare(b.exercise)
+        || Number(a.is_timed) - Number(b.is_timed) || a.weight - b.weight);
+      topSetsBySession.set(sid, list);
+    }
+  }
+
+  // Older clients key top_sets by exercise name. Keep one conventional
+  // estimate, or a single comparable condition; omit incompatible BW/holds
+  // rather than imply an overall winner. New clients use cohort_top_sets.
+  const legacyTopSets = (sets: FeedSessionItem['session']['top_sets']) => {
+    const byExercise = new Map<string, typeof sets>();
+    for (const set of sets) {
+      const rows = byExercise.get(set.exercise_id) ?? [];
+      rows.push(set);
+      byExercise.set(set.exercise_id, rows);
+    }
+    return [...byExercise.values()].flatMap((rows) => {
+      if (rows.length === 1) return rows;
+      const estimated = rows.filter((row) => row.est_1rm > 0);
+      // Estimates are in each row's unit; compare kg and lb by physical load.
+      const pounds = (row: typeof rows[number]) => row.unit === 'kg' ? row.est_1rm / 0.45359237 : row.est_1rm;
+      return estimated.length ? [estimated.reduce((best, row) =>
+        pounds(row) > pounds(best) ? row : best)] : [];
+    });
+  };
+  const sessionItems: FeedSessionItem[] = sessionRows.results.map((s) => ({
+    type: 'session',
+    id: s.id,
+    user_id: s.user_id,
+    user_display_name: memberMeta.get(s.user_id)?.displayName ?? 'Member',
+    is_me: s.user_id === callerUserId,
+    date: s.date,
+    occurred_at: s.occurred_at,
+    session: {
+      day_name: sharedText(s.day_name),
+      day_label: sharedText(s.day_label),
+      // duration_sec is only meaningful once the session is completed;
+      // a still-in-progress session emits null (matches calendar.ts).
+      duration_sec:
+        s.started_at != null && s.completed_at != null
+          ? Math.max(0, Math.round((s.completed_at - s.started_at) / 1000))
+          : null,
+      set_count: setCountBySession.get(s.id) ?? 0,
+      top_sets: legacyTopSets(topSetsBySession.get(s.id) ?? []),
+      cohort_top_sets: topSetsBySession.get(s.id) ?? [],
+    },
+  }));
+
+  // 2c. Rides (external_activities). Order by `start_date_local_ms`
+  //     (migration 0019) — the actual workout start time. `synced_at`
+  //     used to be the proxy but it rewrites on every cron tick, which
+  //     bubbled every recent ride to the top of the feed after each
+  //     sync and broke pagination. COALESCE handles any legacy row that
+  //     somehow escaped the migration backfill (defensive — should not
+  //     happen on a freshly-migrated DB).
+  const rideRows = await db
+    .prepare(
+      `SELECT id, user_id, source, raw, date, kind, sport, name, moving_time_sec, distance_m,
+              average_watts, training_load, elevation_gain_m,
+              COALESCE(start_date_local_ms, synced_at) AS occurred_at
+         FROM external_activities
+        WHERE user_id IN (${placeholders})
+          AND deleted_at IS NULL
+          -- Codex P1 / migration 0028: a member's HealthKit activities are
+          -- private until they opt into group sharing. intervals rows are
+          -- unaffected (its terms permit cross-user display).
+          AND source NOT IN ('whoop', 'garmin') -- never shown to others (docs/plans/whoop, docs/plans/garmin).
+          AND (source <> 'healthkit'
+               OR (SELECT share_health_activities FROM users
+                     WHERE id = external_activities.user_id) = 1)
+          AND (
+            COALESCE(start_date_local_ms, synced_at) < ?${memberIds.length + 1}
+            OR (
+              COALESCE(start_date_local_ms, synced_at) = ?${memberIds.length + 1}
+              AND id < ?${memberIds.length + 2}
+            )
+          )
+        ORDER BY COALESCE(start_date_local_ms, synced_at) DESC, id DESC
+        LIMIT ?${memberIds.length + 3}`,
+    )
+    .bind(...memberIds, upper, upperId, sourceLimit)
+    .all<{
+      source: string;
+      raw: string | null;
+      id: string;
+      user_id: string;
+      date: string;
+      kind: string;
+      sport: string | null;
+      name: string | null;
+      moving_time_sec: number | null;
+      distance_m: number | null;
+      average_watts: number | null;
+      training_load: number | null;
+      elevation_gain_m: number | null;
+      occurred_at: number;
+    }>();
+
+  const rideItems: FeedRideItem[] = rideRows.results.map((r) => ({
+    type: 'ride',
+    id: r.id,
+    user_id: r.user_id,
+    user_display_name: memberMeta.get(r.user_id)?.displayName ?? 'Member',
+    is_me: r.user_id === callerUserId,
+    date: r.date,
+    occurred_at: r.occurred_at,
+    ride: {
+      ...(activitySourceAttribution(r) ? { source_attribution: sharedText(activitySourceAttribution(r), 'Garmin')! } : {}),
+      kind: sharedText(r.kind)!,
+      sport: r.sport,
+      name: sharedText(r.name),
+      distance_m: r.distance_m,
+      moving_time_sec: r.moving_time_sec,
+      average_watts: r.average_watts,
+      training_load: r.training_load,
+      elevation_gain_m: r.elevation_gain_m,
+    },
+  }));
+
+  // 2d. Activities (M3 generic log). Soft-deleted rows excluded. The wire
+  //     `notes` field IS shared — per the privacy contract above, the
+  //     user-authored notes on an activity are the description of what
+  //     they did.
+  const actRows = await db
+    .prepare(
+      `SELECT id, user_id, date, type, title, duration_minutes, notes, logged_at
+         FROM activities
+        WHERE user_id IN (${placeholders})
+          AND deleted_at IS NULL
+          AND (
+            logged_at < ?${memberIds.length + 1}
+            OR (logged_at = ?${memberIds.length + 1} AND id < ?${memberIds.length + 2})
+          )
+        ORDER BY logged_at DESC, id DESC
+        LIMIT ?${memberIds.length + 3}`,
+    )
+    .bind(...memberIds, upper, upperId, sourceLimit)
+    .all<{
+      id: string;
+      user_id: string;
+      date: string;
+      type: string;
+      title: string | null;
+      duration_minutes: number | null;
+      notes: string | null;
+      logged_at: number;
+    }>();
+
+  const activityItems: FeedActivityItem[] = actRows.results.map((a) => ({
+    type: 'activity',
+    id: a.id,
+    user_id: a.user_id,
+    user_display_name: memberMeta.get(a.user_id)?.displayName ?? 'Member',
+    is_me: a.user_id === callerUserId,
+    date: a.date,
+    occurred_at: a.logged_at,
+    activity: {
+      kind: sharedText(a.type)!,
+      title: sharedText(a.title),
+      duration_min: a.duration_minutes,
+      notes: sharedText(a.notes),
+    },
+  }));
+
+  // 3. Merge + sort + cap. Stable secondary key (id) for determinism when
+  //    two items share an occurred_at (rare but possible — a cron-synced
+  //    ride and a logged set in the same ms).
+  const merged: FeedItem[] = [...sessionItems, ...rideItems, ...activityItems];
+  merged.sort((a, b) => {
+    if (b.occurred_at !== a.occurred_at) return b.occurred_at - a.occurred_at;
+    return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+  });
+  return merged.slice(0, cap);
+}
+
+/**
+ * Per-member stats over a rolling N-day window (typically 7/14/30). The
+ * window is anchored to "today" in each MEMBER's own timezone so a
+ * groupmate in Sydney isn't penalized by your civil clock.
+ *
+ * `workout_count` = number of DISTINCT dates in the window with at least
+ * one activity (strength session that isn't discarded, intervals ride,
+ * or generic activity). Three Pilates classes in one day count as one.
+ *
+ * `streak_days` = consecutive member-local civil days ending at "today"
+ * with at least one activity. Simplification rule for v1: if today has
+ * activity, count back from today; else count back from yesterday (so a
+ * member who hasn't logged today yet still sees their existing streak).
+ *
+ * NOTE: callers MUST enforce group membership BEFORE calling this — same
+ * authorization pattern as getGroupFeed / createInvite.
+ */
+export async function getGroupStats(
+  db: D1Database,
+  groupId: string,
+  rangeDays: number,
+  callerUserId: string,
+): Promise<MemberStat[]> {
+  const range = Math.max(1, Math.min(rangeDays, 365));
+
+  // 1. Resolve members + names + timezones + emails in one round trip.
+  const memberRows = { results: await visibleGroupMembers(db, groupId, callerUserId) };
+  if (memberRows.results.length === 0) return [];
+
+  const out: MemberStat[] = [];
+  for (const m of memberRows.results) {
+    const displayName = sharedText(resolveDisplayName(m.per_group_name, m.global_name, m.email), 'Member')!;
+    const today = todayInTz(m.timezone);
+    // The window: [windowStart, today] inclusive, in this member's civil
+    // calendar. We collect ALL activity dates within (and one day before,
+    // so the streak walker has continuity at the boundary), then compute
+    // count + streak in JS.
+    const windowStart = addDays(today, -(range - 1));
+    // Streak walker may need to look further back than the workout-count
+    // window when the streak is longer than `range`. We cap streak look-
+    // back at 365d (one year) — generous enough for a friends-and-family
+    // streak, bounded so the query stays small.
+    const streakStart = addDays(today, -365);
+
+    // Pull dates from all three sources for this member in one go. Each
+    // SELECT projects (date) only — we don't need the row payloads here,
+    // just the civil-date column. epoch_ms-keyed rows (set_logs.logged_at,
+    // external_activities.synced_at) use the SESSION.date / activity.date
+    // strings to keep the bucketing tz-correct.
+    const sessionsRows = await db
+      .prepare(
+        // Same planned-session leak fix as the feed query: a session row
+        // with status='planned' (auto-created by GET /api/today) is intent,
+        // not activity. workout_count and streak_days must only count
+        // sessions that were actually started or completed.
+        `SELECT DISTINCT date FROM sessions
+          WHERE user_id = ?1
+            AND status IN ('in_progress', 'completed')
+            AND date >= ?2 AND date <= ?3`,
+      )
+      .bind(m.user_id, streakStart, today)
+      .all<{ date: string }>();
+    const ridesRows = await db
+      .prepare(
+        // HealthKit rows are gated behind the per-user opt-in (0028) so an
+        // un-shared member's private health activity never inflates the
+        // group streak/count surfaced to others.
+        `SELECT date, MAX(CASE WHEN ${GARMIN_ACTIVITY_SQL} THEN 1 ELSE 0 END) AS garmin FROM external_activities
+          WHERE user_id = ?1
+            AND deleted_at IS NULL
+            AND source NOT IN ('whoop', 'garmin') -- never shown to others (docs/plans/whoop, docs/plans/garmin).
+          AND (source <> 'healthkit'
+                 OR (SELECT share_health_activities FROM users
+                       WHERE id = external_activities.user_id) = 1)
+            AND date >= ?2 AND date <= ?3 GROUP BY date`,
+      )
+      .bind(m.user_id, streakStart, today)
+      .all<{ date: string; garmin: number }>();
+    const actRows = await db
+      .prepare(
+        `SELECT DISTINCT date FROM activities
+          WHERE user_id = ?1
+            AND deleted_at IS NULL
+            AND date >= ?2 AND date <= ?3`,
+      )
+      .bind(m.user_id, streakStart, today)
+      .all<{ date: string }>();
+    const activeDates = new Set<string>();
+    for (const r of sessionsRows.results) activeDates.add(r.date);
+    for (const r of ridesRows.results) activeDates.add(r.date);
+    for (const r of actRows.results) activeDates.add(r.date);
+
+    // workout_count = distinct active dates within the rolling window.
+    let workoutCount = 0;
+    for (const d of activeDates) {
+      if (d >= windowStart && d <= today) workoutCount++;
+    }
+
+    // streak_days = consecutive days back from "today" (or yesterday if
+    // today is empty). Walk one civil day at a time using addDays so the
+    // boundary math is identical to the rest of the project.
+    let streak = 0;
+    let cursor: string;
+    if (activeDates.has(today)) {
+      cursor = today;
+    } else {
+      cursor = addDays(today, -1);
+      // If yesterday is ALSO empty, streak is 0 — both today and the
+      // most recent prior day broke the chain.
+      if (!activeDates.has(cursor)) cursor = '';
+    }
+    while (cursor && activeDates.has(cursor)) {
+      streak++;
+      cursor = addDays(cursor, -1);
+    }
+
+    // last_active = the most recent active date as an epoch-ms timestamp
+    // (midnight UTC of that civil date — iOS just needs *something* to
+    // render "active 3d ago"; precise wall-clock isn't surfaced).
+    let lastActiveMs: number | null = null;
+    if (activeDates.size > 0) {
+      const sorted = [...activeDates].sort();
+      const latest = sorted[sorted.length - 1]!;
+      lastActiveMs = Date.parse(`${latest}T00:00:00Z`);
+    }
+
+    const garminContributed = ridesRows.results.some(r => r.garmin === 1 && (
+      r.date >= windowStart || (streak > 0 && r.date > cursor) ||
+      Date.parse(`${r.date}T00:00:00Z`) === lastActiveMs));
+    out.push({
+      ...(garminContributed ? { source_attribution: GARMIN_SUMMARY_ATTRIBUTION } : {}),
+      ...(streak > 0 && ridesRows.results.some(r => r.garmin === 1 && r.date > cursor)
+        ? { streak_source_attribution: GARMIN_SUMMARY_ATTRIBUTION } : {}),
+      user_id: m.user_id,
+      display_name: displayName,
+      avatar_initials: avatarInitials(displayName),
+      is_me: m.user_id === callerUserId,
+      workout_count: workoutCount,
+      streak_days: streak,
+      last_active: lastActiveMs,
+    });
+  }
+  return out;
+}
+
+/**
+ * Per-member DAILY activity series over a trailing civil-day window —
+ * the data behind the iOS Group-tab week/month/year zoom. Where
+ * getGroupStats rolls every source up to a single count+streak, this
+ * returns the raw per-day breakdown so the client can re-bucket it into
+ * day cells (week/month) or week cells (year) WITHOUT a refetch per zoom.
+ *
+ * Counts are kept by SOURCE, not by display category: `sessions`
+ * (started/completed strength → "lift"), `rides` (external_activities,
+ * the intervals.icu endurance actuals → "endurance"), and `activities`
+ * (manual log, keyed by its freeform `type`). The client owns the
+ * type→category mapping (WorkoutCategory) so the rule lives in exactly
+ * one place — this endpoint stays a dumb aggregator.
+ *
+ * Window is per-member-tz-anchored (same as getGroupStats) and the rows
+ * are SPARSE: only dates with at least one item are returned. A
+ * 4-lifts-a-week athlete over a year is ~200 tiny rows — trivial wire.
+ *
+ * NOTE: callers MUST enforce group membership BEFORE calling this — same
+ * authorization pattern as getGroupFeed / getGroupStats.
+ */
+export interface DayActivityCount {
+  source_attribution?: string;
+  date: string; // YYYY-MM-DD civil (device-local; no UTC math)
+  sessions: number; // started/completed strength sessions that day
+  rides: number; // intervals.icu endurance activities that day
+  activities: Record<string, number>; // manual-log counts keyed by type
+}
+
+export interface MemberActivitySeries {
+  user_id: string;
+  days: DayActivityCount[];
+}
+
+export async function getGroupActivitySeries(
+  db: D1Database,
+  groupId: string,
+  windowDays: number,
+  callerUserId: string,
+): Promise<MemberActivitySeries[]> {
+  // Cap at 372 (53 weeks) — enough for the year view's week buckets,
+  // bounded so the per-member GROUP BY stays cheap. The caller determines
+  // which members are visible; is_me is resolved from /stats.
+  const days = Math.max(1, Math.min(Math.floor(windowDays), 372));
+
+  const memberRows = { results: await visibleGroupMembers(db, groupId, callerUserId) };
+  if (memberRows.results.length === 0) return [];
+
+  const out: MemberActivitySeries[] = [];
+  for (const m of memberRows.results) {
+    const today = todayInTz(m.timezone);
+    const start = addDays(today, -(days - 1));
+
+    const byDate = new Map<string, DayActivityCount>();
+    const ensure = (date: string): DayActivityCount => {
+      let d = byDate.get(date);
+      if (!d) {
+        d = { date, sessions: 0, rides: 0, activities: {} };
+        byDate.set(date, d);
+      }
+      return d;
+    };
+
+    // Same source filters as getGroupStats: planned (intent) sessions are
+    // excluded; rides/activities honor soft-delete. COUNT(*) per date is
+    // the cell intensity (two sessions on a day → 2), unlike stats which
+    // collapses to DISTINCT dates.
+    const sessRows = await db
+      .prepare(
+        `SELECT date, COUNT(*) AS n FROM sessions
+          WHERE user_id = ?1
+            AND status IN ('in_progress', 'completed')
+            AND date >= ?2 AND date <= ?3
+          GROUP BY date`,
+      )
+      .bind(m.user_id, start, today)
+      .all<{ date: string; n: number }>();
+    for (const r of sessRows.results) ensure(r.date).sessions = r.n;
+
+    const rideRows = await db
+      .prepare(
+        // HealthKit rows gated behind the opt-in (0028), same as the feed/stats.
+        `SELECT date, COUNT(*) AS n, MAX(CASE WHEN ${GARMIN_ACTIVITY_SQL} THEN 1 ELSE 0 END) AS garmin FROM external_activities
+          WHERE user_id = ?1
+            AND deleted_at IS NULL
+            AND source NOT IN ('whoop', 'garmin') -- never shown to others (docs/plans/whoop, docs/plans/garmin).
+          AND (source <> 'healthkit'
+                 OR (SELECT share_health_activities FROM users
+                       WHERE id = external_activities.user_id) = 1)
+            AND date >= ?2 AND date <= ?3
+          GROUP BY date`,
+      )
+      .bind(m.user_id, start, today)
+      .all<{ date: string; n: number; garmin: number }>();
+    for (const r of rideRows.results) {
+      ensure(r.date).rides = r.n;
+      if (r.garmin === 1) ensure(r.date).source_attribution = GARMIN_SUMMARY_ATTRIBUTION;
+    }
+
+    const actRows = await db
+      .prepare(
+        `SELECT date, type, COUNT(*) AS n FROM activities
+          WHERE user_id = ?1
+            AND deleted_at IS NULL
+            AND date >= ?2 AND date <= ?3
+          GROUP BY date, type`,
+      )
+      .bind(m.user_id, start, today)
+      .all<{ date: string; type: string; n: number }>();
+    for (const r of actRows.results) {
+      const counts = ensure(r.date).activities;
+      const kind = sharedText(r.type, 'other')!;
+      counts[kind] = (counts[kind] ?? 0) + r.n;
+    }
+
+    const daysArr = [...byDate.values()].sort((x, y) =>
+      x.date < y.date ? -1 : x.date > y.date ? 1 : 0,
+    );
+    out.push({ user_id: m.user_id, days: daysArr });
+  }
+  return out;
+}
+
+// OAuth grants share the existing owner resolver without importing the facade.
+export { type OAuthCodeRedemption, type OAuthRefreshRotation, type OAuthTokenPair, OAUTH_GRANT_INACTIVITY_MS, OAUTH_GRANT_ABSOLUTE_MS, type OAuthGrantSummary } from './services/oauthGrants';
+export const {
+  activateOAuthGrantLifecyclePolicy,
+  redeemOAuthAuthorizationCode,
+  rotateOAuthRefreshToken,
+  refreshOAuthGrant,
+  revokeOAuthGrantOnRefreshReplay,
+  listOAuthGrants,
+  revokeOAuthGrant,
+  revokeAllOAuthGrants
+} = createOAuthGrantService(findOwnerRow);
+
+// ---- prescribed exercise groups ------------------------------------------
+
+export interface ExerciseGroupAcknowledgement {
+  ok: true;
+  plan_id: string;
+  version: number;
+  group_id: string;
+  day_id: string | null;
+  members: string[];
+  round_rest: number | null;
+  transition_rest: number | null;
+  target_sets: number | null;
+  cleared: boolean;
+  unchanged?: true;
+  replayed?: true;
+}
+export type ExerciseGroupResult = ExerciseGroupAcknowledgement | PlanVersionConflict
+  | PrescriptionValidationError | GroupConflict | GroupSetsMismatch | { error: 'no_active_plan' | 'day_not_found' };
+export interface SetExerciseGroupOptions {
+  expected_version: number;
+  round_rest: number;
+  transition_rest?: number;
+  target_sets?: number;
+  /** Destination for the complete member block in the resulting day. */
+  order_index?: number;
+}
+
+/** Preserve JSON value semantics while ignoring object-property insertion order.
+ * Arrays remain ordered because member order is part of group authoring. */
+function canonicalExerciseGroupArgs(value: unknown): string {
+  const normalized = (item: unknown): unknown => {
+    if (Array.isArray(item)) return item.map(normalized);
+    if (isPlainRecord(item)) return Object.fromEntries(
+      Object.keys(item).sort().map((key) => [key, normalized(item[key])]),
+    );
+    return item;
+  };
+  return JSON.stringify(normalized(value));
+}
+
+/** A name-based MCP retry must recognize the original accepted request before
+ * resolving names against a renamed, rebuilt or removed day. Original args and
+ * the canonical acknowledgement already share the writer's atomic audit row.
+ * The MCP wrapper validates allowed fields and their types before this lookup. */
+export async function findMcpExerciseGroupAcknowledgement(
+  db: D1Database,
+  userId: string,
+  operation: 'group_exercises' | 'ungroup_exercises',
+  args: Record<string, unknown>,
+): Promise<ExerciseGroupAcknowledgement | null> {
+  if (!isGroupId(args.group_id) || !Number.isSafeInteger(args.expected_version)
+      || (args.expected_version as number) < 1) return null;
+  const rows = await db.prepare(
+    `SELECT args,result FROM audit_log
+      WHERE user_id=?1 AND actor='mcp' AND tool=?2
+        AND json_extract(CASE WHEN json_valid(args) THEN args ELSE '{}' END,'$.group_id')=?3
+        AND json_extract(CASE WHEN json_valid(args) THEN args ELSE '{}' END,'$.expected_version')=?4
+        AND json_type(CASE WHEN json_valid(result) THEN result ELSE '{}' END,'$.exercise_group_receipt')='text'
+        AND json_extract(CASE WHEN json_valid(result) THEN result ELSE '{}' END,'$.ok')=1
+        AND json_extract(CASE WHEN json_valid(result) THEN result ELSE '{}' END,'$.group_id')=?3
+      ORDER BY created_at,id`,
+  ).bind(userId, operation, args.group_id, args.expected_version).all<{ args: string; result: string }>();
+  const request = canonicalExerciseGroupArgs(args);
+  for (const row of rows.results) {
+    if (canonicalExerciseGroupArgs(JSON.parse(row.args)) !== request) continue;
+    const { exercise_group_receipt: _, ...acknowledgement } = JSON.parse(row.result) as
+      ExerciseGroupAcknowledgement & { exercise_group_receipt: string };
+    return { ...acknowledgement, replayed: true };
+  }
+  return null;
+}
+
+async function findExerciseGroupReceipt(db: D1Database, userId: string, actor: string, key: string): Promise<ExerciseGroupAcknowledgement | null> {
+  const row = await db.prepare(
+    `SELECT result FROM audit_log WHERE user_id=?1 AND actor=?2 AND json_valid(result)
+      AND json_extract(CASE WHEN json_valid(result) THEN result ELSE '{}' END,'$.exercise_group_receipt')=?3 LIMIT 1`,
+  ).bind(userId, actor, key).first<{ result: string }>();
+  if (!row) return null;
+  const { exercise_group_receipt: _, ...result } = JSON.parse(row.result) as ExerciseGroupAcknowledgement & { exercise_group_receipt: string };
+  return { ...result, replayed: true };
+}
+
+async function commitExerciseGroup(
+  db: D1Database, plan: PlanRow, changed: readonly TemplateExerciseRow[],
+  result: ExerciseGroupAcknowledgement, key: string, attribution: PlanWriteAttribution,
+): Promise<ExerciseGroupResult> {
+  const nonce = crypto.randomUUID();
+  const ts = Date.now();
+  const statements = preparePlanWriteStart(db, plan, attribution, ts, nonce);
+  for (const slot of changed) statements.push(db.prepare(
+    `UPDATE template_exercises SET group_id=?2,group_rest_seconds=?3,group_transition_seconds=?4,
+       target_sets=?5,order_index=?6,updated_at=?7 WHERE id=?1
+       AND EXISTS (SELECT 1 FROM plans p JOIN workouts d ON d.plan_id=p.id
+         WHERE d.id=template_exercises.workout_id AND p.id=?8 AND p.user_id=?9
+           AND p.version=-?10 AND p.plan_write_nonce=?11)`,
+  ).bind(slot.id, slot.group_id ?? null, slot.group_rest_seconds ?? null,
+    slot.group_transition_seconds ?? null, slot.target_sets, slot.order_index, ts,
+    plan.id, plan.user_id, plan.version, nonce));
+  const versionIndex = statements.length;
+  statements.push(...preparePlanWriteFinish(db, plan, {
+    ...attribution,
+    note: attribution.note ?? (result.cleared ? 'Ungrouped exercises.' : `Grouped ${result.members.length} exercises for ${result.target_sets} rounds.`),
+    result: { ...result, exercise_group_receipt: key },
+  }, ts, nonce));
+  const rows = await runWorkoutWriteBatch(db, statements);
+  if ((rows[0]?.meta.changes ?? 0) !== 1 || !rows[versionIndex]?.results[0]) {
+    // A concurrent copy may have committed the same request while we read.
+    const replay = await findExerciseGroupReceipt(db, plan.user_id, attribution.actor, key);
+    if (replay) return replay;
+    const latest = await getActivePlan(db, plan.user_id);
+    return { conflict: true, current_version: latest?.version ?? plan.version };
+  }
+  return result;
+}
+
+export async function setGroup(
+  db: D1Database, userId: string, dayId: string, groupId: string, memberIds: string[],
+  options: SetExerciseGroupOptions,
+  attribution: PlanWriteAttribution = { actor: 'system', operation: 'group_exercises' },
+): Promise<ExerciseGroupResult> {
+  const invalid = new Set<string>();
+  if (!isGroupId(groupId)) invalid.add('group_id');
+  if (!Number.isSafeInteger(options.expected_version) || options.expected_version < 1) invalid.add('expected_version');
+  if (!Number.isSafeInteger(options.round_rest) || options.round_rest < 0) invalid.add('round_rest');
+  const transition = options.transition_rest === undefined ? 0 : options.transition_rest;
+  if (!Number.isSafeInteger(transition) || transition < 0) invalid.add('transition_rest');
+  if (options.order_index !== undefined && (!Number.isSafeInteger(options.order_index) || options.order_index < 0)) invalid.add('order_index');
+  if (options.target_sets !== undefined && (!Number.isSafeInteger(options.target_sets) || options.target_sets < 1)) invalid.add('target_sets');
+  if (!Array.isArray(memberIds) || memberIds.some((id) => typeof id !== 'string') || new Set(memberIds).size !== memberIds.length || memberIds.length < 2) invalid.add('members');
+  if (invalid.size) return { error: 'invalid_fields', fields: [...invalid].sort() };
+  const plan = await getActivePlan(db, userId);
+  if (!plan) return { error: 'no_active_plan' };
+  const key = JSON.stringify({ kind: 'set', plan_id: plan.id, day_id: dayId, group_id: groupId,
+    members: memberIds, expected_version: options.expected_version,
+    round_rest: options.round_rest, transition_rest: transition, target_sets: options.target_sets ?? null, order_index: options.order_index ?? null });
+  const replay = await findExerciseGroupReceipt(db, userId, attribution.actor, key);
+  if (replay) return replay;
+  if (plan.version !== options.expected_version) return { conflict: true, current_version: plan.version };
+  const tree = await getPlanTree(db, userId);
+  if (!tree || tree.id !== plan.id || tree.version !== plan.version) {
+    return { conflict: true, current_version: tree?.version ?? plan.version };
+  }
+  const day = tree.workouts.find((day) => day.id === dayId && day.archived_at == null);
+  if (!day) return { error: 'day_not_found' };
+  if (tree.workouts.some((day) => day.id !== dayId && day.exercises.some((slot) => slot.group_id === groupId))) {
+    return { error: 'group_conflict', fields: ['group_id'] };
+  }
+  const selected = memberIds.map((id) => day.exercises.find((slot) => slot.id === id));
+  if (selected.some((slot) => !slot)) return { error: 'group_conflict', fields: ['members'] };
+  if (selected.some((slot) => slot!.group_id != null && slot!.group_id !== groupId)) {
+    return { error: 'group_conflict', fields: ['group_id'] };
+  }
+  const memberSet = new Set(memberIds);
+  const positions = day.exercises.filter((slot) => memberSet.has(slot.id)).map((slot) => slot.order_index).sort((a, b) => a - b);
+  let proposed = day.exercises.map((slot) => {
+    const index = memberIds.indexOf(slot.id);
+    if (index !== -1) return { ...slot, group_id: groupId, group_rest_seconds: options.round_rest,
+      group_transition_seconds: transition, target_sets: options.target_sets ?? slot.target_sets,
+      order_index: positions[index]! };
+    return slot.group_id === groupId ? { ...slot, ...emptyExerciseGroup } : slot;
+  });
+  if (options.order_index !== undefined) {
+    const others = proposed.filter((slot) => !memberSet.has(slot.id));
+    const members = memberIds.map((id) => proposed.find((slot) => slot.id === id)!);
+    const target = Math.min(options.order_index, others.length);
+    proposed = [...others.slice(0, target), ...members, ...others.slice(target)]
+      .map((slot, index) => ({ ...slot, order_index: index }));
+  }
+  const groupInvalid = validateExerciseGroups(proposed);
+  if (groupInvalid) return groupInvalid;
+  // A block week that already gives a new member its own round count must
+  // agree with the rest of the group.
+  const weekMismatch = programGroupSetsMismatch(parsePlanMeta(tree.meta).program, proposed);
+  if (weekMismatch) return weekMismatch;
+  for (const slot of proposed.filter((slot) => memberSet.has(slot.id) || day.exercises.find((old) => old.id === slot.id)?.group_id === groupId)) {
+    let progression: unknown;
+    try { progression = slot.progression == null ? null : JSON.parse(slot.progression); }
+    catch { return { error: 'invalid_fields', fields: ['progression'] }; }
+    const invalid = validateExercisePrescription({ ...slot, progression }, { modality: slot.exercise_modality });
+    if (invalid) return invalid;
+  }
+  const changed = proposed.filter((slot) => {
+    const old = day.exercises.find((old) => old.id === slot.id)!;
+    return slot.group_id !== old.group_id || slot.group_rest_seconds !== old.group_rest_seconds
+      || slot.group_transition_seconds !== old.group_transition_seconds || slot.target_sets !== old.target_sets
+      || slot.order_index !== old.order_index;
+  });
+  const result: ExerciseGroupAcknowledgement = { ok: true, plan_id: plan.id,
+    version: plan.version + (changed.length ? 1 : 0), group_id: groupId, day_id: dayId,
+    members: memberIds, round_rest: options.round_rest, transition_rest: transition,
+    target_sets: proposed.find((slot) => slot.id === memberIds[0])!.target_sets, cleared: false };
+  if (!changed.length) return { ...result, unchanged: true };
+  return commitExerciseGroup(db, plan, changed, result, key, attribution);
+}
+
+export async function clearGroup(
+  db: D1Database, userId: string, groupId: string, expectedVersion: number,
+  attribution: PlanWriteAttribution = { actor: 'system', operation: 'ungroup_exercises' },
+  scopeDayId?: string,
+): Promise<ExerciseGroupResult> {
+  const fields: string[] = [];
+  if (!isGroupId(groupId)) fields.push('group_id');
+  if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) fields.push('expected_version');
+  if (fields.length) return { error: 'invalid_fields', fields };
+  const plan = await getActivePlan(db, userId);
+  if (!plan) return { error: 'no_active_plan' };
+  const key = JSON.stringify({ kind: 'clear', plan_id: plan.id, group_id: groupId, expected_version: expectedVersion });
+  const replay = await findExerciseGroupReceipt(db, userId, attribution.actor, key);
+  if (replay) return scopeDayId !== undefined && replay.day_id !== scopeDayId
+    ? { error: 'group_conflict', fields: ['group_id'] } : replay;
+  if (plan.version !== expectedVersion) return { conflict: true, current_version: plan.version };
+  const tree = await getPlanTree(db, userId);
+  if (!tree || tree.id !== plan.id || tree.version !== plan.version) return { conflict: true, current_version: tree?.version ?? plan.version };
+  if (scopeDayId !== undefined && !tree.workouts.some((day) => day.id === scopeDayId && day.archived_at == null)) return { error: 'day_not_found' };
+  if (tree.workouts.some(day => day.archived_at != null && day.exercises.some(slot => slot.group_id === groupId))) {
+    return { error: 'day_not_found' };
+  }
+  const members = tree.workouts.flatMap((day) => day.exercises.filter((slot) => slot.group_id === groupId));
+  if (scopeDayId !== undefined && members.some((slot) => slot.workout_id !== scopeDayId)) {
+    return { error: 'group_conflict', fields: ['group_id'] };
+  }
+  const changed = members.map((slot) => ({ ...slot, ...emptyExerciseGroup }));
+  for (const slot of changed) {
+    let progression: unknown;
+    try { progression = slot.progression == null ? null : JSON.parse(slot.progression); }
+    catch { return { error: 'invalid_fields', fields: ['progression'] }; }
+    const invalid = validateExercisePrescription({ ...slot, progression }, { modality: slot.exercise_modality });
+    if (invalid) return invalid;
+  }
+  const candidate = tree.workouts.map((day) => ({ ...day, exercises: day.exercises.map((slot) => slot.group_id === groupId ? { ...slot, ...emptyExerciseGroup } : slot) }));
+  const groupInvalid = validatePlanExerciseGroups(candidate);
+  if (groupInvalid) return groupInvalid;
+  const result: ExerciseGroupAcknowledgement = { ok: true, plan_id: plan.id,
+    version: plan.version + (changed.length ? 1 : 0), group_id: groupId,
+    day_id: members[0]?.workout_id ?? scopeDayId ?? null, members: [], round_rest: null,
+    transition_rest: null, target_sets: null, cleared: true };
+  if (!changed.length) return { ...result, unchanged: true };
+  return commitExerciseGroup(db, plan, changed, result, key, attribution);
+}
+
+
+// Mobile OAuth requests are navigation, never credentials. All authorization
+// parameters are fixed before the app opens; iOS can submit only a decision.
+export interface MobileCoachRequest {
+  id: string;
+  client_id: string;
+  client_name: string;
+  redirect_uri: string;
+  code_challenge: string;
+  state: string;
+  resource: string;
+  expires_at: number;
+}
+
+export async function createMobileCoachRequest(
+  db: D1Database, request: Omit<MobileCoachRequest, 'client_name'>,
+): Promise<void> {
+  await db.batch([
+    db.prepare('DELETE FROM oauth_mobile_requests WHERE expires_at <= ?1').bind(Date.now()),
+    db.prepare(`INSERT INTO oauth_mobile_requests
+      (id, client_id, redirect_uri, code_challenge, state, resource, expires_at)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`)
+      .bind(request.id, request.client_id, request.redirect_uri, request.code_challenge,
+        request.state, request.resource, request.expires_at),
+  ]);
+}
+
+export async function getMobileCoachRequest(db: D1Database, id: string): Promise<MobileCoachRequest | null> {
+  return db.prepare(`SELECT r.*, COALESCE(c.client_name, 'AI app') AS client_name
+    FROM oauth_mobile_requests r JOIN oauth_clients c ON c.client_id = r.client_id
+    WHERE r.id = ?1 AND r.expires_at > ?2`).bind(id, Date.now()).first<MobileCoachRequest>();
+}
+
+/** Decide once. A concurrent allow/deny can have only one winner. Approval,
+ * code issuance, audit and request consumption commit in one D1 transaction.
+ * A lost success response requires a new connection; do not retry approval.
+ */
+export async function decideMobileCoachRequest(
+  db: D1Database, id: string, userId: string, allow: boolean,
+): Promise<{ redirect_uri: string; state: string; code?: string } | null> {
+  const request = await getMobileCoachRequest(db, id);
+  if (!request) return null;
+  const timestamp = Date.now();
+  const liveUser = `EXISTS (SELECT 1 FROM users WHERE id = ?3)
+    AND NOT EXISTS (SELECT 1 FROM account_deletion_intents WHERE user_id = ?3)
+    AND NOT EXISTS (SELECT 1 FROM account_deletion_receipts WHERE user_id = ?3)`;
+  if (!allow) {
+    const deleted = await db.prepare(`DELETE FROM oauth_mobile_requests
+      WHERE id = ?1 AND expires_at > ?2 AND ${liveUser} RETURNING id`)
+      .bind(id, timestamp, userId).first();
+    return deleted ? { redirect_uri: request.redirect_uri, state: request.state } : null;
+  }
+  const code = crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '');
+  const [inserted] = await db.batch([
+    db.prepare(`INSERT INTO oauth_codes
+      (code, client_id, redirect_uri, code_challenge, code_challenge_method,
+       scope, resource, expires_at, created_at, user_id)
+      SELECT ?4, client_id, redirect_uri, code_challenge, 'S256', 'mcp', resource,
+             ?2 + 600000, ?2, ?3
+      FROM oauth_mobile_requests WHERE id = ?1 AND expires_at > ?2 AND ${liveUser}`)
+      .bind(id, timestamp, userId, code),
+    db.prepare(`INSERT INTO audit_log (id, user_id, actor, tool, args, result, created_at)
+      SELECT ?1, user_id, 'ios', 'approve_coach_connection', NULL, 'approved', ?2
+      FROM oauth_codes WHERE code = ?3`).bind(crypto.randomUUID(), timestamp, code),
+    db.prepare(`DELETE FROM oauth_mobile_requests WHERE id = ?1
+      AND EXISTS (SELECT 1 FROM oauth_codes WHERE code = ?2)`).bind(id, code),
+  ]);
+  return inserted?.meta.changes === 1
+    ? { redirect_uri: request.redirect_uri, state: request.state, code } : null;
+}
+
+
+export async function purgeExpiredMobileCoachRequests(db: D1Database): Promise<void> {
+  await db.prepare('DELETE FROM oauth_mobile_requests WHERE expires_at <= ?1').bind(Date.now()).run();
+}
+
+// ---- freestyle sessions -------------------------------------------------
+
+export async function getOwnedSession(db: D1Database, userId: string, id: string) {
+  const canonical = await resolveOwnedSessionId(db, userId, id);
+  return canonical ? db.prepare('SELECT * FROM sessions WHERE id=?1 AND user_id=?2')
+    .bind(canonical, userId).first<SessionRow>() : null;
+}
+
+/** An explicit start owns the date immediately, including before its first set.
+ * Existing live/completed work is never replaced. Empty rest/planned dates and
+ * discarded attempts may change kind only with an observed generation CAS. */
+export async function startFreestyleSession(db: D1Database, userId: string, date: string,
+  expectedAttempt: number, actor: 'ios' | 'mcp' = 'ios', options: { slot?: number; additionalID?: string } = {}) {
+  const plan = await getActivePlan(db, userId);
+  if (!plan) return { error: 'no_active_plan' as const };
+  const slot = options.slot ?? 0;
+  assertSessionSlot(slot);
+  if (options.additionalID) {
+    if (expectedAttempt !== 0) return { error: 'session_attempt_conflict' as const };
+    return { session: await createAdditionalSession(db, userId, plan.id, date, null,
+      options.additionalID, 'freestyle', actor === 'ios') };
+  }
+  const existing = await getOwnedSessionByDate(db, userId, date, slot);
+  if (!existing && slot !== 0) return { error: 'session_state_conflict' as const };
+  if (existing?.kind === 'freestyle' && existing.status === 'in_progress'
+      && (existing.attempt === expectedAttempt || existing.attempt === expectedAttempt + 1)) {
+    return { session: existing };
+  }
+  if ((!existing && expectedAttempt !== 0) || (existing && existing.attempt !== expectedAttempt)) {
+    return { error: 'session_attempt_conflict' as const };
+  }
+  if (existing && !['planned', 'skipped', 'discarded'].includes(existing.status)) {
+    return { error: 'session_already_started' as const };
+  }
+  const ts = now(), id = existing?.id ?? uuid();
+  const statements = existing ? [db.prepare(`UPDATE sessions SET kind='freestyle',
+    plan_id=?3,workout_id=NULL,status='in_progress',attempt=attempt+1,write_protocol=?6,
+    started_at=?4,completed_at=NULL,notes=NULL,perceived_fatigue=NULL,runner_targets=NULL,exercise_swaps=NULL,
+    updated_at=MAX(updated_at+1,?4)
+    WHERE id=?1 AND user_id=?2 AND attempt=?5 AND status IN ('planned','skipped','discarded')
+      AND NOT EXISTS (SELECT 1 FROM set_logs WHERE session_id=?1 AND deleted_at IS NULL)
+      AND EXISTS (SELECT 1 FROM plans WHERE id=?3 AND user_id=?2 AND status='active')`)
+    .bind(id,userId,plan.id,ts,expectedAttempt,actor==='ios'?'attempt-v1':'legacy')] : [db.prepare(`INSERT INTO sessions
+    (id,user_id,plan_id,date,kind,status,attempt,write_protocol,started_at,created_at,updated_at)
+    SELECT ?1,?2,?3,?4,'freestyle','in_progress',0,?6,?5,?5,?5
+    WHERE EXISTS (SELECT 1 FROM plans WHERE id=?3 AND user_id=?2 AND status='active')
+    ON CONFLICT DO NOTHING`).bind(id,userId,plan.id,date,ts,actor==='ios'?'attempt-v1':'legacy')];
+  statements.push(db.prepare(`INSERT INTO audit_log (id,user_id,actor,tool,args,result,created_at)
+    SELECT ?1,?2,?3,'start_freestyle',?4,?5,?6 WHERE changes()=1`)
+    .bind(uuid(),userId,actor,JSON.stringify({date,expected_attempt:expectedAttempt}),id,ts));
+  const results = await runWorkoutWriteBatch(db, statements);
+  const winner = await getOwnedSessionByDate(db,userId,date,slot);
+  if (!results[0]?.meta.changes || !winner) return { error: 'session_state_conflict' as const };
+  return { session: winner };
+}
+
+// Include tombstones in the signature: corrections/deletions between review and
+// save invalidate the reviewed source. The SQL and JS order is shared by reads
+// and the atomic plan claim; a set arriving after the claim is a later event.
+const freestyleSourceSQL = (session: string) => `(SELECT COALESCE(json_group_array(json_array(id,updated_at)), '[]')
+  FROM (SELECT id,updated_at FROM set_logs WHERE session_id=${session} ORDER BY id))`;
+
+export async function getFreestyleWorkoutDraft(db: D1Database,userId: string,sessionId: string) {
+  const session = await getOwnedSession(db,userId,sessionId);
+  if (!session) return { error: 'not_found' as const };
+  if (session.kind !== 'freestyle' || session.status !== 'completed' || session.workout_id !== null) {
+    return { error: 'session_state_conflict' as const };
+  }
+  const results = await db.batch<Record<string,unknown>>([
+    db.prepare('SELECT * FROM set_logs WHERE session_id=?1 ORDER BY id').bind(session.id),
+    db.prepare(`SELECT ${freestyleSourceSQL('?1')} AS signature`).bind(session.id),
+  ]);
+  const slots = deriveFreestylePrescriptions(results[0]!.results as unknown as SetLogRow[]);
+  return { session, source_signature: String((results[1]!.results[0] as {signature:string}).signature), slots };
+}
+
+export interface SaveFreestyleInput {
+  workout_id: string;
+  name: string;
+  expected_plan_id: string;
+  expected_version: number;
+  expected_attempt: number;
+  source_signature: string;
+  slots: (Omit<FreestylePrescription, 'target_weight_unit'> & {
+    source_set_ids: string[];
+    /** Omitted by older clients: the reviewed load keeps its source unit. */
+    target_weight_unit?: 'lb' | 'kg';
+  })[];
+}
+
+/** Creates the complete reviewed prescription, reassigns history, advances the
+ * attempt and records the ACK in the same versioned, audited D1 transaction. */
+export async function saveFreestyleWorkout(db: D1Database,userId: string,sessionId: string,
+  input: SaveFreestyleInput, actor: 'ios' | 'mcp' = 'ios') {
+  // Wire object-key order and source ID order are not identity.
+  // Re-encode the accepted request in one stable field order for every retry.
+  const request = JSON.stringify({session_id: sessionId, workout_id: input.workout_id,
+    name: input.name, expected_plan_id: input.expected_plan_id, expected_version: input.expected_version,
+    expected_attempt: input.expected_attempt, source_signature: input.source_signature,
+    slots: input.slots.map(s => ({exercise_id: s.exercise_id, target_sets: s.target_sets,
+      target_reps: s.target_reps, target_duration_s: s.target_duration_s,
+      target_weight: s.target_weight, rest_seconds: s.rest_seconds,
+      source_set_ids: [...(s.source_set_ids ?? [])].sort(),
+      ...(s.target_weight_unit === undefined ? {} : {target_weight_unit: s.target_weight_unit})}))});
+  const readReceipt = async () => {
+    const receipt = await db.prepare('SELECT request,response FROM freestyle_workout_receipts WHERE user_id=?1 AND new_workout_id=?2')
+      .bind(userId,input.workout_id).first<{request:string;response:string}>();
+    return !receipt ? null : receipt.request === request ? JSON.parse(receipt.response) as {
+      workout_id:string;plan_id:string;version:number;session:SessionRow;
+    } : {error:'idempotency_conflict' as const};
+  };
+  const receipt = await readReceipt();
+  if (receipt) return receipt;
+  const draft = await getFreestyleWorkoutDraft(db,userId,sessionId);
+  if ('error' in draft) return await readReceipt() ?? draft;
+  const plan = await getActivePlan(db,userId);
+  if (!plan || plan.id !== input.expected_plan_id || plan.version !== input.expected_version) {
+    return await readReceipt() ?? {conflict:true as const,current_version:plan?.version ?? 0};
+  }
+  if (draft.session.attempt !== input.expected_attempt || draft.source_signature !== input.source_signature) {
+    return await readReceipt() ?? {error:'session_state_conflict' as const};
+  }
+  if (!input.name.trim() || !input.slots.length || input.slots.length>50) {
+    return {error:'invalid_fields' as const,fields:['name','slots']};
+  }
+  const catalog = await getExercises(db);
+  const sourceKey = (ids: string[]) => JSON.stringify([...ids].sort());
+  const cohorts = new Map(draft.slots.map(slot => [sourceKey(slot.source_set_ids), slot]));
+  const reviewed = new Set<string>();
+  const units: ('lb' | 'kg')[] = [];
+  if (input.slots.length !== cohorts.size) return {error:'invalid_fields' as const,fields:['slots']};
+  for (const slot of input.slots) {
+    const key = sourceKey(slot.source_set_ids ?? []);
+    const source = cohorts.get(key);
+    units.push(slot.target_weight_unit ?? source?.target_weight_unit ?? 'lb');
+    if (!source || reviewed.has(key) || source.exercise_id !== slot.exercise_id
+      || source.is_timed !== (slot.target_duration_s !== null)) {
+      return {error:'invalid_fields' as const,fields:['source_set_ids']};
+    }
+    reviewed.add(key);
+    const ex = catalog.find(e=>e.id===slot.exercise_id);
+    if (!ex) return {error:'invalid_exercises' as const};
+    if (['timed','cardio'].includes(ex.modality) && slot.target_duration_s === null) {
+      return {error:'invalid_fields' as const,fields:['target_duration_s']};
+    }
+    const invalid = validateExercisePrescription({...slot}, {modality:ex.modality});
+    if (invalid) return invalid;
+  }
+  const ts=now(), nonce=uuid();
+  const response = {workout_id:input.workout_id,plan_id:plan.id,version:plan.version+1,
+    session:{...draft.session,plan_id:plan.id,workout_id:input.workout_id,attempt:draft.session.attempt+1,
+      updated_at:Math.max(draft.session.updated_at+1,ts)}};
+  const attribution: PlanWriteAttribution = {actor,operation:'save_freestyle_workout',args:input,
+    result:response,note:actor==='mcp'?'Saved the reviewed freestyle session as a reusable workout.':null};
+  const guard = {json:JSON.stringify({id:draft.session.id,attempt:input.expected_attempt,signature:input.source_signature}),
+    sql:`EXISTS (SELECT 1 FROM sessions s WHERE s.id=json_extract(?7,'$.id') AND s.user_id=?2
+      AND s.kind='freestyle' AND s.status='completed' AND s.workout_id IS NULL
+      AND s.attempt=json_extract(?7,'$.attempt')
+      AND ${freestyleSourceSQL('s.id')}=json_extract(?7,'$.signature'))`};
+  const claim = 'EXISTS (SELECT 1 FROM plans WHERE id=?1 AND user_id=?2 AND version=-?3 AND plan_write_nonce=?4)';
+  const bindings = [plan.id,userId,plan.version,nonce] as const;
+  const statements = [
+    ...preparePlanWriteStart(db,plan,attribution,ts,nonce,false,[],guard),
+    db.prepare(`INSERT INTO workouts (id,plan_id,name,order_index,created_at,updated_at)
+      SELECT ?5,?1,?6,(SELECT COALESCE(MAX(order_index)+1,0) FROM workouts WHERE plan_id=?1),?7,?7 WHERE ${claim}`)
+      .bind(...bindings,input.workout_id,input.name.trim(),ts),
+    ...input.slots.map((slot,index)=>db.prepare(`INSERT INTO template_exercises
+      (id,workout_id,exercise_id,order_index,target_sets,target_reps,target_duration_s,target_weight,rest_seconds,progression,is_warmup,created_at,updated_at,target_weight_unit)
+      SELECT ?5,?6,?7,?8,?9,?10,?11,?12,?13,'{"type":"manual"}',0,?14,?14,?15 WHERE ${claim}`)
+      .bind(...bindings,uuid(),input.workout_id,slot.exercise_id,index,slot.target_sets,slot.target_reps,
+        slot.target_duration_s,slot.target_weight,slot.rest_seconds,ts,units[index]!)),
+    db.prepare(`UPDATE sessions SET plan_id=?1,workout_id=?5,attempt=attempt+1,updated_at=?6 WHERE id=?7 AND ${claim}`)
+      .bind(...bindings,input.workout_id,response.session.updated_at,draft.session.id),
+    db.prepare(`INSERT INTO freestyle_workout_receipts (user_id,new_workout_id,session_id,source_attempt,request,response,created_at)
+      SELECT ?2,?5,?6,?7,?8,?9,?10 WHERE ${claim}`)
+      .bind(...bindings,input.workout_id,draft.session.id,draft.session.attempt,request,JSON.stringify(response),ts),
+    ...preparePlanWriteFinish(db,plan,attribution,ts,nonce),
+  ];
+  const result = await runWorkoutWriteBatch(db,statements);
+  if (!result[0]?.meta.changes) {
+    return await readReceipt() ?? {error:'session_state_conflict' as const};
+  }
+  return response;
+}
+
+// ---- Partner training: each phone writes only its own member's records. ----
+
+function normalizedPartnerSlot(slot: PartnerSlot): PartnerSlot {
+  return { id: slot.id, exercise_id: slot.exercise_id, order_index: slot.order_index,
+    target_sets: slot.target_sets, target_reps: slot.target_reps,
+    target_reps_max: slot.target_reps_max ?? null, target_rpe: slot.target_rpe ?? null,
+    rest_seconds: slot.rest_seconds, target_weight: slot.target_weight ?? null,
+    target_weight_unit: slot.target_weight_unit ?? 'lb', target_duration_s: slot.target_duration_s ?? null,
+    progression: slot.progression ?? null, cues: slot.cues ?? null, is_warmup: slot.is_warmup,
+    group_id: slot.group_id ?? null, group_rest_seconds: slot.group_rest_seconds ?? null,
+    group_transition_seconds: slot.group_transition_seconds ?? null };
+}
+
+/** Partner copies retain their original receipt namespace and changed-copy
+ * response; ordinary creation uses the same validated transaction below. */
+export async function createPartnerWorkout(db: D1Database, userId: string, raw: unknown) {
+  return createReviewedWorkout(db, userId, raw, {
+    actor: 'ios', operation: 'create_partner_workout', changedError: 'partner_copy_changed',
+  });
+}
+
+/** Save the member's reviewed prescription without requiring partner setup.
+ * The workout UUID stays fixed across an uncertain response and scheduling. */
+export async function createPrescribedWorkout(
+  db: D1Database, userId: string, raw: unknown, actor: 'ios' | 'web' = 'ios',
+) {
+  return createReviewedWorkout(db, userId, raw, {
+    actor, operation: 'create_workout_prescription', changedError: 'workout_changed',
+  });
+}
+
+/** Save a reviewed full prescription once. A planless member gets their plan
+ * in the same transaction. The audit UUID doubles as the durable retry receipt. */
+async function createReviewedWorkout<ChangedError extends 'partner_copy_changed' | 'workout_changed'>(
+  db: D1Database, userId: string, raw: unknown,
+  options: {
+    actor: 'ios' | 'web';
+    operation: 'create_partner_workout' | 'create_workout_prescription';
+    changedError: ChangedError;
+  },
+) {
+  if (!isPartnerWorkoutInput(raw)) return { error: 'invalid_fields' as const, fields: ['workout'] };
+  const input: PartnerWorkoutInput = { ...raw, name: raw.name.trim(), slots: raw.slots.map(normalizedPartnerSlot) };
+  const request = partnerRequestJSON(input);
+  const readReceipt = async () => {
+    const receipt = await db.prepare('SELECT user_id,tool,args,result FROM audit_log WHERE id=?1')
+      .bind(input.workout_id).first<{user_id:string;tool:string;args:string;result:string}>();
+    if (!receipt) return null;
+    if (receipt.user_id !== userId || receipt.tool !== options.operation || receipt.args !== request) {
+      return { error: 'idempotency_conflict' as const };
+    }
+    const tree = await getPlanTree(db, userId);
+    const workout = tree?.workouts.find(row => row.id === input.workout_id && row.archived_at == null);
+    if (!tree || !workout || workout.name !== input.name
+        || partnerRequestJSON(workout.exercises.map(normalizedPartnerSlot)) !== partnerRequestJSON(input.slots)) {
+      return { error: options.changedError };
+    }
+    return { workout_id: workout.id, plan_id: tree.id, version: tree.version };
+  };
+  const previous = await readReceipt();
+  if (previous) return previous;
+  const tree = await getPlanTree(db, userId);
+  if ((tree?.id ?? null) !== input.expected_plan_id || (tree?.version ?? 0) !== input.expected_version) {
+    return await readReceipt() ?? { conflict: true as const, current_version: tree?.version ?? 0 };
+  }
+  if (new Set(input.slots.map(slot => slot.id)).size !== input.slots.length) {
+    return { error: 'invalid_fields' as const, fields: ['id'] };
+  }
+  const catalog = await getExercises(db);
+  for (const slot of input.slots) {
+    const exercise = catalog.find(row => row.id === slot.exercise_id);
+    if (!exercise) return { error: 'invalid_exercises' as const };
+    let progression: unknown = null;
+    try { progression = slot.progression == null ? null : JSON.parse(slot.progression); }
+    catch { return { error: 'invalid_fields' as const, fields: ['progression'] }; }
+    const invalid = validateExercisePrescription({ ...slot, progression }, { modality: exercise.modality });
+    if (invalid) return invalid;
+  }
+  const groups = validatePlanExerciseGroups([...(tree?.workouts ?? []), { exercises: input.slots }]);
+  if (groups) return groups;
+  const ts = now(), nonce = uuid();
+  const plan: PlanRow = tree ?? { id: uuid(), user_id: userId, name: 'My workouts', status: 'active',
+    version: 0, meta: null, created_at: ts, updated_at: ts };
+  const response = { workout_id: input.workout_id, plan_id: plan.id, version: plan.version + 1 };
+  // Object insertion order here matches the canonical request in the receipt.
+  const attribution: PlanWriteAttribution = { actor: options.actor, operation: options.operation,
+    receiptID: input.workout_id, args: JSON.parse(request), result: response };
+  const claim = 'EXISTS (SELECT 1 FROM plans WHERE id=?1 AND user_id=?2 AND version=-?3 AND plan_write_nonce=?4)';
+  const bindings = [plan.id, userId, plan.version, nonce] as const;
+  const statements: D1PreparedStatement[] = tree
+    ? preparePlanWriteStart(db, plan, attribution, ts, nonce)
+    : [db.prepare(`INSERT INTO plans (id,user_id,name,status,version,meta,created_at,updated_at,plan_write_nonce)
+        SELECT ?1,?2,'My workouts','active',0,NULL,?3,?3,?4
+        WHERE EXISTS (SELECT 1 FROM users WHERE id=?2)
+          AND NOT EXISTS (SELECT 1 FROM account_deletion_intents WHERE user_id=?2)
+          AND NOT EXISTS (SELECT 1 FROM account_deletion_receipts WHERE user_id=?2)
+        ON CONFLICT DO NOTHING`).bind(plan.id,userId,ts,nonce)];
+  statements.push(db.prepare(`INSERT INTO workouts (id,plan_id,name,order_index,created_at,updated_at)
+    SELECT ?5,?1,?6,(SELECT COALESCE(MAX(order_index)+1,0) FROM workouts WHERE plan_id=?1),?7,?7 WHERE ${claim}`)
+    .bind(...bindings,input.workout_id,input.name,ts));
+  for (const slot of input.slots) {
+    const fields = [...partnerSlotKeys];
+    const values = fields.map(key => slot[key] ?? null);
+    statements.push(db.prepare(`INSERT INTO template_exercises (${fields.join(',')},workout_id,created_at,updated_at)
+      SELECT ${values.map((_,index)=>`?${index+5}`).join(',')},?${values.length+5},?${values.length+6},?${values.length+6}
+      WHERE ${claim}`).bind(...bindings,...values,input.workout_id,ts));
+  }
+  statements.push(...preparePlanWriteFinish(db,plan,attribution,ts,nonce));
+  try {
+    const results = await runWorkoutWriteBatch(db,statements);
+    if (results[0]?.meta.changes === 1) return response;
+  } catch (error) {
+    const retry = await readReceipt();
+    if (retry) return retry;
+    throw error;
+  }
+  return await readReceipt() ?? { conflict:true as const, current_version:(await getActivePlan(db,userId))?.version ?? 0 };
+}
+
+/** Assign, start and snapshot one member's lane under one write-time claim.
+ * The other member has a separate transaction and can never write this lane. */
+export async function startPartnerSession(db: D1Database, userId: string, input: PartnerStartInput) {
+  if (!isPartnerStartInput(input)) return { error:'invalid_fields' as const, fields:['start'] };
+  const request = partnerRequestJSON(input);
+  const readReceipt = async () => {
+    const receipt = await db.prepare('SELECT user_id,tool,args,result FROM audit_log WHERE id=?1').bind(input.id)
+      .first<{user_id:string;tool:string;args:string;result:string}>();
+    if (!receipt) return null;
+    if (receipt.user_id !== userId || receipt.tool !== 'start_partner_session' || receipt.args !== request) {
+      return { error:'idempotency_conflict' as const };
+    }
+    const session = await getOwnedSessionByDate(db,userId,input.date);
+    const ack = JSON.parse(receipt.result) as {session:SessionRow};
+    return session?.id === ack.session.id && session.attempt === ack.session.attempt
+      && session.partner_workout_id === input.partner_workout_id && session.status === 'in_progress'
+      ? { session } : { error:'session_state_conflict' as const };
+  };
+  const cancelled = await db.prepare(`SELECT 1 FROM audit_log
+    WHERE user_id=?1 AND tool='cancel_partner_start' AND json_extract(args,'$.id')=?2`)
+    .bind(userId,input.id).first();
+  if (cancelled) return {error:'session_state_conflict' as const};
+  const previous = await readReceipt();
+  if (previous) return previous;
+  const tree = await getPlanTree(db,userId);
+  const workout = tree?.workouts.find(row => row.id === input.workout_id && row.archived_at == null);
+  if (!tree || !workout || tree.id !== input.expected_plan_id || tree.version !== input.expected_version) {
+    return await readReceipt() ?? { conflict:true as const, current_version:tree?.version ?? 0 };
+  }
+  const existing = await getOwnedSessionByDate(db,userId,input.date);
+  if ((existing?.attempt ?? 0) !== input.expected_attempt || (existing && existing.id !== input.session_id)
+      || existing?.status === 'completed' || existing?.partner_workout_id != null) {
+    return await readReceipt() ?? { error:'session_state_conflict' as const };
+  }
+  const ts = Math.max(now(), (existing?.updated_at ?? 0)+1), nonce = uuid();
+  const targets = await db.prepare(`SELECT ${runnerTargetSnapshotSQL('?1','?2','?3','?4')} AS value`)
+    .bind(workout.id,ts,userId,JSON.stringify(weekTargetsOn(parsePlanMeta(tree.meta).program, input.date)))
+    .first<{value:string}>();
+  const session: SessionRow = { id:input.session_id,user_id:userId,plan_id:tree.id,workout_id:workout.id,
+    date:input.date,status:'in_progress',kind:'planned',started_at:ts,completed_at:null,
+    perceived_fatigue:null,notes:null,exercise_swaps:null,runner_targets:targets?.value ?? null,
+    created_at:existing?.created_at ?? ts,updated_at:ts,attempt:input.expected_attempt+1,
+    write_protocol:'attempt-v1',partner_workout_id:input.partner_workout_id };
+  const observed = existing ? JSON.stringify([existing.id,existing.attempt,existing.status,existing.updated_at]) : 'null';
+  const claim = `EXISTS (SELECT 1 FROM audit_log WHERE id=?1 AND user_id=?2 AND json_extract(result,'$.nonce')=?3)`;
+  const statements = [db.prepare(`INSERT INTO audit_log (id,user_id,actor,tool,args,result,created_at)
+    SELECT ?1,?2,'ios','start_partner_session',?3,?4,?5
+    WHERE EXISTS (SELECT 1 FROM plans WHERE id=?6 AND user_id=?2 AND status='active' AND version=?7)
+      AND NOT EXISTS (SELECT 1 FROM audit_log WHERE user_id=?2 AND tool='cancel_partner_start'
+        AND json_extract(args,'$.id')=?1)
+      AND NOT EXISTS (SELECT 1 FROM account_deletion_intents WHERE user_id=?2)
+      AND NOT EXISTS (SELECT 1 FROM account_deletion_receipts WHERE user_id=?2)
+      AND COALESCE((SELECT json_array(id,attempt,status,updated_at) FROM sessions WHERE user_id=?2 AND slot=0 AND date=?8),'null')=?9
+      AND NOT EXISTS (SELECT 1 FROM set_logs l JOIN sessions s ON s.id=l.session_id
+        WHERE s.user_id=?2 AND s.slot=0 AND s.date=?8 AND l.deleted_at IS NULL)
+    ON CONFLICT(id) DO NOTHING`)
+    .bind(input.id,userId,request,JSON.stringify({nonce,session}),ts,tree.id,tree.version,input.date,observed),
+    db.prepare(`INSERT INTO sessions (id,user_id,plan_id,workout_id,date,status,kind,started_at,completed_at,
+      perceived_fatigue,notes,exercise_swaps,runner_targets,created_at,updated_at,attempt,write_protocol,partner_workout_id)
+      SELECT ?4,?2,?5,?6,?7,'in_progress','planned',?8,NULL,NULL,NULL,NULL,?9,?10,?8,?11,'attempt-v1',?12
+      WHERE ${claim}
+      ON CONFLICT(id) DO UPDATE SET plan_id=excluded.plan_id,workout_id=excluded.workout_id,
+        status=excluded.status,kind=excluded.kind,started_at=excluded.started_at,completed_at=NULL,
+        perceived_fatigue=NULL,notes=NULL,exercise_swaps=NULL,runner_targets=excluded.runner_targets,
+        updated_at=excluded.updated_at,attempt=excluded.attempt,write_protocol=excluded.write_protocol,
+        partner_workout_id=excluded.partner_workout_id`)
+      .bind(input.id,userId,nonce,session.id,tree.id,workout.id,input.date,ts,session.runner_targets,
+        session.created_at,session.attempt,input.partner_workout_id)];
+  const results = await runWorkoutWriteBatch(db,statements);
+  if (results[0]?.meta.changes === 1) return {session};
+  return await readReceipt() ?? {error:'session_state_conflict' as const};
+}
+
+/** A delayed cancellation cannot erase a member's logged work, and a member
+ * who continues alone clears the marker so that cancellation can never win later. */
+export async function leavePartnerSession(db: D1Database,userId:string,sessionId:string,
+  partnerWorkoutId:string,expectedAttempt:number,cancel:boolean) {
+  const result = await runWorkoutWriteStatement<SessionRow>(db,db.prepare(`UPDATE sessions
+    SET partner_workout_id=NULL,status=CASE WHEN ?5=1 THEN 'discarded' ELSE status END,
+      updated_at=MAX(updated_at+1,?6)
+    WHERE id=?1 AND user_id=?2 AND partner_workout_id=?3 AND attempt=?4 AND status='in_progress'
+      AND (?5=0 OR NOT EXISTS (SELECT 1 FROM set_logs WHERE session_id=?1 AND deleted_at IS NULL))
+    RETURNING *`).bind(sessionId,userId,partnerWorkoutId,expectedAttempt,cancel?1:0,now()));
+  const session = result.results[0];
+  if (session) return {session};
+  const existing = await getOwnedSession(db,userId,sessionId);
+  if (existing?.attempt === expectedAttempt && existing.partner_workout_id == null
+      && (cancel ? existing.status === 'discarded' : ['in_progress','completed','discarded'].includes(existing.status))) return {session:existing};
+  return {error:'session_state_conflict' as const};
+}
+
+/** Cancel before or after an ambiguous Start acknowledgement. Both the receipt
+ * fence and empty-session discard commit together; a later Start cannot win. */
+export async function cancelPartnerStart(db:D1Database,userId:string,input:PartnerStartInput) {
+  if (!isPartnerStartInput(input)) return {error:'invalid_fields' as const};
+  const ts=now(), receiptId=uuid(), args=partnerRequestJSON(input);
+  const results=await runWorkoutWriteBatch<SessionRow>(db,[
+    db.prepare(`INSERT INTO audit_log (id,user_id,actor,tool,args,result,created_at)
+      SELECT ?1,?2,'ios','cancel_partner_start',?3,'{"cancelled":true}',?4
+      WHERE EXISTS (SELECT 1 FROM users WHERE id=?2)
+        AND NOT EXISTS (SELECT 1 FROM account_deletion_intents WHERE user_id=?2)
+        AND NOT EXISTS (SELECT 1 FROM audit_log WHERE id=?5 AND (user_id!=?2 OR args!=?3 OR tool!='start_partner_session'))
+        AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.user_id=?2 AND s.id=?6 AND s.attempt=?7
+          AND (s.status='in_progress' AND s.partner_workout_id IS NULL
+            OR s.partner_workout_id=?8 AND EXISTS (SELECT 1 FROM set_logs WHERE session_id=s.id AND deleted_at IS NULL)))
+      ON CONFLICT DO NOTHING`).bind(receiptId,userId,args,ts,input.id,input.session_id,input.expected_attempt+1,input.partner_workout_id),
+    db.prepare(`UPDATE sessions SET partner_workout_id=NULL,status='discarded',updated_at=MAX(updated_at+1,?1)
+      WHERE user_id=?2 AND id=?3 AND attempt=?4 AND partner_workout_id=?5 AND status='in_progress'
+        AND EXISTS (SELECT 1 FROM audit_log WHERE user_id=?2 AND tool='cancel_partner_start' AND args=?6)
+        AND NOT EXISTS (SELECT 1 FROM set_logs WHERE session_id=?3 AND deleted_at IS NULL)
+      RETURNING *`).bind(ts,userId,input.session_id,input.expected_attempt+1,input.partner_workout_id,args)
+  ]);
+  const receipt=await db.prepare(`SELECT args FROM audit_log WHERE user_id=?1 AND tool='cancel_partner_start'
+    AND json_extract(args,'$.id')=?2`).bind(userId,input.id).first<{args:string}>();
+  if (!receipt || receipt.args!==args) return {error:'session_state_conflict' as const};
+  const row=results[1]?.results?.[0];
+  const existing=row ?? await getOwnedSession(db,userId,input.session_id);
+  return {cancelled:true as const,session:existing?.attempt===input.expected_attempt+1
+    && existing.status==='discarded' ? existing : null};
+}
+
+// Security credential/session operations remain behind the public service facade.
+export { isAppSessionRevoked, revokeAppSession, createCoachConnectCode, allowCoachAuthorization, authorizeCoachConnectCode, authorizeReviewConnectCode } from './services/securityAccess';
