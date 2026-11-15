@@ -42,7 +42,9 @@ function fixture(options = {}) {
       content: Buffer.from(options.terms ?? TERMS).toString('base64'),
     };
     let match = path.match(/^\/pulls\?state=open&base=main&per_page=100&page=(\d+)$/);
-    if (match) return prs.slice((Number(match[1])-1)*100, Number(match[1])*100);
+    // Like GitHub, the list response has no commit count; the detail does.
+    if (match) return prs.slice((Number(match[1])-1)*100, Number(match[1])*100)
+      .map(({commits: _count, ...listed}) => listed);
     match = path.match(/^\/pulls\/(\d+)$/);
     if (match) return prs.find(p => p.number === Number(match[1]));
     match = path.match(/^\/pulls\/\d+\/commits\?per_page=100&page=(\d+)$/);

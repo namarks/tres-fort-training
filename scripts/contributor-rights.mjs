@@ -89,14 +89,18 @@ async function readTerms(api, mainSHA) {
 }
 
 async function prCommits(api, pr) {
-  if (!Number.isInteger(pr.commits) || pr.commits < 1 || pr.commits > MAX_COMMITS) return null;
+  // The pull-request list omits the commit count; only the detail response has it.
+  const detail = await api('GET', `/pulls/${pr.number}`);
+  if (detail?.head?.sha !== pr.head.sha) return null;
+  const count = detail.commits;
+  if (!Number.isInteger(count) || count < 1 || count > MAX_COMMITS) return null;
   const commits = [];
-  for (let page = 1; commits.length < pr.commits; page++) {
+  for (let page = 1; commits.length < count; page++) {
     const batch = await api('GET', `/pulls/${pr.number}/commits?per_page=100&page=${page}`);
     if (!Array.isArray(batch) || batch.length === 0) return null;
     commits.push(...batch);
   }
-  if (commits.length !== pr.commits || commits.at(-1)?.sha !== pr.head.sha) return null;
+  if (commits.length !== count || commits.at(-1)?.sha !== pr.head.sha) return null;
   return commits;
 }
 
