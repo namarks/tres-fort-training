@@ -39,6 +39,7 @@ function fixture(options = {}) {
   const api = async (method, path, body) => {
     if (method === 'POST') { writes.push({path, body}); return {}; }
     reads.push(path);
+    if (options.failComments && path.startsWith('/issues/comments')) throw new Error('GitHub unavailable');
     if (path === '/branches/main') return {commit: {sha: options.main ?? MAIN}};
     if (path === `/contents/CONTRIBUTOR-TERMS.md?ref=${options.main ?? MAIN}`) return {
       type: 'file', encoding: 'base64', size: TERMS.length,
@@ -54,8 +55,9 @@ function fixture(options = {}) {
     if (match) return commits.slice((Number(match[1])-1)*100, Number(match[1])*100);
     match = path.match(/^\/issues\/comments\?sort=created&direction=asc&per_page=100&page=(\d+)$/);
     if (match) return comments.slice((Number(match[1])-1)*100, Number(match[1])*100);
-    match = path.match(/^\/commits\/([a-f0-9]{40})\/statuses\?per_page=100$/);
-    if (match) return options.statuses?.[match[1]] ?? [];
+    match = path.match(/^\/commits\/([a-f0-9]{40})\/status\?per_page=100&page=(\d+)$/);
+    if (match) return {statuses: (options.statuses?.[match[1]] ?? [])
+      .slice((Number(match[2])-1)*100, Number(match[2])*100)};
     throw new Error(`Unexpected API request ${method} ${path}`);
   };
   const run = (env = {}, event = {}) => execute({env: {...ENV, ...env}, event: {...EVENT, ...event}, api});
@@ -209,6 +211,21 @@ test('the sentence must stand on its own line', async () => {
   const entity = fixture({comments: [{...ACCEPT, body: `${acceptanceLine('1.1')}\nOn behalf of Example Co.`}]});
   await entity.run();
   assert.deepEqual(entity.states(), [[HEAD, 'success']]);
+});
+
+test('an owner decision is found past a full page of other contexts', async () => {
+  const others = Array.from({length: 100}, (_, i) => ({context: `ci ${i}`, state: 'success'}));
+  const revoked = {context: CONTEXT, state: 'failure', description: 'Owner revoked this head under terms 1.1. PR #7.'};
+  const f = fixture({comments: [ACCEPT], statuses: {[HEAD]: [...others, revoked]}});
+  await f.run();
+  assert.deepEqual(f.states(), [[HEAD, 'failure']]);
+});
+
+test('a check that cannot finish withdraws an earlier pass', async () => {
+  const passed = {context: CONTEXT, state: 'success', description: 'All contributors accepted terms 1.0.'};
+  const f = fixture({failComments: true, statuses: {[HEAD]: [passed]}});
+  await assert.rejects(f.run(), /GitHub unavailable/);
+  assert.deepEqual(f.states(), [[HEAD, 'pending']]);
 });
 
 test('an acceptance posted on an ordinary issue does not count', async () => {

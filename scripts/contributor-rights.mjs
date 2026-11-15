@@ -159,10 +159,17 @@ async function acceptedIds(api, version) {
 
 const clip = text => text.length <= 140 ? text : `${text.slice(0, 137)}...`;
 
+// The combined status lists only the latest status for each context, so
+// other contexts' history can't push this one off the page.
 async function latestStatus(api, sha) {
-  const statuses = await api('GET', `/commits/${sha}/statuses?per_page=100`);
-  requireThat(Array.isArray(statuses), 'Invalid status inventory.');
-  return statuses.find(s => s.context === CONTEXT) ?? null;
+  for (let page = 1; page <= 10; page++) {
+    const combined = await api('GET', `/commits/${sha}/status?per_page=100&page=${page}`);
+    requireThat(Array.isArray(combined?.statuses), 'Invalid status inventory.');
+    const found = combined.statuses.find(s => s.context === CONTEXT);
+    if (found) return found;
+    if (combined.statuses.length < 100) return null;
+  }
+  throw new Error('Status inventory exceeded its safety limit.');
 }
 
 // Decide one head's status. Every PR sharing the head must pass, since a
@@ -226,11 +233,20 @@ export async function execute({env, event, api}) {
     let cache;
     const accepted = async () => (cache ??= await acceptedIds(api, version));
     const results = [];
+    let failure = null;
     for (const [sha, prs] of byHead) {
-      const decision = await decide(api, prs, version, accepted);
+      let decision;
+      try {
+        decision = await decide(api, prs, version, accepted);
+      } catch (error) {
+        // Never leave an earlier pass standing when this check could not finish.
+        failure ??= error;
+        decision = {state: 'pending', description: 'Could not finish the check; it re-runs on the next PR or main change.'};
+      }
       await status(sha, decision);
       results.push({prs: prs.map(p => p.number), state: decision.state});
     }
+    if (failure) throw failure;
     return results;
   };
 
