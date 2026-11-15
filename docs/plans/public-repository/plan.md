@@ -34,9 +34,9 @@ route.
   - Run proportional deterministic checks and independent security review;
     preserve the exact source/candidate comparison privately.
   - [ ] **(b) Resolve publication rights**
-  - Confirm existing code and asset provenance, plus permission to publish
-    provider-specific implementation details. A private candidate is not rights
-    clearance, and technical tests cannot establish publication permission.
+  - Review actual code and asset provenance against applicable restrictions.
+    Separate provider approval is not presumed for all original integration code.
+    Resolve concrete disclosure questions; tests cannot establish legal permission.
 - [ ] **P2 — Publish under explicit owner authority**
   - Review the exact candidate and remaining provider/legal decisions.
   - With Actions still disabled and owner-only write access, publish, apply and
@@ -60,13 +60,19 @@ route.
 
 | Local phase | Relationship | Target | Reason |
 |---|---|---|---|
-| P1(b) | gated_by | external:provider-publication-rights | Confirm permission for implementation details learned under provider agreements. |
+| P1(b) | gated_by | external:owner-publication-content-decision | Resolve the specific remaining protocol-provenance questions recorded in the private content review. |
 | P2 | gated_by | external:owner-repository-publication | The owner approves the exact prepared public surface. |
 
 ## Next step
 
-**Now (@owner):** resolve provider-source publication permission and review the
-prepared source and contributor terms. The private candidate has passed typecheck,
+**Now (@owner):** review the bounded provider-content findings and decide how to
+resolve the remaining protocol-provenance questions before publication. The review
+found no copied provider documents, credentials or identifiable user records in
+the Garmin slice, and matched much of the connection flow to official public
+documentation. Current account endpoints and notification/download details still
+have unverified public provenance; this does not establish that they are
+necessarily confidential. Contacting the provider is an option for unresolved
+material, not a blanket prerequisite. The private candidate has passed typecheck,
 plan and workflow validation, 19 contributor-rights tests, 17 CI-policy tests,
 12 artwork checks and 34 upload-script cases, with independent security review.
 Native compilation and UI verification wait for authorized hosted CI in P2.
@@ -86,3 +92,7 @@ Private review evidence and the proposed provider question stay with the maintai
   personal repository is private. Treat unavailable settings as pending, never
   configured. The publication sequence keeps Actions disabled and other writers
   absent until the controls are verified.
+
+- The provider-content review and comment cleanup do not change runtime behavior
+  or establish rights clearance. Preserve the exact private review evidence; do
+  not copy confidential documents or their sample payloads into this plan.

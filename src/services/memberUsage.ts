@@ -12,7 +12,7 @@
  *    once per member, client and build every few minutes per isolate, never
  *    fails the request, and stores no path, IP address or training data.
  *  - `memberUsage` reads that trace together with counts from the training
- *    tables. Garmin and WHOOP stay out of every count (their licenses); the
+ *    tables. Garmin and WHOOP stay out of every count; the
  *    page shows only whether each is connected.
  *
  * This module owns its SQL and imports only pure modules, never the db.ts

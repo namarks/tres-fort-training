@@ -128,9 +128,11 @@ Garmin is a fourth, direct source (`/auth/garmin` with PKCE, `src/garmin.ts`,
 per new workout to `POST /webhooks/garmin/:secret` (path secret, client id
 header and Garmin's source addresses), the file is queued sealed in
 `garmin_activity_files`, then imported through the `.fit` pipeline as
-`source='garmin'`. Garmin data stays out of group views and every MCP tool
-(Garmin's license), and every view of it carries "Garmin <device>"
-attribution. Garmin's specs are confidential: never commit or quote them. Publication of the integration requires separate rights clearance.
+`source='garmin'`. Garmin data stays out of group views and every MCP tool,
+and every view of it carries "Garmin <device>" attribution. Keep confidential
+provider documents, credentials and private data out of the repository. Review
+actual proposed content for publication rights; using a provider does not by
+itself establish that separate publication approval is required.
 See the private maintainer records.
 
 **Two data classes, two consistency strategies** — this split is the core
