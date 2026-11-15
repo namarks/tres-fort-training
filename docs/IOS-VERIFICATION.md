@@ -16,7 +16,9 @@ build; boot readiness is required before tests start. Both actions use the same
 copied sources, project, destination, and disposable DerivedData. It neither
 needs nor uses signing credentials. It does not migrate D1, deploy a Worker, or upload an
 app. Existing simulator data, generated projects, and build directories are not
-reused. Parallel test cloning is disabled so the command owns every simulator
+reused, unless `TRESFORT_IOS_BUILD_ROOT` names a directory that keeps one source
+copy and DerivedData per project spec between runs (hosted CI restores it from
+a cache, below). Parallel test cloning is disabled so the command owns every simulator
 it creates. Its exit status fails if building/testing or simulator deletion fails.
 
 Select an installed runtime/device explicitly; list choices with
@@ -280,6 +282,22 @@ Every hosted iOS job restores the pinned MediaPipe downloads from a GitHub
 cache keyed by `ios/Dependencies/mediapipe.lock.json`; `setup_mediapipe.py` still checks
 each file's SHA-256 before use, and `TRESFORT_MEDIAPIPE_CACHE` can point a
 runner at a persistent directory instead.
+
+Hosted iOS jobs also restore main's last build into `TRESFORT_IOS_BUILD_ROOT`
+from a GitHub cache, so Xcode recompiles only the files a change touched instead
+of building from scratch (about 12 minutes of the smoke job on November 15, 2026).
+`scripts/verify-ios.sh` rewrites only changed source files, and the workflow tells
+Xcode to ignore the new inodes a restored file gets. Builds are keyed by project
+spec (`project` or `project-app-store`), Xcode version and build, and a hash of
+the tracked iOS sources and verification scripts. Only main saves a build: the
+first shard and the iPhone App Store job, after they pass, and only when the
+sources changed. Pull requests, fork PRs included, restore main's build and
+never save their own; every job that must not save empties the folder first,
+and its throwaway key can never match a restore prefix. The nightly release
+check skips the restore, so it proves a clean build, then refreshes the cache.
+Build logs are left out of the cache. To discard every cached build, bump the
+`ios-build-v1` prefix in `ci.yml`; deleting the entries in the repository's
+Actions caches page works too.
 
 Merging or closing a PR cancels its unfinished CI runs: the `closed` event
 joins the PR's concurrency group (keyed by PR number, since a merged PR's
