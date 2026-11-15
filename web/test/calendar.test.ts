@@ -1,7 +1,7 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
-import { CalendarView } from '../src/App';
+import { PlanPage } from '../src/PlanPage';
 import type { StateActivity, StateResponse } from '../src/api';
 import type { SessionRow } from '../../src/types';
 import {
@@ -161,7 +161,7 @@ describe('mixed-session calendar', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(2026, 10, todayDay, 12));
     try {
-      const html = renderToStaticMarkup(createElement(CalendarView, {
+      const html = renderToStaticMarkup(createElement(PlanPage, {
         state: data, write: async () => true, busy: false, onEditWorkout: () => {},
       }));
       const day = html.match(/<button[^>]*role="gridcell"[^>]*aria-pressed="true"[^>]*>[\s\S]*?<\/button>/)?.[0] ?? '';

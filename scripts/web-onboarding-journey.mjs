@@ -182,7 +182,7 @@ export async function liftingCreationJourney({ page, origin, width, apiCall }) {
     await fields.getByLabel('Minutes', { exact: true }).fill('5.25');
     await fields.getByLabel('Rest between sets, seconds', { exact: true }).fill('0');
   });
-  await page.getByRole('link', { name: 'Calendar', exact: true }).click();
+  await page.getByRole('link', { name: 'Plan', exact: true }).click();
   await page.getByRole('link', { name: 'Workouts', exact: true }).click();
   assert.equal(await page.getByLabel('Workout name', { exact: true }).inputValue(), 'Reviewed six movements');
   page.once('dialog', dialog => dialog.accept());
@@ -418,7 +418,7 @@ export async function mixedWeekJourney({ page, origin, width, apiCall }) {
     assert.deepEqual(state.plan.schedule.extras[day], [core.id]);
     assert.deepEqual(state.plan.schedule.times[day], { [run.id]: '07:00', [core.id]: '18:00' });
   }
-  const routine = page.getByRole('region', { name: 'Weekly routine', exact: true });
+  const routine = page.getByRole('region', { name: 'Your usual week', exact: true });
   await routine.waitFor();
   assert.match(await routine.innerText(), /Evening core/);
   await click(routine.getByRole('button', { name: 'Edit Tuesday', exact: true }));

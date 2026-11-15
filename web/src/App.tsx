@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   fetchExercises,
   fetchMe,
@@ -11,61 +11,18 @@ import {
   SignedOutError,
   type Me,
   type Reviewed,
-  type StateActivity,
   type StateResponse,
 } from './api';
 import { describeWriteError } from './editing';
 import { WorkoutsPage, type Catalog, type Write } from './WorkoutEditor';
 import { ActivityPage } from './ActivityPage';
-import { BlockPage } from './BlockPage';
+import { PlanPage } from './PlanPage';
 import { DiagnosticsPage } from './DiagnosticsPage';
 import { MembersPage } from './MembersPage';
 import { AnalysisPage, type AnalysisPageKey } from './AnalysisPage';
 import { isMethodSection, type MethodSection } from './MethodologyPage';
-import { AwayDates, DateActions, RoutineEditor } from './CalendarEditing';
-import { RouteMap } from './RouteMapView';
-import { ActivityCharts } from './ActivityChartsView';
-import { chartableActivities } from './activityCharts';
-import { routableActivityIds } from './routeMap';
-import {
-  activityLoads,
-  activitySports,
-  itemTitle,
-  itemType,
-  calendarInputs,
-  calendarStatusLabel,
-  describeGroup,
-  describeRunSteps,
-  describeSlot,
-  finishedRunOf,
-  formatClock,
-  formatLongDate,
-  formatMonth,
-  formatScheduleTime,
-  itemLoad,
-  LOAD_METHOD_LABELS,
-  localToday,
-  monthOf,
-  monthWeeks,
-  plannedExtraWorkouts,
-  plannedWorkoutOn,
-  prefersMiles,
-  projectRange,
-  scheduleTimeOn,
-  shiftMonth,
-  slotBlocks,
-  tripOn,
-  WEEKDAY_LABELS,
-  type CalendarCell,
-  type ShownLoad,
-  type Slot,
-  type Workout,
-} from './model';
-import { WEEKDAYS, type SessionRow, type TrainingProgram, type WeeklySchedule } from '../../src/types';
-import { PhoneHandoff } from './PhoneHandoff';
-import { PlanNextSteps } from './PlanNextSteps';
-import { DateWorkoutEdit } from './DateWorkoutEdit';
-import type { DateWorkoutSelection } from './dateEditState';
+import { prefersMiles } from './model';
+import type { SessionRow } from '../../src/types';
 import { editorDraftStore } from './editorDrafts';
 import { applyFeedbackReceipt } from './workoutFeedback';
 import { StateReadOrder } from './stateReadOrder';
@@ -155,27 +112,28 @@ export function App() {
 }
 
 type View =
-  | { kind: 'calendar'; scheduleWorkoutId?: string | null }
-  | { kind: 'block' }
+  | { kind: 'plan'; scheduleWorkoutId?: string | null; startBlock?: boolean }
   | { kind: 'activity'; entryKey: string | null }
   | { kind: 'analysis'; page: AnalysisPageKey; section: MethodSection | null }
   | { kind: 'workouts'; workoutId: string | null }
   | { kind: 'diagnostics' }
   | { kind: 'members' };
 
-/** `#block` opens the block designer, `#workouts` and `#workouts/<id>` the
+/** `#plan` (and the older `#calendar`) opens the Plan page,
+ * `#plan/schedule/<id>` with a workout to add to the usual week, `#block`
+ * with the form that starts a block, `#workouts` and `#workouts/<id>` the
  * workout editor, `#activity` and
  * `#activity/<entry key>` the Activity page, `#analysis` the Analysis
  * overview, `#analysis/event` its Event page and
  * `#analysis/methodology[/<section>]` its Methodology page, `#diagnostics`
  * the owner's Diagnostics page, `#members` the owner's Members page;
- * anything else the calendar. */
+ * anything else the Plan page. */
 export function viewFromHash(hash: string): View {
-  const schedule = /^#calendar\/schedule\/([^/]+)$/.exec(hash);
-  if (schedule) return { kind: 'calendar', scheduleWorkoutId: safeDecode(schedule[1]!) };
+  const schedule = /^#(?:plan|calendar)\/schedule\/([^/]+)$/.exec(hash);
+  if (schedule) return { kind: 'plan', scheduleWorkoutId: safeDecode(schedule[1]!) };
   if (hash === '#diagnostics') return { kind: 'diagnostics' };
   if (hash === '#members') return { kind: 'members' };
-  if (hash === '#block') return { kind: 'block' };
+  if (hash === '#block') return { kind: 'plan', startBlock: true };
   if (hash === '#analysis') return { kind: 'analysis', page: 'overview', section: null };
   if (hash === '#analysis/strength') return { kind: 'analysis', page: 'strength', section: null };
   if (hash === '#analysis/event') return { kind: 'analysis', page: 'event', section: null };
@@ -184,14 +142,15 @@ export function viewFromHash(hash: string): View {
   const activity = /^#activity(?:\/(.+))?$/.exec(hash);
   if (activity) return { kind: 'activity', entryKey: activity[1] ? safeDecode(activity[1]) ?? activity[1] : null };
   const match = /^#workouts(?:\/(.+))?$/.exec(hash);
-  if (!match) return { kind: 'calendar' };
+  if (!match) return { kind: 'plan' };
   return { kind: 'workouts', workoutId: match[1] ? safeDecode(match[1]) : null };
 }
 
 export function hashFor(view: View): string {
-  if (view.kind === 'calendar') return view.scheduleWorkoutId
-    ? `#calendar/schedule/${encodeURIComponent(view.scheduleWorkoutId)}` : '#calendar';
-  if (view.kind === 'block') return '#block';
+  if (view.kind === 'plan') {
+    if (view.scheduleWorkoutId) return `#plan/schedule/${encodeURIComponent(view.scheduleWorkoutId)}`;
+    return view.startBlock ? '#block' : '#plan';
+  }
   if (view.kind === 'diagnostics') return '#diagnostics';
   if (view.kind === 'members') return '#members';
   if (view.kind === 'analysis') {
@@ -272,7 +231,7 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
   // The exercise list names exercises for editing and on the Activity page,
   // so it loads with either view.
   useEffect(() => {
-    if (view.kind === 'calendar' || view.kind === 'block' || (view.kind === 'analysis' && view.page !== 'strength') || view.kind === 'diagnostics' || view.kind === 'members' || catalog) return;
+    if (view.kind === 'plan' || (view.kind === 'analysis' && view.page !== 'strength') || view.kind === 'diagnostics' || view.kind === 'members' || catalog) return;
     setCatalog({ kind: 'loading' });
     fetchExercises()
       .then((exercises) => setCatalog({ kind: 'ready', exercises }))
@@ -332,8 +291,7 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
       <header className="topbar">
         <div className="brand"><img src="/assets/app-icon.png" alt="" width={32} height={32} /><span className="wordmark">Très Fort</span></div>
         <nav className="views" aria-label="Views">
-          <a href="#calendar" aria-current={view.kind === 'calendar' ? 'page' : undefined}>Calendar</a>
-          <a href="#block" aria-current={view.kind === 'block' ? 'page' : undefined}>Block</a>
+          <a href="#plan" aria-current={view.kind === 'plan' ? 'page' : undefined}>Plan</a>
           <a href="#workouts" aria-current={view.kind === 'workouts' ? 'page' : undefined}>Workouts</a>
           <a href="#activity" aria-current={view.kind === 'activity' ? 'page' : undefined}>Activity</a>
           <a href="#analysis" aria-current={view.kind === 'analysis' ? 'page' : undefined}>Analysis</a>
@@ -373,7 +331,7 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
           version={state.plan?.version ?? 0}
           selectedId={view.workoutId}
           onSelect={(workoutId) => go({ kind: 'workouts', workoutId })}
-          onSchedule={(scheduleWorkoutId) => go({ kind: 'calendar', scheduleWorkoutId })}
+          onSchedule={(scheduleWorkoutId) => go({ kind: 'plan', scheduleWorkoutId })}
           accountId={me.id}
           planId={state.plan?.id ?? null}
           reload={reload}
@@ -386,345 +344,17 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
       ) : view.kind === 'activity' ? (
         <ActivityPage key={view.entryKey ?? ''} state={state} catalog={catalog?.kind === 'ready' ? catalog.exercises : null} initialKey={view.entryKey}
           accountId={me.id} reload={reload} onSignedOut={onSignedOut} onFeedbackSaved={onFeedbackSaved} />
-      ) : view.kind === 'block' ? (
-        <BlockPage key={`${me.id}:${state.plan?.id ?? 'none'}`} accountId={me.id} state={state} write={write} busy={busy} today={localToday()} />
       ) : view.kind === 'analysis' ? (
         <AnalysisPage state={state} page={view.page} section={view.section} write={write} busy={busy}
           catalog={catalog ?? { kind: 'loading' }} retryCatalog={() => setCatalog(null)} />
       ) : (
-        <CalendarView state={state} write={write} busy={busy} accountId={me.id} reload={reload} onSignedOut={onSignedOut}
-          scheduleWorkoutId={view.kind === 'calendar' ? view.scheduleWorkoutId : null}
-          onScheduled={() => go({ kind: 'calendar' })}
+        <PlanPage key={`${me.id}:${state.plan?.id ?? 'none'}`} state={state} write={write} busy={busy} accountId={me.id}
+          reload={reload} onSignedOut={onSignedOut}
+          scheduleWorkoutId={view.kind === 'plan' ? view.scheduleWorkoutId : null}
+          startBlock={view.kind === 'plan' && view.startBlock}
+          onScheduled={() => go({ kind: 'plan' })}
           onEditWorkout={(workoutId) => go({ kind: 'workouts', workoutId })} />
       )}
     </div>
-  );
-}
-
-export function CalendarView({ state, write, busy, onEditWorkout, scheduleWorkoutId, onScheduled, accountId, reload, onSignedOut }: {
-  state: StateResponse;
-  write: Write;
-  busy: boolean;
-  onEditWorkout: (id: string | null) => void;
-  scheduleWorkoutId?: string | null;
-  onScheduled?: () => void;
-  accountId?: string;
-  reload?: () => Promise<void>;
-  onSignedOut?: (error?: unknown) => void;
-}) {
-  const today = useMemo(() => localToday(), []);
-  const [month, setMonth] = useState(monthOf(today));
-  const [selected, setSelected] = useState(today);
-  const [editSelection, setEditSelection] = useState<DateWorkoutSelection | null>(null);
-  const miles = useMemo(() => prefersMiles(), []);
-  const plan = state.plan;
-  const inputs = useMemo(() => calendarInputs(state), [state]);
-  const weeks = useMemo(() => monthWeeks(month), [month]);
-  const cells = useMemo(() => {
-    if (!inputs) return new Map<string, CalendarCell>();
-    return projectRange(inputs, weeks[0]![0]!, weeks[weeks.length - 1]![6]!, today);
-  }, [inputs, weeks, today]);
-  const cellFor = useCallback(
-    (date: string) => cells.get(date) ?? (inputs ? projectRange(inputs, date, date, today).get(date) : undefined),
-    [cells, inputs, today],
-  );
-  const selectedCell = useMemo(() => cellFor(selected), [cellFor, selected]);
-  const workouts = useMemo(() => new Map((plan?.workouts ?? []).map((w) => [w.id, w])), [plan]);
-  const loads = useMemo(() => activityLoads(state), [state]);
-  const sports = useMemo(() => activitySports(state), [state]);
-  const routable = useMemo(() => routableActivityIds(state), [state]);
-  const chartable = useMemo(() => chartableActivities(state), [state]);
-  useEffect(() => {
-    if (scheduleWorkoutId) document.getElementById('routine-title')?.scrollIntoView({ block: 'start' });
-  }, [scheduleWorkoutId]);
-  const dateEditPanel = accountId && reload && onSignedOut ? <DateWorkoutEdit key={accountId} selection={editSelection} state={state}
-    accountId={accountId} today={today} busy={busy} reload={reload} onSignedOut={onSignedOut}
-    onEdit={onEditWorkout} onClose={() => setEditSelection(null)} /> : null;
-
-  return (
-    <>
-      {!plan ? (
-        <main className="centered">
-          <h1>Plan your week</h1>
-          {dateEditPanel}
-          <p className="muted">Create a run, a timed routine or your own workout, then choose its days and times. You can put core alongside a run and complete each separately in the iPhone app.</p>
-          <button type="button" onClick={() => onEditWorkout(null)}>Create your first workout</button>
-        </main>
-      ) : (
-        <main className="planner">
-          <section className="calendar" aria-labelledby="month-title">
-            <div className="calendar-head">
-              <h1 id="month-title">{formatMonth(month)}</h1>
-              <div className="month-nav">
-                <button type="button" onClick={() => setMonth(shiftMonth(month, -1))} aria-label="Previous month">‹</button>
-                <button type="button" onClick={() => { setMonth(monthOf(today)); setSelected(today); }}>Today</button>
-                <button type="button" onClick={() => setMonth(shiftMonth(month, 1))} aria-label="Next month">›</button>
-              </div>
-            </div>
-            <div className="grid" role="grid" aria-labelledby="month-title">
-              <div className="grid-row weekdays" role="row">
-                {WEEKDAYS.map((day) => <div key={day} role="columnheader">{WEEKDAY_LABELS[day].slice(0, 3)}</div>)}
-              </div>
-              {weeks.map((week) => (
-                <div className="grid-row" role="row" key={week[0]}>
-                  {week.map((date) => (
-                    <DayCell
-                      key={date}
-                      date={date}
-                      cell={cells.get(date)}
-                      workout={workoutFor(cells.get(date), workouts)}
-                      workouts={workouts}
-                      schedule={plan.schedule}
-                      activities={state.external_activities}
-                      inMonth={monthOf(date) === month}
-                      isToday={date === today}
-                      isSelected={date === selected}
-                      sports={sports}
-                      onSelect={() => setSelected(date)}
-                    />
-                  ))}
-                </div>
-              ))}
-            </div>
-            {inputs?.program && <p className="panel muted">Your training block sets the workouts for its dates.
-              {' '}The repeating week below applies outside that block. <a href="#block">Edit your block</a></p>}
-            <RoutineEditor schedule={plan.schedule} workouts={plan.workouts} write={write} busy={busy}
-              reviewed={{ planId: plan.id, version: plan.version }} selectedWorkoutId={scheduleWorkoutId}
-              onScheduled={onScheduled} onCancelSelection={onScheduled} />
-            <button type="button" className="ghost" disabled={busy} onClick={() => onEditWorkout(null)}>Create another workout</button>
-            <PhoneHandoff state={state} today={today} />
-            <PlanNextSteps state={state} />
-            <AwayDates trips={plan.trips ?? []} today={today} version={plan.version} write={write} busy={busy} />
-          </section>
-
-          <DayDetail
-            date={selected}
-            cell={selectedCell}
-            workout={workoutFor(selectedCell, workouts)}
-            workouts={workouts}
-            schedule={plan.schedule}
-            program={inputs?.program}
-            trip={tripOn(selected, plan.trips ?? [])}
-            miles={miles}
-            loads={loads}
-            sports={sports}
-            routable={routable}
-            chartable={chartable}
-            onEditWorkout={onEditWorkout}
-            onEditDateWorkout={accountId ? (workoutId, primary) => setEditSelection({ date: selected, workoutId, primary }) : undefined}
-            editPanel={dateEditPanel}
-            actions={(
-              <DateActions date={selected} today={today} cell={selectedCell} workout={workoutFor(selectedCell, workouts)}
-                state={state} cellFor={cellFor} write={write} busy={busy} />
-            )}
-          />
-        </main>
-      )}
-    </>
-  );
-}
-
-function workoutFor(cell: CalendarCell | undefined, workouts: Map<string, Workout>): Workout | undefined {
-  return cell?.workout_id ? workouts.get(cell.workout_id) : undefined;
-}
-
-/** A recurring reminder is planning information, never a historical start time. */
-function plannedReminderTime(schedule: WeeklySchedule, workoutId: string | null, date: string,
-  status: string | undefined): string | null {
-  return workoutId && (status === 'projected' || status === 'planned')
-    ? scheduleTimeOn(schedule, workoutId, date) : null;
-}
-
-function DayCell(props: {
-  date: string;
-  cell: CalendarCell | undefined;
-  workout: Workout | undefined;
-  workouts: Map<string, Workout>;
-  schedule: WeeklySchedule;
-  inMonth: boolean;
-  isToday: boolean;
-  isSelected: boolean;
-  activities: StateActivity[];
-  sports: Map<string, string>;
-  onSelect: () => void;
-}) {
-  const { date, cell, workout, workouts, schedule, inMonth, isToday, isSelected, activities, sports, onSelect } = props;
-  const status = cell?.status;
-  // A finished run workout is its run: show the run once, not both under one name.
-  const showWorkout = workout !== undefined && status !== 'rest' && !finishedRunOf(cell, workout, activities);
-  const classes = ['day', inMonth ? '' : 'outside', isToday ? 'today' : '', isSelected ? 'selected' : '', status ? `status-${status}` : '']
-    .filter(Boolean).join(' ');
-  const additional = cell?.sessions ?? [];
-  const extras = plannedExtraWorkouts(cell, workouts);
-  const nameAt = (name: string, id: string | null, workoutStatus: string | undefined) => {
-    const time = plannedReminderTime(schedule, id, date, workoutStatus);
-    return time ? `${name} · ${formatScheduleTime(time)}` : name;
-  };
-  const additionalNames = additional.map((session) =>
-    `${nameAt(session.kind === 'freestyle' ? 'Freestyle' : workouts.get(session.workout_id ?? '')?.name ?? 'Workout', session.workout_id, session.status)}, ${session.status.replaceAll('_', ' ')}`);
-  const label = [formatLongDate(date), calendarStatusLabel(cell),
-    ...(workout ? [nameAt(workout.name, workout.id, status)] : []), ...additionalNames,
-    ...extras.map((extra) => `${nameAt(extra.name, extra.id, 'projected')}, planned`)].join(', ');
-  return (
-    <button type="button" role="gridcell" className={classes} onClick={onSelect} aria-label={label} aria-pressed={isSelected}>
-      <span className="day-number">{Number(date.slice(8))}</span>
-      {status === 'unavailable' || status === 'light' ? <span className="chip away">Away</span> : null}
-      {workout && showWorkout ? <span className={`chip lift ${status ?? ''}`}>{nameAt(workout.name, workout.id, status)}</span> : null}
-      {additional.map((session) => (
-        <span key={session.id} className={`chip lift ${session.status}`}>
-          {nameAt(session.kind === 'freestyle' ? 'Freestyle' : workouts.get(session.workout_id ?? '')?.name ?? 'Workout', session.workout_id, session.status)}
-        </span>
-      ))}
-      {extras.map((extra) => (
-        <span key={`planned:${extra.id}`} className="chip lift projected">{nameAt(extra.name, extra.id, 'projected')}</span>
-      ))}
-      {cell?.items.map((item) => (
-        <span key={item.id} className={`chip endurance ${item.completed ? 'completed' : ''}`}>
-          {itemTitle(item, sports)}
-        </span>
-      ))}
-    </button>
-  );
-}
-
-function DayDetail(props: {
-  date: string;
-  cell: CalendarCell | undefined;
-  workout: Workout | undefined;
-  workouts: Map<string, Workout>;
-  schedule: WeeklySchedule;
-  program: TrainingProgram | null | undefined;
-  trip: ReturnType<typeof tripOn>;
-  miles: boolean;
-  loads: Map<string, ShownLoad | null>;
-  sports: Map<string, string>;
-  /** Completed activities that may have a route. */
-  routable: Set<string>;
-  chartable: Map<string, string>;
-  onEditWorkout: (id: string) => void;
-  onEditDateWorkout?: (id: string, primary: boolean) => void;
-  editPanel?: ReactNode;
-  actions: ReactNode;
-}) {
-  const { date, cell, workout, workouts, schedule, program, trip, miles, loads, sports, routable, chartable, onEditWorkout, onEditDateWorkout, editPanel, actions } = props;
-  const extras = plannedExtraWorkouts(cell, workouts);
-  return (
-    <aside className="detail" aria-labelledby="detail-title">
-      <h2 id="detail-title">{formatLongDate(date)}</h2>
-      <p className="status-line">{calendarStatusLabel(cell)}</p>
-      {editPanel}
-      {actions}
-      {trip && (
-        <div className="note">
-          <strong>Away</strong> {trip.start} to {trip.end}
-          {trip.can_train_light ? ', light training possible' : ''}
-          {trip.note ? <p className="muted">{trip.note}</p> : null}
-        </div>
-      )}
-      {workout && cell?.status !== 'rest' && cell?.status !== 'unavailable' && (
-        <CalendarWorkoutDetails workout={plannedWorkoutOn(workout, program, date, cell?.status ?? '')}
-          time={plannedReminderTime(schedule, workout.id, date, cell?.status)} miles={miles}
-          onEditWorkout={id => onEditDateWorkout ? onEditDateWorkout(id, true) : onEditWorkout(id)} />
-      )}
-      {cell?.sessions?.map((session) => {
-        const additional = session.kind === 'freestyle' ? undefined : workouts.get(session.workout_id ?? '');
-        const status = `Workout ${(session.slot ?? 0) + 1} · ${session.status.replaceAll('_', ' ')}`;
-        return additional ? (
-          <CalendarWorkoutDetails key={session.id} workout={plannedWorkoutOn(additional, program, date, session.status)}
-            status={status} time={plannedReminderTime(schedule, additional.id, date, session.status)} miles={miles}
-            onEditWorkout={id => onEditDateWorkout ? onEditDateWorkout(id, false) : onEditWorkout(id)} />
-        ) : (
-          <section key={session.id}>
-            <h3>{session.kind === 'freestyle' ? 'Freestyle' : 'Workout'}</h3>
-            <p className="muted">{status}</p>
-          </section>
-        );
-      })}
-      {extras.map((extra) => (
-        <CalendarWorkoutDetails key={`planned:${extra.id}`} workout={plannedWorkoutOn(extra, program, date, 'projected')}
-          status="Planned" time={scheduleTimeOn(schedule, extra.id, date)} miles={miles}
-          onEditWorkout={id => onEditDateWorkout ? onEditDateWorkout(id, false) : onEditWorkout(id)} />
-      ))}
-      {cell?.items.length ? (
-        <section>
-          <h3>Endurance</h3>
-          <ul className="slots">
-            {cell.items.map((item) => {
-              const load = itemLoad(item, loads);
-              const method = load?.method ? LOAD_METHOD_LABELS[load.method] : undefined;
-              const title = itemTitle(item, sports);
-              return (
-                <li key={item.id}>
-                  <div className="slot-name">{title}</div>
-                  <div className="muted">
-                    {itemType(item, sports)} · {item.completed ? 'Done' : 'Planned'}
-                    {item.planned_duration_sec ? ` · ${formatClock(item.planned_duration_sec)}` : ''}
-                    {load ? ` · load ${Math.round(load.load)}${method ? ` (${method})` : ''}` : ''}
-                  </div>
-                  {item.completed && routable.has(item.id) ? <RouteMap activityId={item.id} label={`Route of ${title}`} miles={miles} /> : null}
-                  {item.completed && chartable.has(item.id)
-                    ? <ActivityCharts activityId={item.id} kind={chartable.get(item.id)!} miles={miles} />
-                    : null}
-                </li>
-              );
-            })}
-          </ul>
-        </section>
-      ) : null}
-      {!workout && !extras.length && !cell?.sessions?.length && !cell?.items.length && !trip ? <p className="muted">A rest day.</p> : null}
-    </aside>
-  );
-}
-
-function CalendarWorkoutDetails({ workout, time, status, miles, onEditWorkout }: {
-  workout: Workout;
-  time: string | null;
-  status?: string;
-  miles: boolean;
-  onEditWorkout: (id: string) => void;
-}) {
-  return (
-    <section aria-label={workout.name}>
-      <div className="section-head">
-        <h3>{workout.name}</h3>
-        <button type="button" className="ghost small" aria-label={`Edit ${workout.name}`}
-          onClick={() => onEditWorkout(workout.id)}>Edit workout</button>
-      </div>
-      {time || status ? <p className="muted">{time ? <time dateTime={time}>{formatScheduleTime(time)}</time> : null}{time && status ? ' · ' : ''}{status}</p> : null}
-      {workout.notes ? <p className="muted">{workout.notes}</p> : null}
-      <ol className="slots">
-        {slotBlocks(workout).map((block) => block.group ? (
-          <li key={block.members[0]!.id} className="group-block">
-            <div className="group-head">
-              <strong>{block.group.title}</strong>
-              <span className="muted">{describeGroup(block.group)}</span>
-            </div>
-            <ol className="slots">
-              {block.members.map((slot) => <SlotItem key={slot.id} slot={slot} miles={miles} />)}
-            </ol>
-          </li>
-        ) : (
-          <SlotItem key={block.members[0]!.id} slot={block.members[0]!} miles={miles} />
-        ))}
-      </ol>
-    </section>
-  );
-}
-
-function SlotItem({ slot, miles }: { slot: Slot; miles: boolean }) {
-  const steps = describeRunSteps(slot.run_steps, miles);
-  return (
-    <li className={slot.is_warmup ? 'warmup' : ''}>
-      <div className="slot-name">
-        {slot.group_label ? <span className="group">{slot.group_label}</span> : null}
-        {slot.exercise_name}
-        {slot.is_warmup ? <span className="tag">Warm-up</span> : null}
-      </div>
-      {steps.length ? (
-        <ul className="steps">{steps.map((line, i) => <li key={i}>{line}</li>)}</ul>
-      ) : (
-        <div className="muted">{describeSlot(slot)}</div>
-      )}
-    </li>
   );
 }
