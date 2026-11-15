@@ -111,7 +111,7 @@ No provider API credentials are stored or forwarded by Très Fort.
 ### Meta AI (Muse), connected by the member
 
 Verified on the owner's account on 2026-10-06, against the production Worker
-before [PR #239](https://github.com/namarks/tres-fort/pull/239) was released:
+before PR #239 of the original, private repository was released:
 Muse in Meta AI read the coaching brief and made a plan change that appeared in
 the iOS plan history. The route therefore does not depend on that release.
 

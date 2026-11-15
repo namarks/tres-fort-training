@@ -57,7 +57,7 @@ npm run testflight:external -- --build 82 --group Friends # only the named group
 
 ```bash
 npm run beta:feedback:list                          # read-only, last 14 days
-npm run beta:feedback:list -- --days 3 --tester geoff
+npm run beta:feedback:list -- --days 3 --tester sam
 npm run beta:feedback:list -- --all --json
 npm run beta:feedback:list -- --save                # also keep local copies
 ```

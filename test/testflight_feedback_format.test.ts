@@ -37,7 +37,7 @@ const sub = {
   },
 };
 const builds = new Map([['b1', { version: '82' }]]);
-const testers = new Map([['t1', { firstName: 'Geoff', lastName: 'Tester' }]]);
+const testers = new Map([['t1', { firstName: 'Sam', lastName: 'Tester' }]]);
 
 describe('TestFlight feedback formatting', () => {
   it('flattens a submission with its build and tester', () => {
@@ -46,7 +46,7 @@ describe('TestFlight feedback formatting', () => {
       id: '1a2b3c4d-5e6f-7a8b',
       kind: 'screenshot',
       build: '82',
-      tester: 'Geoff Tester',
+      tester: 'Sam Tester',
       deviceModel: 'iPhone16,2',
       osVersion: '26.1',
       comment: 'Activities list is out of order\nafter the Health import',
@@ -58,8 +58,8 @@ describe('TestFlight feedback formatting', () => {
   });
 
   it('falls back to the tester email, then the submission email', () => {
-    const t = new Map([['t1', { email: 'geoff@example.com' }]]);
-    expect(summarizeSubmission('crash', sub, builds, t).tester).toBe('geoff@example.com');
+    const t = new Map([['t1', { email: 'sam@example.com' }]]);
+    expect(summarizeSubmission('crash', sub, builds, t).tester).toBe('sam@example.com');
     expect(summarizeSubmission('crash', sub, new Map(), new Map()).tester).toBe('tester@example.com');
     expect(summarizeSubmission('crash', { id: 'x' }, new Map(), new Map())).toMatchObject({
       tester: null,
@@ -92,12 +92,12 @@ describe('TestFlight feedback formatting', () => {
   it('renders a terminal line and a markdown file', () => {
     const s = summarizeSubmission('screenshot', sub, builds, testers);
     expect(summaryLine(s)).toBe(
-      '2026-11-13 22:41  [screenshot] Geoff Tester — build 82 · iPhone16,2 · iOS 26.1 · 2 screenshot(s)\n' +
+      '2026-11-13 22:41  [screenshot] Sam Tester — build 82 · iPhone16,2 · iOS 26.1 · 2 screenshot(s)\n' +
         '    Activities list is out of order after the Health import',
     );
     const md = feedbackMarkdown(s, ['screenshot-1.jpg']);
     expect(md).toContain('> Activities list is out of order\n> after the Health import');
-    expect(md).toContain('| Tester | Geoff Tester |');
+    expect(md).toContain('| Tester | Sam Tester |');
     expect(md).toContain('| State | 81% battery · 42s uptime · WIFI |');
     expect(md).toContain('- [screenshot-1.jpg](screenshot-1.jpg)');
   });

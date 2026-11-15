@@ -9,7 +9,7 @@
 //
 // Usage:
 //   node scripts/testflight-feedback.mjs                  # last 14 days
-//   node scripts/testflight-feedback.mjs --days 3 --tester geoff
+//   node scripts/testflight-feedback.mjs --days 3 --tester sam
 //   node scripts/testflight-feedback.mjs --all --json
 //   node scripts/testflight-feedback.mjs --save           # ~/Downloads/testflight-feedback
 //   node scripts/testflight-feedback.mjs --save /some/dir

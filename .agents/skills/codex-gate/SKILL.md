@@ -1,6 +1,6 @@
 ---
 name: codex-gate
-description: "Drive a Tres Fort pull request to ready-to-merge: confirm Codex reviewed the exact head commit with no open findings (re-requesting review after every fix push), require plan graph, typecheck + tests and iOS build + tests green on that head, then report ready to merge. Never merges and never deploys; Nick merges. Use when opening, babysitting or fixing a Tres Fort PR, or when asked to run the Codex gate for a PR number."
+description: "Drive a Tres Fort pull request to ready-to-merge: confirm Codex reviewed the exact head commit with no open findings (re-requesting review after every fix push), require contributor rights, plan graph, typecheck + tests and iOS build + tests green on that head, then report ready to merge. Never merges and never deploys; Nick merges. Use when opening, babysitting or fixing a Tres Fort PR, or when asked to run the Codex gate for a PR number."
 ---
 
 # Codex gate for Tres Fort
