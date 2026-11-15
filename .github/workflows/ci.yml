@@ -142,8 +142,9 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
-      # Device-job test lists live in .github/ios-tests/; editing one, or
-      # ci.yml, runs the full release check on that PR.
+      # Setup and selection-policy edits use targeted contract tests plus
+      # smoke. Native verifier, device-job list and packaging changes retain
+      # full verification, as do nightly and manual release checks.
       - name: Install pinned XcodeGen
         shell: bash
         env:
@@ -263,6 +264,8 @@ jobs:
           python3 test/verify-ios.test.py
           python3 -B -O test/app-store-assets.test.py
           python3 -B test/ci-ios-scope.test.py
+          python3 -B test/ci-ios-setup.test.py
+          node --test test/ci-ios-workflow.test.mjs
           node --test test/contributor-rights.test.mjs
           python3 -B test/release-assets.test.py
           python3 -B test/stop-ios-verification.test.py

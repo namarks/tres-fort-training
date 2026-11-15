@@ -206,9 +206,9 @@ unchanged.
 Contributors retain their copyright and grant Nicholas Marks rights to use,
 commercialize and relicense accepted work under the [contributor
 terms](CONTRIBUTOR-TERMS.md), including transfer of those rights to a future
-company. Follow the [private acceptance process](docs/CONTRIBUTOR-ACCEPTANCE.md)
-before the first contribution is merged. A pull-request checkbox is not an
-agreement.
+company. Accept them once with a pull-request comment, as described in
+[contributor acceptance](docs/CONTRIBUTOR-ACCEPTANCE.md), before your first
+contribution is merged. A pull-request checkbox is not an agreement.
 
 Third-party components retain their own licenses. The [third-party
 notices](THIRD_PARTY_NOTICES.md) identify the CC BY-SA exercise drawings,

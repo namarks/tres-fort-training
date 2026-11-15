@@ -11,14 +11,21 @@ def select_suite(event, paths=()):
     if event not in ('pull_request', 'push'):
         raise ValueError('Unsupported CI event: ' + event)
 
-    # Changes to the selection/partition machinery must prove full coverage on
-    # the PR itself; a passing smoke run cannot validate the nightly job budget.
-    # Smoke is one iPhone job, so an edit to a device job's test list
-    # (.github/ios-tests/) also runs full: otherwise nothing would run it.
+    # The listed native-verifier, partition and packaging files exercise the
+    # full matrix. Workflow/setup and selection-policy changes use targeted
+    # contract tests plus smoke. The semantic contract pins the full matrix
+    # and device commands; independent review covers intentional policy edits.
+    # Do not infer coverage from changed lines.
     verification_paths = {
-        '.github/workflows/ci.yml', 'scripts/verify-ios.sh',
-        'scripts/ci-ios-scope.py', 'test/verify-ios.test.py',
-        'test/ci-ios-scope.test.py',
+        'scripts/verify-ios.sh', 'scripts/ios_sources.py',
+        'test/verify-ios.test.py',
+        'test/app-store-packaging.test.py',
+        'ios/project.yml', 'ios/project-app-store.yml',
+        'ios/Dependencies/verify_app_store_project.py',
+        'ios/Dependencies/prepare_simulator_plist.py',
+        'ios/TresFort/Info.plist', 'ios/TresFort/TresFort.entitlements',
+        'ios/TresFortWidgets/Info.plist',
+        'ios/TresFortWidgets/TresFortWidgets.entitlements',
     }
     if any(path in verification_paths or path.startswith('.github/ios-tests/')
            for path in paths):

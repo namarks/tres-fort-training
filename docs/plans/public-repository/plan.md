@@ -50,15 +50,21 @@ remain separate decisions.
     read-only default tokens, enforced action SHA pinning and an exact four-action
     allowlist. Only the owner has write access; no self-hosted runners or secrets.
   - [ ] **(b) Verify the published candidate on hosted CI**
-  - The [first full hosted CI run](https://github.com/namarks/tres-fort-training/actions/runs/43749782936)
-    on the published commit hit HTTP 403 while downloading pinned XcodeGen on
-    two hosted runners, before compilation. The authenticated download fix passed
-    on the next run, which exposed full UI shards still progressing at the
-    40-minute limit. This branch allows 90 minutes for full jobs while retaining
-    the 30-minute smoke limit. Complete exact-head CI before merging, then qualify
-    published main.
-    Require every expected shard, including the full UI, Station and App Store
-    simulator jobs. Publication or a passing smoke job does not authorize release.
+  - Hosted CI fixes landed in [PR #1](https://github.com/namarks/tres-fort-training/pull/1):
+    authenticated XcodeGen downloads and full-job limits raised from 40 to 90 minutes, retaining
+    the 30-minute smoke limit. Its [full CI run](https://github.com/namarks/tres-fort-training/actions/runs/43755367763)
+    passed all nine iOS jobs and backend checks on `90d66ece`; three UI cases
+    passed on their configured retries. It merged as `825487fc`, whose tree
+    exactly matches the reviewed and tested head.
+  - The duplicate [post-merge full run](https://github.com/namarks/tres-fort-training/actions/runs/43767779475)
+    was stopped to prioritize the targeted policy follow-up. Full release
+    qualification of published main remains pending: require every UI, Station
+    and App Store simulator job on the exact release commit through nightly or
+    manual CI. Publication or a passing smoke job does not authorize release.
+  - Qualify the narrower CI policy with affected deterministic checks and one
+    iPhone build/unit-test job. Workflow setup, selector and contract-test edits
+    use that path; native verifier, device-list and packaging changes retain
+    full verification. Changes to native workflow execution require a manual full run.
 - [ ] **P3 — Complete the development transition**
   - Verify clean-clone backend and simulator onboarding and an ordinary fork PR.
   - Verify owner release automation, licensed artwork supply and private feedback
@@ -78,17 +84,19 @@ remain separate decisions.
 
 ## Next step
 
-**Now (@agent):** finish the hosted-CI setup fix and publication documentation
-through the normal exact-head PR gates; diagnose failures and record the outcome.
-Do not bypass protected main. After the PR merges, qualify published main and
-verify contributor onboarding and owner automation for P3.
+**Now (@agent):** finish the narrower verification policy through its targeted
+checks and normal exact-head PR gates. Then qualify published main with the
+nightly or manual full run and verify contributor onboarding and owner automation
+for P3. Do not bypass protected main or treat smoke coverage as release qualification.
 
 ## Notes / open questions
 
 - The original repository remains private, active and unarchived. No further old
   history rewrite or deletion is needed for this clean-snapshot route.
-- Contributor acceptance records stay private. The rights check records hashes
-  and metadata and is a maintainer attestation, not automatic legal verification.
+- Contributor terms 1.1 (2026-11-15, owner's choice): outside contributors
+  accept once with a pull-request comment; branches in this repository pass as
+  the owner's own work; the owner can still approve or revoke one PR head by
+  hand. The check records acceptance, not legal verification of authority.
 - Contributors use forks. Keep repository write access owner-only: an Actions
   source-pinned status does not distinguish privileged workflows created by
   another same-repository writer.

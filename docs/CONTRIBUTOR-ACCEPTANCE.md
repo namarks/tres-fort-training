@@ -3,140 +3,75 @@
 The [source license](../LICENSE) permits evaluation and contribution work.
 The [contributor terms](../CONTRIBUTOR-TERMS.md) separately grant the rights
 needed to include a contribution in the official project. Contributors keep
-their copyright. The terms are accepted privately, and the maintainer records
-coverage for each pull request before merging it.
+their copyright. The required `contributor rights` check on each pull request
+shows whether everyone who wrote the work has accepted those terms.
 
 ## For contributors
 
-1. Read the complete contributor terms before submitting work. Confirm that
-   you can grant the stated rights, including any necessary employer or other
-   rights-holder permission. Identify third-party material and relevant
-   restrictions, including material AI-generated content.
-2. Contact **nick@tresfort.app** to arrange private acceptance. Include your
-   GitHub username and the pull-request URL or proposed contribution. Do not
-   send identity documents unless a specific need and secure channel have
-   been agreed. Do not post signatures, legal contact details or employer
-   authorizations in a public issue or pull request.
-3. The maintainer supplies an immutable copy of the agreement, its version and
-   SHA-256 hash, and a private signing or affirmative-acceptance process that
-   verifies your identity and binds it to your GitHub account. An ordinary
-   unverified email is not sufficient identity verification.
-4. Accept that exact text and identify the work covered. Acceptance also
-   expressly covers your intentional future contributions under the same
-   agreement version. A changed agreement requires a new acceptance.
+1. Read the complete [contributor terms](../CONTRIBUTOR-TERMS.md). Confirm
+   that you can grant the stated rights, including any necessary employer or
+   other rights-holder permission.
+2. Open your pull request. In its description, identify third-party material
+   and relevant restrictions, including material AI-generated content.
+3. Post this exact sentence, on a line of its own, as a comment on the pull
+   request from the GitHub account that authored the commits, using the version number at the top of
+   the terms on `main`:
 
-Contacting the maintainer, opening a PR, checking a template box, or passing CI
-does not constitute acceptance. You may prepare a PR while acceptance is
-being arranged, but the contribution cannot merge until the required record
-and rights review are complete.
+   > I accept the Très Fort Contributor Terms version 1.1.
 
-## Private acceptance record
+   To accept on behalf of an employer or other entity, add a line naming it
+   in the same comment. A quoted sentence or one inside other text does not
+   count.
+4. The `contributor rights` check updates within a minute. One acceptance
+   covers all your pull requests open at that moment and your later ones under
+   the same terms version, so you comment once, not on every pull request.
 
-The maintainer preserves the following outside this public repository and
-outside Actions logs or artifacts, with access limited to agreement
-administrators and authorized legal successors:
+Each co-author needs to post the same comment. Opening a pull request,
+checking a template box or passing CI is not acceptance. Do not post
+signatures, legal contact details or employer authorizations publicly; if
+something needs to stay private, email **nick@tresfort.app**.
 
-- The accepted agreement version, exact file bytes and SHA-256 hash, plus the
-  immutable repository commit from which the text was taken.
-- The contributor's verified legal identity; GitHub login and stable numeric
-  account ID; represented entity and authority, if applicable; and the method
-  used to authenticate and link those identities.
-- The affirmative acceptance statement, timestamp and signed record or other
-  evidence of acceptance.
-- The initial contribution identifiers: repository, PR and relevant commits.
-  Identify earlier work explicitly if the acceptance is intended to cover it.
-- Any necessary employer or other rights-holder authorization, and third-party
-  provenance, licenses and notices reviewed for the contribution.
+## What the check does
 
-Use a frozen copy of `CONTRIBUTOR-TERMS.md` from official `main`, not an editable
-link or a PR's proposed replacement. Hash the exact UTF-8 file bytes, including
-line endings. On macOS, the maintainer can compute the digest with:
+The [`Contributor rights` workflow](../.github/workflows/contributor-rights.yml)
+runs from `main` when a pull request opens or changes, when someone comments
+on a pull request, when `main` moves, and on the owner's manual run. It never
+checks out or runs pull-request code. Each run re-checks every open pull
+request and sets the status on its current head commit:
 
-```bash
-shasum -a 256 CONTRIBUTOR-TERMS.md
-```
+| Situation | Status |
+| --- | --- |
+| Branch in this repository (only the owner and maintainers can push there) | Passes: the owner's own work. |
+| Fork, and every author has posted the acceptance sentence for the current terms version | Passes. |
+| Fork, and someone has not accepted yet | Pending, naming who still needs to. |
+| An author GitHub can't link to an account, a bot author, a co-author named only by a plain email address, or more than 250 commits | Pending until the owner reviews it. |
 
-The following statement is a template for the **private** acceptance record;
-the filled statement is not posted in the repository:
+Authors are the pull request's author, each commit's GitHub author and each
+`Co-authored-by` trailer that uses a GitHub `noreply` address. The acceptance
+sentence is matched ignoring case, accents and spacing, and
+only comments by people (not bots) on this repository's pull requests count.
+Changing the terms' version number makes everyone accept again.
 
-> I accept Très Fort Contributor Terms version [version], SHA-256 [digest],
-> whose complete text is attached to this record. I accept in my own capacity
-> [or as an authorized representative of the named rights-holder]. This
-> acceptance covers [identified contribution] and my intentional future
-> Contributions under that same accepted version. I confirm the authority
-> and disclosures required by those terms.
+## Owner decisions
 
-The process must retain the complete accepted text and identity verification,
-not just this statement or a hash. If authority or ownership is uncertain,
-resolve it privately before treating the grant as effective.
-
-## Review every final PR head
-
-Before each merge, the maintainer creates a private review receipt containing:
-
-- Repository and PR identity, exact final head SHA, current agreement version
-  and hash, review timestamp and reviewer identity.
-- Every author, coauthor and relevant rights-holder, with the acceptance or
-  other permission covering their contribution. Review actual contribution
-  provenance; Git author fields, account names and coauthor trailers alone
-  are not proof of identity, authorship or authority.
-- Third-party material, its applicable license and required notices, and the
-  decision that inclusion and intended distribution are permitted.
-- Any needed employer permission, exclusions or separately negotiated grants.
-
-Existing acceptance may cover later intentional work under the same text,
-but newly added people or rights-holders need their own coverage. A changed
-head requires renewed review even when the author list appears unchanged.
-Changes to the agreement text require fresh acceptance under the new version;
-do not silently reuse a version number for different text.
-
-For work Nicholas Marks owns, record that authorship and provenance instead
-of asking him to license his own work to himself. That does not establish
-rights in coauthored, employer-owned, third-party or AI-assisted material.
-The initial repository snapshot requires the same existing-rights inventory;
-a fresh Git history does not change who owns the underlying work.
-
-## Public coverage status
-
-The required `contributor rights` status records the maintainer's review for
-the exact PR head. Only the status and minimal verification metadata are public;
-the private record, identities, contact details, signatures and permissions
-are never uploaded to a workflow or included in its inputs.
-
-After completing the private review, the owner runs the
-[`Contributor rights` workflow](../.github/workflows/contributor-rights.yml)
-on `main` with these inputs:
+For a pull request the check can't settle on its own, or to withdraw a
+passing status, the owner runs the workflow manually on `main`:
 
 | Input | Value |
 | --- | --- |
-| `pr_number` | The reviewed pull-request number. |
+| `pr_number` | The pull-request number. |
 | `head_sha` | Its exact current head commit, all 40 hexadecimal characters. |
-| `terms_sha256` | The SHA-256 digest of the agreement on official `main`. |
-| `receipt_sha256` | The SHA-256 digest of the complete private review receipt. |
-| `decision` | `approve` to record completed review; `revoke` to withdraw it. |
-| `confirmation` | Confirm that every author, coauthor and relevant rights-holder at this head is covered before approving. |
+| `decision` | `approve` to pass this head; `revoke` to block it. |
+| `confirmation` | Confirm that every author, co-author and relevant rights-holder at this head is covered. |
 
-Retain the receipt itself privately; hashing does not substitute for preserving
-the evidence. Do not put its contents, a private storage URL or contact details
-into workflow inputs. Only the owner can dispatch a decision. The workflow
-verifies PR identity, current head and the official agreement digest. It never
-runs the contributor's code with permission to issue this status.
+Only the owner can run it, and only for the pull request's current head. The
+decision sticks to that head and terms version: a new push or a new terms
+version returns the pull request to the automatic check. Keep any private
+evidence behind an approval out of the workflow inputs.
 
-Every rights-workflow run first resets coverage for **all open PR heads** to
-pending, then an owner approval may clear its one reviewed PR. This conservative
-rule prevents a queued or older run from restoring stale coverage. Activity on
-another PR, changed terms, or a failed approval attempt can therefore clear an
-earlier approval. Approve the PR intended for immediate merge, wait for the
-workflow to finish, then verify its current head, current terms and status
-before merging. Open PRs sharing the same head must be resolved before approval
-because GitHub commit statuses attach to the commit, not a unique PR.
-
-A successful status is an attestation that the private review was completed.
-The workflow does not independently verify signatures, employer authority or
-ownership and must not be used to bypass missing records. A head or agreement
-change requires review again. Confirm the approved head is still current
-immediately before merging, together with the other required review and CI
-checks. A skipped or incomplete workflow does not provide approval.
+Before merging, the owner still reviews the final head for third-party
+material and provenance, as the terms require. A passing status records
+acceptance; it does not verify employer authority or ownership.
 
 GitHub documents [required status checks](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches#require-status-checks-before-merging)
 and [commit statuses](https://docs.github.com/en/rest/commits/statuses).

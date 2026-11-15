@@ -12,6 +12,8 @@ Describe the checks run and anything that remains unverified.
 
 Use the private channels in [SECURITY.md](https://github.com/namarks/tres-fort-training/blob/main/SECURITY.md) for sensitive reports.
 Contributions require the [contributor terms](https://github.com/namarks/tres-fort-training/blob/main/CONTRIBUTOR-TERMS.md)
-and [private acceptance process](https://github.com/namarks/tres-fort-training/blob/main/docs/CONTRIBUTOR-ACCEPTANCE.md).
+First-time contributors accept them by commenting "I accept the Très Fort
+Contributor Terms version 1.1." on this pull request (see
+[contributor acceptance](https://github.com/namarks/tres-fort-training/blob/main/docs/CONTRIBUTOR-ACCEPTANCE.md)).
 This template does not itself grant rights or replace that agreement. Keep
 signatures, contact details and employer permissions out of the public PR.
