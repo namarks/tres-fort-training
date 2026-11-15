@@ -201,7 +201,9 @@ export function marker(mapkit: MapKitApi, at: LatLon, kind: 'start' | 'finish' |
     dot.setAttribute('aria-label', label);
     return dot;
   }, {
-    anchorOffset: new DOMPoint(0, size / 2),
+    // MapKit anchors an annotation at its bottom center; a negative half
+    // height moves the anchor to the middle, centering the dot on the point.
+    anchorOffset: new DOMPoint(0, -size / 2),
     enabled: false,
     animates: false,
     calloutEnabled: false,
