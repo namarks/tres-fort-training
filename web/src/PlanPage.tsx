@@ -302,8 +302,14 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
         ) : dateEditPanel}
         actions={(
           <>
-            <DateActions date={selected} today={today} cell={selectedCell} workout={workoutFor(selectedCell, workouts)}
-              state={state} cellFor={cellFor} write={write} busy={busy} />
+            {blockDirty ? (
+              // Date changes are checked against the saved block, so they
+              // wait until the block's unsaved changes are saved or discarded.
+              <p className="fine muted">Save or discard your block changes to change this date on its own.</p>
+            ) : (
+              <DateActions date={selected} today={today} cell={selectedCell} workout={workoutFor(selectedCell, workouts)}
+                state={state} cellFor={cellFor} write={write} busy={busy} />
+            )}
             {active && selectedWeek != null
               ? <BlockDayEditor key={`${selected}`} block={active} date={selected} index={selectedWeek} live={live} busy={busy} />
               : <UsualDay date={selected} schedule={plan.schedule} workouts={workouts} busy={busy} onEdit={editUsualDay} />}
@@ -425,7 +431,7 @@ function BlockDayEditor({ block, date, index, live, busy }: {
             </button>
           ))}
         </div>
-        <p className="fine muted">For this date only, use the date’s options above.</p>
+        <p className="fine muted">To change only this date, use the date’s options above.</p>
       </section>
     );
   }
