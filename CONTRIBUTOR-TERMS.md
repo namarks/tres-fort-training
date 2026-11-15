@@ -1,10 +1,16 @@
 # Très Fort Contributor Terms
 
-Version 1.0 · 2026-11-15
+Version 1.1 · 2026-11-15
 
-Acceptance uses the [private recorded process](docs/CONTRIBUTOR-ACCEPTANCE.md).
-Reading these terms, opening a pull request, or checking a pull-request template
-box does not itself constitute acceptance or grant rights under these terms.
+You accept these terms by posting this exact sentence as a comment on a
+Project pull request, from your own GitHub account:
+
+> I accept the Très Fort Contributor Terms version 1.1.
+
+See [contributor acceptance](docs/CONTRIBUTOR-ACCEPTANCE.md) for how that comment
+is checked. Reading these terms, opening a pull request, or checking a
+pull-request template box does not itself constitute acceptance or grant rights
+under these terms.
 
 ## Parties and scope
 
@@ -113,28 +119,30 @@ applicable law does not permit excluding.
 
 ## Acceptance and merge records
 
-Before relying on these grants, obtain affirmative acceptance of the operative
-text through a recorded process tied to the contributor's authenticated identity.
-Keep the agreement version, exact text and its hash, acceptance timestamp,
-identity and represented entity if any, explicit acceptance statement, initial
-Contribution identifiers, and any employer or rights-holder authorization.
-The statement must expressly cover intentional future Contributions under that
-version. A pull-request template checkbox alone is not that acceptance process.
+Acceptance is the comment above, posted by the authenticated GitHub account
+that authored the work. It covers that account's Contributions to the pull
+request it is posted on and its intentional future Contributions under the same
+version. If you accept on behalf of an entity, say so in the same comment and
+name the entity. GitHub keeps the comment, its author account and its timestamp
+as the acceptance record; the agreement text for each version is the
+`CONTRIBUTOR-TERMS.md` file on the Project's `main` branch carrying that version
+number.
 
-Before each merge, owner review must record the final pull-request head commit
-and verify coverage for every contributing author and relevant rights-holder,
-including newly added coauthors and third-party material. Recheck after head
-changes; existing acceptance can cover later intentional work under the same
-version, but does not cover a new contributor or undisclosed rights-holder.
-Block merging until every required acceptance, permission and provenance review
-is recorded. Verify that the head being merged is the head covered by that review.
+Every author and co-author of a pull request needs their own acceptance.
+Work that Nicholas Marks commits to the Project's own repository branches is
+his own and needs no acceptance from him.
 
-Agreement changes require fresh affirmative acceptance before merging work under
-the changed version. They do not retroactively amend existing grants or remove
-contributor protections. Preserve earlier text and records; do not treat a
-posted update, silence or continued repository access as acceptance.
+Before each merge, owner review checks the final pull-request head for new
+contributors, third-party material and unresolved provenance questions. Block
+merging until those are resolved.
 
-Keep identity, contact, authorization and acceptance records private with access
-limited to those administering the agreements and authorized legal successors.
-Expose only the minimum public coverage status needed for review. Existing
-contributions require their own rights inventory and any missing grants.
+Agreement changes require fresh acceptance under the new version before merging
+work under it. They do not retroactively amend existing grants or remove
+contributor protections. Do not treat a posted update, silence or continued
+repository access as acceptance. A changed text always carries a new version
+number.
+
+Keep any identity, contact or authorization details beyond the public comment
+private, limited to those administering the agreements and authorized legal
+successors. Existing contributions require their own rights inventory and any
+missing grants.

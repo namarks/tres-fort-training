@@ -74,9 +74,10 @@ Private review evidence and the proposed provider question stay with the maintai
 
 ## Notes / open questions
 
-- Contributor acceptance records contain identity and signature evidence and stay
-  private. The rights check records only hashes and repository metadata; it is
-  a maintainer attestation, not automatic legal verification.
+- Contributor terms 1.1 (2026-11-15, owner's choice): outside contributors
+  accept once with a pull-request comment; branches in this repository pass as
+  the owner's own work; the owner can still approve or revoke one PR head by
+  hand. The check records acceptance, not legal verification of authority.
 - Public contributors use forks. Keep repository write access owner-only: a
   GitHub Actions source-pinned status does not distinguish privileged workflows
   created by another same-repository writer.
