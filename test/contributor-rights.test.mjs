@@ -40,7 +40,7 @@ function fixture(options = {}) {
     if (method === 'POST') { writes.push({path, body}); return {}; }
     reads.push(path);
     if (path === '/branches/main') return {commit: {sha: options.main ?? MAIN}};
-    if (path === `/contents/CONTRIBUTOR-TERMS.md?ref=${MAIN}`) return {
+    if (path === `/contents/CONTRIBUTOR-TERMS.md?ref=${options.main ?? MAIN}`) return {
       type: 'file', encoding: 'base64', size: TERMS.length,
       content: Buffer.from(options.terms ?? TERMS).toString('base64'),
     };
@@ -190,6 +190,13 @@ test('the owner can approve or revoke one exact head, and it sticks for that ter
   const after = fixture({comments: [ACCEPT], statuses: {[HEAD]: [{context: CONTEXT, ...revoked}]}});
   await after.run();
   assert.deepEqual(after.states(), [[HEAD, 'failure']]);
+});
+
+test('a re-run from an older main decides under the current terms', async () => {
+  const f = fixture({comments: [ACCEPT], terms: TERMS.replace('1.1', '1.2')});
+  await f.run({GITHUB_SHA: 'd'.repeat(40)});
+  assert.deepEqual(f.states(), [[HEAD, 'pending']]);
+  assert.ok(f.reads.includes(`/contents/CONTRIBUTOR-TERMS.md?ref=${MAIN}`));
 });
 
 test('an acceptance posted on an ordinary issue does not count', async () => {

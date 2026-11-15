@@ -200,7 +200,11 @@ export async function execute({env, event, api}) {
   const status = (sha, {state, description, target}) => api('POST', `/statuses/${sha}`, {
     state, context: CONTEXT, description, target_url: target ?? runURL,
   });
-  const version = await readTerms(api, env.GITHUB_SHA);
+  // Decide under the terms on main now, not the revision this run started
+  // from: a re-run of an older run must not clear PRs under older terms.
+  const mainSHA = (await api('GET', '/branches/main')).commit?.sha;
+  requireThat(SHA.test(mainSHA ?? ''), 'Main could not be read.');
+  const version = await readTerms(api, mainSHA);
 
   // Every surviving run reconciles every open PR, so a run GitHub replaced in
   // the concurrency queue loses nothing. `skip` is a head just decided by hand.
@@ -227,8 +231,7 @@ export async function execute({env, event, api}) {
     requireThat(SHA.test(env.INPUT_HEAD_SHA ?? ''), 'An exact pull-request head SHA is required.');
     requireThat(['approve', 'revoke'].includes(env.INPUT_DECISION), 'Select approve or revoke.');
     requireThat(env.INPUT_CONFIRMATION === 'true', 'Affirmative owner confirmation is required.');
-    const branch = await api('GET', '/branches/main');
-    requireThat(branch.commit?.sha === env.GITHUB_SHA, 'Main changed; start a fresh run.');
+    requireThat(mainSHA === env.GITHUB_SHA, 'Main changed; start a fresh run.');
     const number = Number(env.INPUT_PR_NUMBER);
     const pr = await api('GET', `/pulls/${number}`);
     validatePR(pr, number);
