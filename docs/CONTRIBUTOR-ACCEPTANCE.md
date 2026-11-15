@@ -13,14 +13,15 @@ shows whether everyone who wrote the work has accepted those terms.
    other rights-holder permission.
 2. Open your pull request. In its description, identify third-party material
    and relevant restrictions, including material AI-generated content.
-3. Post this exact sentence as a comment on the pull request, from the GitHub
-   account that authored the commits, using the version number at the top of
+3. Post this exact sentence, on a line of its own, as a comment on the pull
+   request from the GitHub account that authored the commits, using the version number at the top of
    the terms on `main`:
 
    > I accept the Très Fort Contributor Terms version 1.1.
 
    To accept on behalf of an employer or other entity, add a line naming it
-   in the same comment.
+   in the same comment. A quoted sentence or one inside other text does not
+   count.
 4. The `contributor rights` check updates within a minute. One acceptance
    covers all your pull requests open at that moment and your later ones under
    the same terms version, so you comment once, not on every pull request.

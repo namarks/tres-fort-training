@@ -131,6 +131,14 @@ export function contributors(pr, commits) {
 
 const PR_COMMENT_URL = `https://github.com/${REPOSITORY}/pull/`;
 
+// The sentence must stand on its own lines (it may wrap across up to three),
+// so quoting or questioning it ("I refuse to say ...") never counts.
+const acceptsOnALine = (body, wanted) => {
+  const lines = body.split(/\r?\n/);
+  return lines.some((_, start) => [1, 2, 3].some(n =>
+    start + n <= lines.length && normalize(lines.slice(start, start + n).join(' ')) === wanted));
+};
+
 // Account ids that commented the acceptance line for this terms version.
 async function acceptedIds(api, version) {
   const wanted = normalize(acceptanceLine(version));
@@ -142,7 +150,7 @@ async function acceptedIds(api, version) {
       // Only comments on this repository's pull requests count, not issues.
       if (Number.isSafeInteger(c.user?.id) && c.user?.type !== 'Bot'
         && typeof c.html_url === 'string' && c.html_url.startsWith(PR_COMMENT_URL)
-        && typeof c.body === 'string' && normalize(c.body).includes(wanted)) ids.add(c.user.id);
+        && typeof c.body === 'string' && acceptsOnALine(c.body, wanted)) ids.add(c.user.id);
     }
     if (batch.length < 100) return ids;
   }

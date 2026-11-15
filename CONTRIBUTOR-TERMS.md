@@ -2,8 +2,8 @@
 
 Version 1.1 · 2026-11-15
 
-You accept these terms by posting this exact sentence as a comment on a
-Project pull request, from your own GitHub account:
+You accept these terms by posting this exact sentence, on a line of its own,
+as a comment on a Project pull request from your own GitHub account:
 
 > I accept the Très Fort Contributor Terms version 1.1.
 

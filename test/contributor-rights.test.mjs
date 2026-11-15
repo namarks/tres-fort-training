@@ -199,6 +199,18 @@ test('a re-run from an older main decides under the current terms', async () => 
   assert.ok(f.reads.includes(`/contents/CONTRIBUTOR-TERMS.md?ref=${MAIN}`));
 });
 
+test('the sentence must stand on its own line', async () => {
+  for (const body of [`I refuse to say "${acceptanceLine('1.1')}"`, `> ${acceptanceLine('1.1')}`,
+    `Do I post ${acceptanceLine('1.1')}?`]) {
+    const f = fixture({comments: [{...ACCEPT, body}]});
+    await f.run();
+    assert.deepEqual(f.states(), [[HEAD, 'pending']], body);
+  }
+  const entity = fixture({comments: [{...ACCEPT, body: `${acceptanceLine('1.1')}\nOn behalf of Example Co.`}]});
+  await entity.run();
+  assert.deepEqual(entity.states(), [[HEAD, 'success']]);
+});
+
 test('an acceptance posted on an ordinary issue does not count', async () => {
   const f = fixture({comments: [{...ACCEPT, html_url: `https://github.com/${REPOSITORY}/issues/4#issuecomment-2`}]});
   await f.run();
