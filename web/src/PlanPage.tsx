@@ -93,6 +93,7 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
   const [starting, setStarting] = useState(!!startBlock);
   const [routineRequest, setRoutineRequest] = useState<{ day: Weekday; key: number } | null>(null);
   const [editSelection, setEditSelection] = useState<DateWorkoutSelection | null>(null);
+  const [editBlocked, setEditBlocked] = useState(false);
   useEffect(() => { if (startBlock) setStarting(true); }, [startBlock]);
   const miles = useMemo(() => prefersMiles(), []);
   const plan = state.plan;
@@ -117,6 +118,11 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
     [cells, inputs, today],
   );
   const selectedCell = useMemo(() => cellFor(selected), [cellFor, selected]);
+  // A date-only copy is made from the saved block's targets, so it waits
+  // until unsaved block changes are saved or discarded.
+  const blockDirty = !!active?.dirty;
+  useEffect(() => { if (blockDirty) setEditSelection(null); else setEditBlocked(false); }, [blockDirty]);
+  useEffect(() => setEditBlocked(false), [selected]);
   const workouts = useMemo(() => new Map((plan?.workouts ?? []).map((w) => [w.id, w])), [plan]);
   const live = useMemo(() => liveWorkouts(plan?.workouts ?? []), [plan]);
   const loads = useMemo(() => activityLoads(state), [state]);
@@ -284,8 +290,16 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
         routable={routable}
         chartable={chartable}
         onEditWorkout={onEditWorkout}
-        onEditDateWorkout={accountId ? (workoutId, primary) => setEditSelection({ date: selected, workoutId, primary }) : undefined}
-        editPanel={dateEditPanel}
+        onEditDateWorkout={accountId ? (workoutId, primary) => {
+          if (blockDirty) setEditBlocked(true);
+          else setEditSelection({ date: selected, workoutId, primary });
+        } : undefined}
+        editPanel={editBlocked && blockDirty ? (
+          <div className="panel" role="status">
+            <p>Save or discard your block changes first, so this date’s workout starts from the targets you see.</p>
+            <button type="button" className="ghost small" onClick={() => setEditBlocked(false)}>OK</button>
+          </div>
+        ) : dateEditPanel}
         actions={(
           <>
             <DateActions date={selected} today={today} cell={selectedCell} workout={workoutFor(selectedCell, workouts)}
