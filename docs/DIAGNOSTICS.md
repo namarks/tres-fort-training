@@ -30,12 +30,10 @@ reads is run-recorder P5(e) (historical maintainer record).
 
 ## What stays out
 
-Everything Tres Fort holds under the Garmin and WHOOP licenses: activities
-with `source` `garmin` or `whoop` (lists skip them, `activities/:id`
-answers 403 `restricted_source`, and copies lists skip them), Garmin's
-activity files, and WHOOP recovery. Garmin's license forbids sending its
-data to an AI, and these lookups are read by Claude. Other members' data is
-never reachable here, except what a member sends in a problem report.
+These lookups exclude activities with source `garmin` or `whoop`, Garmin
+activity files, and WHOOP recovery. Lists skip those activities;
+`activities/:id` returns 403 `restricted_source`; copies lists skip them too.
+Other members' data is reachable only when a member sends it in a problem report.
 
 ## Lookups
 

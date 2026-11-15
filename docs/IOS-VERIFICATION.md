@@ -84,10 +84,13 @@ baseline had 124 UI methods: two of the previous three partitions still had
 unrun tests at timeout.
 An October 3 audit of the three largest suites folded five duplicated methods
 into the tests that already covered their assertions.
-The smoke job keeps a 30-minute limit. Full jobs allow 40 minutes: on October 3,
-slow hosted runners took shard 3 to 29 minutes, 8 of them building. The extra
-time is headroom for slow runners, not room for more tests. Existing
-assertions and element waits are unchanged.
+The smoke job keeps a 30-minute limit. Full jobs allow 90 minutes. The
+November 15 public-repository run exhausted the previous 40-minute limit
+while shards 4 and 5 were still progressing: shard 4 had passed 25 of 28 cases,
+while shard 5 had passed 9 of 26, with several group journeys taking four to
+five minutes each. The larger bounded allowance lets the complete suite finish
+on hosted runners; use the completed timings to reassess partition balance.
+Test selection, assertions, element waits and retry settings are unchanged.
 On November 1 shard 3 passed all 26 of its tests but reached the 40-minute
 limit (10.8 minutes of build and boot, 28.9 of tests), while shards 2 and 5
 finished in about 17. Intervals connection moved to shard 2 and exercise

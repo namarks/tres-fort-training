@@ -1,4 +1,4 @@
-// Garmin connection and workout files (docs/plans/garmin P1 and P2). Internal
+// Garmin connection and workout files. Internal
 // service: public callers use the db.ts facade, which injects the shared
 // helpers.
 //
@@ -13,8 +13,8 @@
 //   file is downloaded and imported; the cron retries while the link lasts.
 //   Every import is fenced by the connection it was announced to, so a
 //   disconnect is never undone by an import already running.
-// - Garmin data stays out of MCP and group views (Garmin's license; see the
-//   plan). Those exclusions live with each query.
+// - Garmin data stays out of MCP and group views. Those exclusions live
+//   with each query.
 import { credentialDigest, openCredential, randomSecret, sealCredential } from '../credentials';
 import type { Fetcher } from '../intervals';
 import type { Env } from '../types';
@@ -327,9 +327,9 @@ export function createGarminService(deps: GarminDeps) {
   }
 
   /**
-   * Disconnect from the app. Garmin's license requires telling Garmin, so the
-   * registration is deleted first with a usable token (refreshed if needed);
-   * the local connection and Garmin's workouts go either way.
+   * Disconnect from the app. Delete the remote registration with a usable
+   * token (refreshed if needed), then remove the local connection and Garmin
+   * workouts even if the remote request fails.
    */
   async function disconnectGarmin(
     db: D1Database, env: Env, userId: string, fetcher: Fetcher = (i, init) => globalThis.fetch(i, init), now = Date.now(),

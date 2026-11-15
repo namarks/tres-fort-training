@@ -196,15 +196,8 @@ async function sameSecret(a: string, b: string): Promise<boolean> {
   return diff === 0;
 }
 
-// POST /webhooks/garmin/:secret — PUBLIC, Garmin's push notifications
-// (docs/plans/garmin). Garmin does not sign pushes, so a push must arrive at
-// the secret path configured in Garmin's developer tools, carry this app's
-// client id in `garmin-client-id`, and come from Garmin's published address
-// ranges. One endpoint takes every summary type: `activityFiles` (a one-time
-// download link per new workout), `deregistrations` and
-// `userPermissionsChange`. Garmin needs a 200 within 30 seconds, so files are
-// only queued here and fetched afterwards; any other answer makes Garmin
-// retry hourly for up to a week.
+// POST /webhooks/garmin/:secret — accepts authenticated Garmin notifications,
+// queues activity files, and handles disconnects and permission changes.
 webhookRoutes.post('/garmin/:secret', async (c) => {
   const env = c.env;
   if (!env.GARMIN_CLIENT_ID || !env.GARMIN_CLIENT_SECRET || !env.GARMIN_PUSH_SECRET
