@@ -139,6 +139,60 @@ jobs:
         shell: bash
         run: |
           echo "DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer" >> "$GITHUB_ENV"
+      # A hosted Mac starts empty, so restore main's last build: verify-ios.sh
+      # keeps the copied sources and DerivedData under TRESFORT_IOS_BUILD_ROOT
+      # and rewrites only changed files, so Xcode recompiles only what this
+      # change touched. Pull requests (forks included) only restore: their
+      # builds never enter the cache, and GitHub keeps a pull request's cache
+      # entries out of main's reach. On main one job per project spec saves
+      # its build when the iOS sources changed. The nightly release check
+      # always builds from scratch and then refreshes the cache. Bump v1 to
+      # discard every cached build.
+      - name: Select the cached iOS build
+        id: ios-build
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          SHARD: ${{ matrix.shard }}
+          RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          case "$SHARD" in app-store-*) spec=project-app-store ;; *) spec=project ;; esac
+          root="$RUNNER_TEMP/tres-fort-ios-build"
+          xcode="$(xcodebuild -version | awk '/^Xcode /{v=$2} /^Build version /{b=$3} END{print v "-" b}')"
+          prefix="ios-build-v1-$spec-$xcode-"
+          sources="$(git ls-files -s -- ios scripts/verify-ios.sh scripts/ios_sources.py | shasum -a 256 | cut -c1-64)"
+          save=no
+          if [ "$EVENT" != pull_request ] && [ "$REF" = refs/heads/main ]; then
+            case "$SHARD" in 1|app-store-iphone) save=yes ;; esac
+          fi
+          restore="$prefix"
+          if [ "$EVENT" = schedule ]; then restore=''; fi
+          if [ "$save" = no ]; then
+            # Never matched by a restore key; the job saves an empty folder.
+            key="ios-build-unsaved-$RUN-$SHARD"
+          elif [ "$EVENT" = schedule ]; then
+            key="$prefix$sources-clean-$RUN"
+          else
+            key="$prefix$sources"
+          fi
+          # The cache restores files with new inodes; let Xcode match a
+          # restored file by its size and modification time alone.
+          defaults write com.apple.dt.XCBuild IgnoreFileSystemDeviceInodeChanges -bool YES
+          echo "TRESFORT_IOS_BUILD_ROOT=$root" >> "$GITHUB_ENV"
+          {
+            echo "path=$root/$spec"
+            echo "key=$key"
+            echo "restore-keys=$restore"
+            echo "save=$save"
+          } >> "$GITHUB_OUTPUT"
+          echo "iOS build cache: key $key, restore prefix ${restore:-none}, save $save"
+      - name: Restore the iOS build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ steps.ios-build.outputs.path }}
+          key: ${{ steps.ios-build.outputs.key }}
+          restore-keys: ${{ steps.ios-build.outputs.restore-keys }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
@@ -193,6 +247,20 @@ jobs:
       - name: iPad Station build and tests
         if: matrix.shard == 'station'
         run: npm run ios:verify -- --runtime com.apple.CoreSimulator.SimRuntime.iOS-26-2 --device com.apple.CoreSimulator.SimDeviceType.iPad-A16 --only-testing-file .github/ios-tests/station.txt
+      # The cache saves this folder after a passing job. Build logs are not
+      # worth keeping; a job that must not save leaves an empty folder.
+      - name: Trim the iOS build before caching
+        env:
+          BUILD: ${{ steps.ios-build.outputs.path }}
+          SAVE: ${{ steps.ios-build.outputs.save }}
+        run: |
+          if [ "$SAVE" = yes ]; then
+            rm -rf "$BUILD/DerivedData/Logs"
+          else
+            rm -rf "$BUILD"
+            mkdir -p "$BUILD"
+          fi
+          du -sh "$BUILD"
       # Keep results only from a job that failed or was cancelled, for three
       # days: a passing full run uploaded about 1 GB, and the account's free
       # Actions storage is 0.5 GB. An upload refused for storage (a $0

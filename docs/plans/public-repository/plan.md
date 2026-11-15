@@ -65,6 +65,10 @@ remain separate decisions.
     iPhone build/unit-test job. Workflow setup, selector and contract-test edits
     use that path; native verifier, device-list and packaging changes retain
     full verification. Changes to native workflow execution require a manual full run.
+  - Hosted iOS jobs restore main's last build from a GitHub cache, so a PR
+    recompiles only what it changed. Only main saves builds; PRs, forks included,
+    only restore, and the nightly release check still builds from scratch. See
+    `docs/IOS-VERIFICATION.md`. No self-hosted runners.
 - [ ] **P3 — Complete the development transition**
   - Verify clean-clone backend and simulator onboarding and an ordinary fork PR.
   - Verify owner release automation, licensed artwork supply and private feedback
