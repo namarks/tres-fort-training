@@ -119,9 +119,10 @@ jobs:
     if: needs.plans.outputs.ios-runner != 'none' && needs.plans.outputs.ios-suite != 'skip'
     runs-on: ${{ fromJSON(needs.plans.outputs.ios-runner) }}
     # Smoke (one iPhone job: build plus unit tests) gates PRs within 30
-    # minutes. Full runs, the release check, add the UI suite, the device jobs and get headroom for slow hosted
-    # runners rather than room for more tests; a hang still stops.
-    timeout-minutes: ${{ needs.plans.outputs.ios-suite == 'full' && 40 || 30 }}
+    # minutes. Full runs add the UI suite and device jobs. Hosted runners take
+    # up to five minutes for individual UI journeys, so allow 90 minutes for
+    # the complete shard while retaining a finite limit for stalled jobs.
+    timeout-minutes: ${{ needs.plans.outputs.ios-suite == 'full' && 90 || 30 }}
     strategy:
       fail-fast: false
       # Each hosted shard gets its own disposable machine.

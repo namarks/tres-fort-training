@@ -52,8 +52,11 @@ remain separate decisions.
   - [ ] **(b) Verify the published candidate on hosted CI**
   - The [first full hosted CI run](https://github.com/namarks/tres-fort-training/actions/runs/43749782936)
     on the published commit hit HTTP 403 while downloading pinned XcodeGen on
-    two hosted runners, before compilation. This branch carries the download fix;
-    complete its exact-head CI before merging, then qualify published main.
+    two hosted runners, before compilation. The authenticated download fix passed
+    on the next run, which exposed full UI shards still progressing at the
+    40-minute limit. This branch allows 90 minutes for full jobs while retaining
+    the 30-minute smoke limit. Complete exact-head CI before merging, then qualify
+    published main.
     Require every expected shard, including the full UI, Station and App Store
     simulator jobs. Publication or a passing smoke job does not authorize release.
 - [ ] **P3 — Complete the development transition**
@@ -77,7 +80,7 @@ remain separate decisions.
 
 **Now (@agent):** finish the hosted-CI setup fix and publication documentation
 through the normal exact-head PR gates; diagnose failures and record the outcome.
-Do not bypass protected main. After the owner merges, qualify published main and
+Do not bypass protected main. After the PR merges, qualify published main and
 verify contributor onboarding and owner automation for P3.
 
 ## Notes / open questions
