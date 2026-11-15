@@ -189,6 +189,14 @@ test('the owner can approve or revoke one exact head, and it sticks for that ter
   assert.deepEqual(after.states(), [[HEAD, 'failure']]);
 });
 
+test('a manual decision also re-checks the other open heads', async () => {
+  const f = fixture({prs: [FORK_PR, OWNER_PR], commits: [commit(null)]});
+  const result = await f.run(DISPATCH);
+  assert.equal(result.mode, 'approve');
+  assert.deepEqual(f.states(), [[HEAD, 'success'], [OTHER, 'success']]);
+  assert.match(f.writes[1].body.description, /^Owner branch/);
+});
+
 test('only the owner on current main can dispatch, with exact inputs', async () => {
   for (const env of [
     {GITHUB_ACTOR: 'contributor'}, {GITHUB_TRIGGERING_ACTOR: 'contributor'}, {GITHUB_ACTOR_ID: '123'},
@@ -243,7 +251,7 @@ test('privileged workflow only checks out trusted main and never executes PR con
   const workflow = readFileSync(new URL('../.github/workflows/contributor-rights.yml', import.meta.url), 'utf8');
   assert.match(workflow, /pull_request_target:/);
   assert.match(workflow, /issue_comment:/);
-  assert.match(workflow, /contains\(github\.event\.comment\.body, 'Contributor Terms'\)/);
+  assert.match(workflow, /contains\(github\.event\.comment\.body, 'Contributor'\)\s+&& contains\(github\.event\.comment\.body, 'Terms'\)/);
   assert.match(workflow, /ref: \$\{\{ github\.sha \}\}/);
   assert.match(workflow, /github\.ref == 'refs\/heads\/main'/);
   assert.match(workflow, /!github\.event\.repository\.private/);

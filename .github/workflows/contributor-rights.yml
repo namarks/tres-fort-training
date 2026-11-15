@@ -53,7 +53,8 @@ jobs:
               && github.actor_id == '5323089'))
       && (github.event_name != 'issue_comment'
           || (github.event.issue.pull_request
-              && contains(github.event.comment.body, 'Contributor Terms')))
+              && contains(github.event.comment.body, 'Contributor')
+              && contains(github.event.comment.body, 'Terms')))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

@@ -198,6 +198,26 @@ export async function execute({env, event, api}) {
   });
   const version = await readTerms(api, env.GITHUB_SHA);
 
+  // Every surviving run reconciles every open PR, so a run GitHub replaced in
+  // the concurrency queue loses nothing. `skip` is a head just decided by hand.
+  const reconcile = async skip => {
+    const open = await openPRs(api);
+    open.forEach(pr => validatePR(pr, pr.number));
+    const byHead = new Map();
+    for (const pr of open) {
+      if (pr.head.sha !== skip) byHead.set(pr.head.sha, [...(byHead.get(pr.head.sha) ?? []), pr]);
+    }
+    let cache;
+    const accepted = async () => (cache ??= await acceptedIds(api, version));
+    const results = [];
+    for (const [sha, prs] of byHead) {
+      const decision = await decide(api, prs, version, accepted);
+      await status(sha, decision);
+      results.push({prs: prs.map(p => p.number), state: decision.state});
+    }
+    return results;
+  };
+
   if (name === 'workflow_dispatch') {
     requireThat(/^[1-9][0-9]*$/.test(env.INPUT_PR_NUMBER ?? ''), 'A pull-request number is required.');
     requireThat(SHA.test(env.INPUT_HEAD_SHA ?? ''), 'An exact pull-request head SHA is required.');
@@ -212,7 +232,8 @@ export async function execute({env, event, api}) {
     const approve = env.INPUT_DECISION === 'approve';
     await status(pr.head.sha, {state: approve ? 'success' : 'failure',
       description: `${approve ? OWNER_APPROVED : OWNER_REVOKED} ${version}. PR #${number}.`});
-    return {mode: env.INPUT_DECISION, number, head: pr.head.sha, version};
+    const results = await reconcile(pr.head.sha);
+    return {mode: env.INPUT_DECISION, number, head: pr.head.sha, version, results};
   }
 
   if (name === 'pull_request_target') {
@@ -225,21 +246,7 @@ export async function execute({env, event, api}) {
       'Only pull-request comments can carry an acceptance.');
   }
 
-  // Every surviving run reconciles every open PR, so a run GitHub replaced in
-  // the concurrency queue loses nothing.
-  const open = await openPRs(api);
-  open.forEach(pr => validatePR(pr, pr.number));
-  const byHead = new Map();
-  for (const pr of open) byHead.set(pr.head.sha, [...(byHead.get(pr.head.sha) ?? []), pr]);
-  let cache;
-  const accepted = async () => (cache ??= await acceptedIds(api, version));
-  const results = [];
-  for (const [sha, prs] of byHead) {
-    const decision = await decide(api, prs, version, accepted);
-    await status(sha, decision);
-    results.push({prs: prs.map(p => p.number), state: decision.state});
-  }
-  return {mode: 'reconcile', version, results};
+  return {mode: 'reconcile', version, results: await reconcile(null)};
 }
 
 export function githubAPI(token, fetcher = fetch) {
