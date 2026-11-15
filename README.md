@@ -32,7 +32,7 @@ versioned writers, with every change recorded and reversible.
 
 > Full design rationale, schema, and API/MCP surface: [`docs/DESIGN.md`](docs/DESIGN.md).
 
-## Contributing locally
+## Contributing
 
 Start with the [contributor setup guide](CONTRIBUTING.md). You can contribute
 without running every component:

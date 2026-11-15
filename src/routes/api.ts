@@ -2489,8 +2489,8 @@ apiRoutes.delete('/me', async (c) => {
   ) {
     return measuredJson(c, { error: 'reauthentication_required' }, 401);
   }
-  // Garmin's license asks that Garmin be told when a member leaves; best
-  // effort, and the deletion below removes the Garmin rows either way.
+  // Notify Garmin when a member leaves. This is best effort; the deletion
+  // below removes the Garmin rows either way.
   if ((await getGarminStatus(c.env.DB, c.env, userId)).connected) {
     await disconnectGarmin(c.env.DB, c.env, userId).catch((error: unknown) => {
       console.error({ event: 'garmin_account_deletion_disconnect_failed', error_type: diagnosticErrorType(error) });

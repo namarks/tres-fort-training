@@ -1,16 +1,10 @@
-// Garmin adapter (docs/plans/garmin): OAuth 2.0 with PKCE, the member
+// Garmin adapter: OAuth 2.0 with PKCE, the member
 // endpoints, the push notifications Garmin sends and the one-time activity
 // file download. No database access; the fetcher is injected, so tests run
-// offline. Garmin's specifications are confidential and live with the owner,
-// not in this repository.
+// offline. Confidential provider documents stay with the owner.
 //
-// - Starter access is push only: Garmin POSTs each notification to the
-//   endpoint configured in its developer tools and must get a 200 within 30
-//   seconds, before any processing. Pushes are not signed, so the route
-//   checks a secret path, Garmin's client id header and Garmin's published
-//   source addresses, and data is taken from Garmin itself where it can be:
-//   an activity file is downloaded from Garmin's own host.
-// - Access tokens last a day; every refresh returns a new refresh token.
+// The webhook route authenticates incoming notifications and queues activity
+// files for later download. Fetches use bounded timeouts and approved hosts.
 import type { Fetcher } from './intervals';
 
 export const GARMIN_AUTHORIZE_URL = 'https://connect.garmin.com/oauth2Confirm';

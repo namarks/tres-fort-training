@@ -119,9 +119,10 @@ jobs:
     if: needs.plans.outputs.ios-runner != 'none' && needs.plans.outputs.ios-suite != 'skip'
     runs-on: ${{ fromJSON(needs.plans.outputs.ios-runner) }}
     # Smoke (one iPhone job: build plus unit tests) gates PRs within 30
-    # minutes. Full runs, the release check, add the UI suite, the device jobs and get headroom for slow hosted
-    # runners rather than room for more tests; a hang still stops.
-    timeout-minutes: ${{ needs.plans.outputs.ios-suite == 'full' && 40 || 30 }}
+    # minutes. Full runs add the UI suite and device jobs. Hosted runners take
+    # up to five minutes for individual UI journeys, so allow 90 minutes for
+    # the complete shard while retaining a finite limit for stalled jobs.
+    timeout-minutes: ${{ needs.plans.outputs.ios-suite == 'full' && 90 || 30 }}
     strategy:
       fail-fast: false
       # Each hosted shard gets its own disposable machine.
@@ -145,12 +146,19 @@ jobs:
       # ci.yml, runs the full release check on that PR.
       - name: Install pinned XcodeGen
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
+          : "${GITHUB_TOKEN:?GITHUB_TOKEN is required}"
           generator_dir="$(mktemp -d "$RUNNER_TEMP/xcodegen.XXXXXX")"
           trap 'rm -rf "$generator_dir"' EXIT
-          # XcodeGen 2.45.3's immutable release asset; the browser download
-          # endpoint can return 504 while this official API remains available.
-          curl --fail --location --silent --show-error -H 'Accept: application/octet-stream' \
+          # Authenticate this pinned release-asset request with the job's
+          # read-only token. curl strips Authorization on cross-origin redirects;
+          # never add --location-trusted. The checksum still gates installation.
+          curl --disable --fail --location --silent --show-error \
+            --proto '=https' --proto-redir '=https' \
+            -H 'Accept: application/octet-stream' \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
             https://api.github.com/repos/yonaskolb/XcodeGen/releases/assets/370842625 \
             -o "$generator_dir/xcodegen.zip"
           echo "0c90f4d28ca57335f9fa78cf5bf6dabfe20a232036dabe36de2eef79cb7c0878  $generator_dir/xcodegen.zip" | shasum -a 256 -c -

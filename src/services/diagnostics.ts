@@ -9,9 +9,8 @@
  * except the problem reports members send from the app (migration 0077):
  * those are every member's, and an activity a member attached is readable
  * for the 14 days their report consented to. No lookup writes training
- * data, and every lookup leaves out everything Tres Fort holds
- * under the Garmin and WHOOP licenses: those sources' activities, their
- * files, and WHOOP recovery. Each lookup is recorded in audit_log as
+ * data, and every lookup excludes Garmin and WHOOP activities, Garmin
+ * activity files, and WHOOP recovery. Each lookup is recorded in audit_log as
  * `diagnostics_read`.
  *
  * The lookups already account for this schema's traps: a run recorded in
