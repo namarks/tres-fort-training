@@ -10703,13 +10703,12 @@ export async function deleteFitActivity(db: D1Database, userId: string, clientId
 }
 
 /**
- * Store a workout file Garmin pushed (docs/plans/garmin P2) as an external
+ * Store a workout file Garmin pushed as an external
  * activity with source='garmin', the same way an uploaded .fit file is
  * stored. Garmin Connect's activity id is the idempotency key. The insert is
  * fenced by the connection the file was announced to and by its activity
  * permission, so neither a disconnect nor a member's withdrawn sharing is
- * undone by an import already running. Garmin rows stay private and out of
- * MCP (Garmin's license; see the plan).
+ * undone by an import already running. Garmin rows stay private and out of MCP.
  */
 export async function importGarminActivity(
   db: D1Database,
