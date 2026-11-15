@@ -93,8 +93,10 @@ for P3. Do not bypass protected main or treat smoke coverage as release qualific
 
 - The original repository remains private, active and unarchived. No further old
   history rewrite or deletion is needed for this clean-snapshot route.
-- Contributor acceptance records stay private. The rights check records hashes
-  and metadata and is a maintainer attestation, not automatic legal verification.
+- Contributor terms 1.1 (2026-11-15, owner's choice): outside contributors
+  accept once with a pull-request comment; branches in this repository pass as
+  the owner's own work; the owner can still approve or revoke one PR head by
+  hand. The check records acceptance, not legal verification of authority.
 - Contributors use forks. Keep repository write access owner-only: an Actions
   source-pinned status does not distinguish privileged workflows created by
   another same-repository writer.

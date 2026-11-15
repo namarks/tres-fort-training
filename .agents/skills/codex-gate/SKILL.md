@@ -1,6 +1,6 @@
 ---
 name: codex-gate
-description: "Drive a Tres Fort pull request to ready-to-merge: confirm Codex reviewed the exact head commit with no open findings (re-requesting review after every fix push), require plan graph, typecheck + tests and iOS build + tests green on that head, then report ready to merge. Never merges and never deploys; Nick merges. Use when opening, babysitting or fixing a Tres Fort PR, or when asked to run the Codex gate for a PR number."
+description: "Drive a Tres Fort pull request to ready-to-merge: confirm Codex reviewed the exact head commit with no open findings (re-requesting review after every fix push), require contributor rights, plan graph, typecheck + tests and iOS build + tests green on that head, then report ready to merge. Never merges and never deploys; Nick merges. Use when opening, babysitting or fixing a Tres Fort PR, or when asked to run the Codex gate for a PR number."
 ---
 
 # Codex gate for Tres Fort
@@ -118,10 +118,11 @@ request with the summary, never with when `HEAD` was pushed:
 
 Required, all `success` on `HEAD` (and the PR branch up to date with `main`):
 
-- `contributor rights` — owner review recorded by the trusted workflow after
-  private acceptance/provenance verification; see `docs/CONTRIBUTOR-ACCEPTANCE.md`.
-  An agent must never manufacture acceptance or dispatch an approval without the
-  actual private records and owner authority.
+- `contributor rights` — set by the trusted workflow: passes automatically for
+  the owner's own branches in this repository, and for forks once every author
+  has commented the acceptance sentence; see `docs/CONTRIBUTOR-ACCEPTANCE.md`.
+  An agent must never post the acceptance sentence for anyone, or dispatch an
+  owner approval without the owner's own instruction.
 - `plan graph`
 - `typecheck + tests` (aggregates the three backend shards; passes when a
   documentation-only diff, `docs/` or Markdown files, skips them)

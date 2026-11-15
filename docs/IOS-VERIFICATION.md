@@ -255,10 +255,12 @@ repository has no self-hosted runner route and must have no Mac mini runner
 registration. Public fork work runs on GitHub-hosted machines without signing,
 deployment or provider credentials.
 
-The required `contributor rights` status is separate from technical CI. It is
-set only after the owner's private rights review for the exact PR head; see
+The required `contributor rights` status is separate from technical CI. It
+passes automatically for branches in this repository and, for forks, once every
+author has posted the acceptance comment for the current terms; see
 [contributor acceptance](CONTRIBUTOR-ACCEPTANCE.md). Keep contributors fork-only
-and repository write access owner-only. Revisit the trust model before adding
+and repository write access owner-only, because any branch in this repository
+counts as the owner's own work. Revisit the trust model before adding
 another writer because source-pinning a status to GitHub Actions does not pin
 it to one particular workflow.
 

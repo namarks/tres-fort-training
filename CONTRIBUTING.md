@@ -32,9 +32,10 @@ Commands below run from the repository root unless stated otherwise. Read
 [docs/DESIGN.md](docs/DESIGN.md) before non-trivial backend work. Visual changes
 follow [docs/DESIGN-SYSTEM.md](docs/DESIGN-SYSTEM.md).
 
-Before your first contribution can merge, complete the
-[private contributor acceptance process](docs/CONTRIBUTOR-ACCEPTANCE.md).
-You keep your copyright; accepted contributions grant Nicholas Marks the
+Before your first contribution can merge, accept the terms by commenting
+"I accept the Très Fort Contributor Terms version 1.1." on your pull request
+(see [contributor acceptance](docs/CONTRIBUTOR-ACCEPTANCE.md)). You comment once,
+not on every pull request. You keep your copyright; accepted contributions grant Nicholas Marks the
 commercialization, sublicensing and transfer rights described in the terms.
 Do not post signatures, employer authorizations or identity documents in a PR.
 
@@ -328,11 +329,11 @@ Use synthetic screenshots and check that logs and attachments contain no
 private information. Identify third-party material and its license, and
 confirm that you have permission from any employer or other rights holder.
 
-The required `contributor rights` check records maintainer review of the exact
-PR head. It covers the accepted agreement version, every contributing author
-and rights-holder, and third-party permissions. A changed head needs renewed
-review; checking boxes in the PR template does not pass this gate. See the
-[acceptance process](docs/CONTRIBUTOR-ACCEPTANCE.md).
+The required `contributor rights` check passes once every author and co-author
+of the pull request has posted the acceptance comment for the current terms
+version. Checking boxes in the PR template does not pass it. The maintainer
+still reviews third-party material and provenance before merging. See
+[contributor acceptance](docs/CONTRIBUTOR-ACCEPTANCE.md).
 
 - Backend changes: run `npm run typecheck` and `npm test`.
 - iOS changes: run the simulator checks and relevant UI journeys above.

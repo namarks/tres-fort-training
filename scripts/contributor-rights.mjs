@@ -1,6 +1,17 @@
 #!/usr/bin/env node
+// Sets the required `contributor rights` status on every open pull request.
+//
+// - A PR from a branch in this repository is the owner's own work (only the
+//   owner can push here; coding agents push with the owner's access): success.
+// - A PR from a fork passes once its author and every commit author and
+//   co-author have accepted the current contributor terms by commenting the
+//   acceptance line on any pull request in this repository. One acceptance
+//   covers all of that person's later PRs under the same terms version.
+// - Anything the rules cannot settle (an unlinked author, a bot, a co-author
+//   without a GitHub address) stays pending until the owner approves that
+//   exact head with the workflow's manual run.
+//
 // Trusted-main metadata only. Never loads or executes a pull request's files.
-import { createHash } from 'node:crypto';
 import { appendFile, readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 
@@ -10,11 +21,27 @@ const OWNER = 'namarks';
 const OWNER_ID = '5323089';
 const WORKFLOW = `${REPOSITORY}/.github/workflows/contributor-rights.yml@refs/heads/main`;
 const SHA = /^[a-f0-9]{40}$/;
-const DIGEST = /^[a-f0-9]{64}$/;
-export const digest = value => createHash('sha256').update(value).digest('hex');
+const MAX_COMMITS = 250;
+const MAX_COMMENT_PAGES = 100;
+const HOW_TO = `https://github.com/${REPOSITORY}/blob/main/docs/CONTRIBUTOR-ACCEPTANCE.md`;
+const OWNER_APPROVED = 'Owner approved this head under terms';
+const OWNER_REVOKED = 'Owner revoked this head under terms';
 
 function requireThat(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+// "Très" and "Tres" both match; case and spacing do not matter.
+const normalize = text => text.normalize('NFD').replace(/[̀-ͯ]/g, '')
+  .replace(/\s+/g, ' ').trim().toLowerCase();
+
+export const acceptanceLine = version =>
+  `I accept the Très Fort Contributor Terms version ${version}.`;
+
+export function termsVersion(text) {
+  const match = text.match(/^Version (\d+\.\d+) · \d{4}-\d{2}-\d{2}$/m);
+  requireThat(match, 'The operative contributor terms have no version line.');
+  return match[1];
 }
 
 export function validateContext(env, event) {
@@ -24,20 +51,12 @@ export function validateContext(env, event) {
     && env.GITHUB_WORKFLOW_REF === WORKFLOW && SHA.test(env.GITHUB_SHA ?? ''),
   'Only the trusted main-branch workflow may administer rights status.');
   const name = env.GITHUB_EVENT_NAME;
-  requireThat(['workflow_dispatch', 'pull_request_target', 'push'].includes(name), 'Unsupported event.');
+  requireThat(['workflow_dispatch', 'pull_request_target', 'push', 'issue_comment'].includes(name),
+    'Unsupported event.');
   if (name === 'workflow_dispatch') {
     requireThat(env.GITHUB_ACTOR === OWNER && env.GITHUB_TRIGGERING_ACTOR === OWNER
       && env.GITHUB_ACTOR_ID === OWNER_ID, 'Only the owner may record or revoke a review.');
   }
-}
-
-function validateReviewInputs(env) {
-  requireThat(/^[1-9][0-9]*$/.test(env.INPUT_PR_NUMBER ?? ''), 'A pull-request number is required.');
-  requireThat(SHA.test(env.INPUT_HEAD_SHA ?? ''), 'An exact pull-request head SHA is required.');
-  requireThat(DIGEST.test(env.INPUT_TERMS_SHA256 ?? ''), 'An exact terms SHA-256 is required.');
-  requireThat(DIGEST.test(env.INPUT_RECEIPT_SHA256 ?? ''), 'A private review receipt SHA-256 is required.');
-  requireThat(['approve', 'revoke'].includes(env.INPUT_DECISION), 'Select approve or revoke.');
-  requireThat(env.INPUT_CONFIRMATION === 'true', 'Affirmative owner verification is required.');
 }
 
 function validatePR(pr, number) {
@@ -48,19 +67,7 @@ function validatePR(pr, number) {
   requireThat(SHA.test(pr.head?.sha ?? ''), 'The pull request has no valid head SHA.');
 }
 
-function disclosureDigest(pr) {
-  return digest(JSON.stringify({number: pr.number, head: pr.head.sha,
-    title: pr.title ?? '', body: pr.body ?? '', base: pr.base.ref}));
-}
-
-export function authorInventoryDigest(commits) {
-  // Hash every commit's native and GitHub identity evidence, including its full
-  // message (and therefore coauthor trailers). Never infer that these identities
-  // are authenticated signers or that a null GitHub identity belongs to the owner.
-  return digest(JSON.stringify(commits.map(c => ({sha: c.sha, author: c.author,
-    committer: c.committer, git_author: c.commit?.author,
-    git_committer: c.commit?.committer, message: c.commit?.message}))));
-}
+const isOwnerBranch = pr => pr.head?.repo?.full_name === REPOSITORY;
 
 async function openPRs(api) {
   const result = [];
@@ -78,95 +85,201 @@ async function readTerms(api, mainSHA) {
   requireThat(file.type === 'file' && file.encoding === 'base64'
     && typeof file.content === 'string' && file.size > 0 && file.size < 262144,
   'The operative contributor terms could not be read.');
-  return digest(Buffer.from(file.content, 'base64'));
+  return termsVersion(Buffer.from(file.content, 'base64').toString('utf8'));
+}
+
+async function prCommits(api, pr) {
+  // The pull-request list omits the commit count; only the detail response has it.
+  const detail = await api('GET', `/pulls/${pr.number}`);
+  if (detail?.head?.sha !== pr.head.sha) return null;
+  const count = detail.commits;
+  if (!Number.isInteger(count) || count < 1 || count > MAX_COMMITS) return null;
+  const commits = [];
+  for (let page = 1; commits.length < count; page++) {
+    const batch = await api('GET', `/pulls/${pr.number}/commits?per_page=100&page=${page}`);
+    if (!Array.isArray(batch) || batch.length === 0) return null;
+    commits.push(...batch);
+  }
+  if (commits.length !== count || commits.at(-1)?.sha !== pr.head.sha) return null;
+  return commits;
+}
+
+const COAUTHOR = /^co-authored-by:\s*.*<([^>]+)>\s*$/gim;
+const NOREPLY = /^(\d+)\+([A-Za-z0-9-]+)@users\.noreply\.github\.com$/i;
+
+// The people whose acceptance a fork PR needs, as GitHub account ids, plus
+// reasons the rules cannot settle on their own.
+export function contributors(pr, commits) {
+  const people = new Map(), unresolved = [];
+  const add = user => {
+    if (!user || !Number.isSafeInteger(user.id) || typeof user.login !== 'string') return false;
+    if (user.type === 'Bot' || user.login.endsWith('[bot]')) return false;
+    people.set(user.id, user.login);
+    return true;
+  };
+  if (!add(pr.user)) unresolved.push('PR author is not a person account');
+  for (const commit of commits) {
+    if (!add(commit.author)) unresolved.push(`commit ${commit.sha.slice(0, 7)} author has no GitHub account`);
+    for (const [, email] of (commit.commit?.message ?? '').matchAll(COAUTHOR)) {
+      const match = email.trim().match(NOREPLY);
+      if (match) people.set(Number(match[1]), match[2]);
+      else unresolved.push(`a co-author of ${commit.sha.slice(0, 7)} has no GitHub address`);
+    }
+  }
+  return {people, unresolved: [...new Set(unresolved)]};
+}
+
+const PR_COMMENT_URL = `https://github.com/${REPOSITORY}/pull/`;
+
+// The sentence must stand on its own lines (it may wrap across up to three),
+// so quoting or questioning it ("I refuse to say ...") never counts.
+const acceptsOnALine = (body, wanted) => {
+  const lines = body.split(/\r?\n/);
+  return lines.some((_, start) => [1, 2, 3].some(n =>
+    start + n <= lines.length && normalize(lines.slice(start, start + n).join(' ')) === wanted));
+};
+
+// Account ids that commented the acceptance line for this terms version.
+async function acceptedIds(api, version) {
+  const wanted = normalize(acceptanceLine(version));
+  const ids = new Set();
+  for (let page = 1; page <= MAX_COMMENT_PAGES; page++) {
+    const batch = await api('GET', `/issues/comments?sort=created&direction=asc&per_page=100&page=${page}`);
+    requireThat(Array.isArray(batch), 'Invalid comment inventory.');
+    for (const c of batch) {
+      // Only comments on this repository's pull requests count, not issues.
+      if (Number.isSafeInteger(c.user?.id) && c.user?.type !== 'Bot'
+        && typeof c.html_url === 'string' && c.html_url.startsWith(PR_COMMENT_URL)
+        && typeof c.body === 'string' && acceptsOnALine(c.body, wanted)) ids.add(c.user.id);
+    }
+    if (batch.length < 100) return ids;
+  }
+  throw new Error('Comment inventory exceeded its safety limit.');
+}
+
+const clip = text => text.length <= 140 ? text : `${text.slice(0, 137)}...`;
+
+// The owner's newest decision on this head. Automatic statuses never replace
+// it, so search the whole history (newest first), not just the latest status:
+// an interrupted or automatic run in between must not erase the decision.
+async function ownerDecision(api, sha) {
+  for (let page = 1; page <= 10; page++) {
+    const statuses = await api('GET', `/commits/${sha}/statuses?per_page=100&page=${page}`);
+    requireThat(Array.isArray(statuses), 'Invalid status inventory.');
+    const found = statuses.find(s => s.context === CONTEXT && typeof s.description === 'string'
+      && (s.description.startsWith(OWNER_APPROVED) || s.description.startsWith(OWNER_REVOKED)));
+    if (found) return found;
+    if (statuses.length < 100) return null;
+  }
+  throw new Error('Status inventory exceeded its safety limit.');
+}
+
+// Decide one head's status. Every PR sharing the head must pass, since a
+// commit status belongs to the commit rather than to one PR.
+async function decide(api, prs, version, accepted) {
+  const sha = prs[0].head.sha;
+  const previous = await ownerDecision(api, sha);
+  const marker = `${version}.`;
+  if (previous?.state === 'failure' && previous.description?.startsWith(`${OWNER_REVOKED} ${marker}`)) {
+    return {state: 'failure', description: previous.description};
+  }
+  if (previous?.state === 'success' && previous.description?.startsWith(`${OWNER_APPROVED} ${marker}`)) {
+    return {state: 'success', description: previous.description};
+  }
+  const waiting = new Set(), unresolved = new Set();
+  for (const pr of prs) {
+    if (isOwnerBranch(pr)) continue;
+    const commits = await prCommits(api, pr);
+    if (!commits) { unresolved.add('commit list unavailable or over 250 commits'); continue; }
+    const found = contributors(pr, commits);
+    found.unresolved.forEach(r => unresolved.add(r));
+    const ids = await accepted();
+    for (const [id, login] of found.people) if (!ids.has(id)) waiting.add(login);
+  }
+  if (unresolved.size) {
+    return {state: 'pending', description: clip(`Owner review needed: ${[...unresolved].join('; ')}.`)};
+  }
+  if (waiting.size) {
+    const names = [...waiting].sort();
+    const shown = names.slice(0, 3).map(n => `@${n}`).join(', ') + (names.length > 3 ? ' and others' : '');
+    return {state: 'pending', target: HOW_TO,
+      description: clip(`Waiting for ${shown} to comment the terms ${version} acceptance line (see details).`)};
+  }
+  return {state: 'success', description: prs.every(isOwnerBranch)
+    ? 'Owner branch: the owner\'s own work.'
+    : `All contributors accepted terms ${version}.`};
 }
 
 export async function execute({env, event, api}) {
   validateContext(env, event);
-  const currentMain = async () => {
-    const branch = await api('GET', '/branches/main');
-    requireThat(SHA.test(branch.commit?.sha ?? ''), 'Main has no valid commit SHA.');
-    return branch.commit.sha;
-  };
-  const status = (sha, state, description) => api('POST', `/statuses/${sha}`, {
-    state, context: CONTEXT, description,
-    target_url: `https://github.com/${REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}`,
+  const name = env.GITHUB_EVENT_NAME;
+  const runURL = `https://github.com/${REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}`;
+  const status = (sha, {state, description, target}) => api('POST', `/statuses/${sha}`, {
+    state, context: CONTEXT, description, target_url: target ?? runURL,
   });
+  // Decide under the terms on main now, not the revision this run started
+  // from: a re-run of an older run must not clear PRs under older terms.
+  const mainSHA = (await api('GET', '/branches/main')).commit?.sha;
+  requireThat(SHA.test(mainSHA ?? ''), 'Main could not be read.');
+  const version = await readTerms(api, mainSHA);
 
-  if (env.GITHUB_EVENT_NAME === 'pull_request_target') {
+  // Every surviving run reconciles every open PR, so a run GitHub replaced in
+  // the concurrency queue loses nothing. `skip` is a head just decided by hand.
+  const reconcile = async skip => {
+    const open = await openPRs(api);
+    open.forEach(pr => validatePR(pr, pr.number));
+    const byHead = new Map();
+    for (const pr of open) {
+      if (pr.head.sha !== skip) byHead.set(pr.head.sha, [...(byHead.get(pr.head.sha) ?? []), pr]);
+    }
+    let cache;
+    const accepted = async () => (cache ??= await acceptedIds(api, version));
+    const results = [];
+    let failure = null;
+    for (const [sha, prs] of byHead) {
+      let decision;
+      try {
+        decision = await decide(api, prs, version, accepted);
+      } catch (error) {
+        // Never leave an earlier pass standing when this check could not finish.
+        failure ??= error;
+        decision = {state: 'pending', description: 'Could not finish the check; it re-runs on the next PR or main change.'};
+      }
+      await status(sha, decision);
+      results.push({prs: prs.map(p => p.number), state: decision.state});
+    }
+    if (failure) throw failure;
+    return results;
+  };
+
+  if (name === 'workflow_dispatch') {
+    requireThat(/^[1-9][0-9]*$/.test(env.INPUT_PR_NUMBER ?? ''), 'A pull-request number is required.');
+    requireThat(SHA.test(env.INPUT_HEAD_SHA ?? ''), 'An exact pull-request head SHA is required.');
+    requireThat(['approve', 'revoke'].includes(env.INPUT_DECISION), 'Select approve or revoke.');
+    requireThat(env.INPUT_CONFIRMATION === 'true', 'Affirmative owner confirmation is required.');
+    requireThat(mainSHA === env.GITHUB_SHA, 'Main changed; start a fresh run.');
+    const number = Number(env.INPUT_PR_NUMBER);
+    const pr = await api('GET', `/pulls/${number}`);
+    validatePR(pr, number);
+    requireThat(pr.head.sha === env.INPUT_HEAD_SHA, 'That head is no longer the PR\'s current head.');
+    const approve = env.INPUT_DECISION === 'approve';
+    await status(pr.head.sha, {state: approve ? 'success' : 'failure',
+      description: `${approve ? OWNER_APPROVED : OWNER_REVOKED} ${version}. PR #${number}.`});
+    const results = await reconcile(pr.head.sha);
+    return {mode: env.INPUT_DECISION, number, head: pr.head.sha, version, results};
+  }
+
+  if (name === 'pull_request_target') {
     requireThat(['opened', 'reopened', 'synchronize', 'edited'].includes(event.action)
       && Number.isSafeInteger(event.number) && event.number > 0, 'Unsupported pull-request event.');
-  } else if (env.GITHUB_EVENT_NAME === 'push') {
-    requireThat(event.ref === 'refs/heads/main', 'Only main changes invalidate all reviews.');
-  }
-  // All runs share one workflow concurrency group. GitHub may replace pending
-  // runs, so every surviving run reconciles ALL current PRs, including dispatches
-  // whose approval inputs later fail validation. No event-specific invalidation
-  // can be lost merely because another event replaced it in the queue.
-  const pending = await openPRs(api);
-  for (const pr of pending) {
-    validatePR(pr, pr.number);
-    await status(pr.head.sha, 'pending', 'Owner must verify private rights records for this PR head.');
-  }
-  if (env.GITHUB_EVENT_NAME !== 'workflow_dispatch') {
-    return {mode: 'invalidate', count: pending.length};
+  } else if (name === 'push') {
+    requireThat(event.ref === 'refs/heads/main', 'Only main changes re-check every PR.');
+  } else {
+    requireThat(['created', 'edited'].includes(event.action) && event.issue?.pull_request,
+      'Only pull-request comments can carry an acceptance.');
   }
 
-  validateReviewInputs(env);
-  // Invalidation may run from an older trusted main revision: it can only
-  // remove clearance. Approval must use the currently operative workflow.
-  requireThat(await currentMain() === env.GITHUB_SHA, 'Main changed; start a fresh trusted workflow run.');
-  const number = Number(env.INPUT_PR_NUMBER);
-  requireThat(Number.isSafeInteger(number), 'Invalid pull-request number.');
-  const pr = await api('GET', `/pulls/${number}`);
-  validatePR(pr, number);
-  requireThat(pr.head.sha === env.INPUT_HEAD_SHA, 'The reviewed head is no longer current.');
-  const termsHash = await readTerms(api, env.GITHUB_SHA);
-  requireThat(termsHash === env.INPUT_TERMS_SHA256, 'The operative terms do not match the reviewed text.');
-  if (env.INPUT_DECISION === 'revoke') {
-    await status(pr.head.sha, 'failure', `Owner revoked rights clearance for PR #${number}.`);
-    return {mode: 'revoke', number, head: pr.head.sha, termsHash,
-      receiptHash: env.INPUT_RECEIPT_SHA256};
-  }
-
-  // A commit status belongs to a SHA, not a PR. Do not bless two simultaneous
-  // PRs with different disclosures using one status. Opening/reopening/editing
-  // a PR also invalidates its status through the metadata-only event path.
-  const duplicates = (await openPRs(api)).filter(p => p.head?.sha === pr.head.sha);
-  requireThat(duplicates.length === 1 && duplicates[0].number === number,
-    'Duplicate PR heads need owner resolution before rights clearance.');
-  requireThat(Number.isInteger(pr.commits) && pr.commits > 0 && pr.commits <= 250,
-    'The complete commit inventory must fit the GitHub pull-request API limit.');
-  const commits = [];
-  for (let page = 1; commits.length < pr.commits; page++) {
-    const batch = await api('GET', `/pulls/${number}/commits?per_page=100&page=${page}`);
-    requireThat(Array.isArray(batch) && batch.length > 0, 'The commit inventory is incomplete.');
-    commits.push(...batch);
-  }
-  requireThat(commits.length === pr.commits && commits.every(c => SHA.test(c.sha ?? ''))
-    && commits.at(-1).sha === pr.head.sha, 'The commit inventory does not match the reviewed head.');
-  const inventoryHash = authorInventoryDigest(commits);
-  const disclosuresHash = disclosureDigest(pr);
-  const freshPR = await api('GET', `/pulls/${number}`);
-  validatePR(freshPR, number);
-  requireThat(disclosureDigest(freshPR) === disclosuresHash && freshPR.commits === pr.commits,
-    'The pull request changed during review recording.');
-  requireThat(await currentMain() === env.GITHUB_SHA, 'Main changed during review recording.');
-  await status(pr.head.sha, 'success', `Owner reviewed PR #${number}; terms ${termsHash.slice(0,12)}.`);
-  try {
-    const recordedPR = await api('GET', `/pulls/${number}`);
-    validatePR(recordedPR, number);
-    requireThat(disclosureDigest(recordedPR) === disclosuresHash && recordedPR.commits === pr.commits
-      && await currentMain() === env.GITHUB_SHA, 'Review inputs changed while the status was being recorded.');
-  } catch (error) {
-    // Defense in depth while a newer serialized invalidation waits to run.
-    // Errors reading freshness also withdraw the provisional success.
-    await status(pr.head.sha, 'pending', 'Review inputs changed or could not be rechecked; owner review required.');
-    throw error;
-  }
-  return {mode: 'approve', number, head: pr.head.sha, termsHash,
-    receiptHash: env.INPUT_RECEIPT_SHA256, inventoryHash, disclosuresHash, commits: commits.length,
-    invalidatedCount: pending.length};
+  return {mode: 'reconcile', version, results: await reconcile(null)};
 }
 
 export function githubAPI(token, fetcher = fetch) {
@@ -192,7 +305,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     console.log(output);
     if (process.env.GITHUB_STEP_SUMMARY) {
       await appendFile(process.env.GITHUB_STEP_SUMMARY,
-        `Metadata verification and owner attestation; not automated legal acceptance.\n\n\`\`\`json\n${output}\`\`\`\n`);
+        `Contributor rights status, from GitHub metadata only.\n\n\`\`\`json\n${output}\`\`\`\n`);
     }
   } catch (error) {
     console.error(error.message);
