@@ -4,6 +4,7 @@ import { isEmptySwimView, swimView, type ActivitySwimResponse } from './swimDeta
 import type { StateActivity, StateResponse } from './api';
 import type { CatalogExercise } from './editing';
 import { RouteMap } from './RouteMapView';
+import { drawRoute, loadMapKit, onMapKitFailure } from './mapkit';
 import { ActivityCharts } from './ActivityChartsView';
 import { WorkoutFeedback, type WorkoutFeedbackActions } from './WorkoutFeedbackEditor';
 import { selectedRecord, workoutCorrectionHref } from './workoutRecord';
@@ -490,35 +491,74 @@ const THUMB_WIDTH = 168;
 const THUMB_HEIGHT = 112;
 
 /**
- * The route's shape on the card, fetched only once the card scrolls near the
- * screen. Nothing shows for an activity without a route.
+ * The route on the card: fetched once the card scrolls near the screen,
+ * drawn as its shape at once, then on a muted Apple Maps picture like the
+ * iPhone app's cards. The map lives only while the card is near the screen,
+ * so a long history never holds hundreds of maps; the shape stays when maps
+ * can't load. Nothing shows for an activity without a route.
  */
 function RouteThumb({ activityId, family }: { activityId: string; family: string }) {
   const ref = useRef<HTMLSpanElement>(null);
   const [segments, setSegments] = useState<LatLon[][] | null>(null);
+  const [near, setNear] = useState(false);
   useEffect(() => {
     const element = ref.current;
     if (!element) return;
-    let live = true;
-    const load = () => { void cardRoute(activityId).then((found) => { if (live) setSegments(found); }); };
-    if (typeof IntersectionObserver === 'undefined') { load(); return () => { live = false; }; }
+    if (typeof IntersectionObserver === 'undefined') { setNear(true); return; }
     const observer = new IntersectionObserver((seen) => {
-      if (seen.some((e) => e.isIntersecting)) { observer.disconnect(); load(); }
+      const last = seen[seen.length - 1];
+      if (last) setNear(last.isIntersecting);
     }, { rootMargin: '400px 0px' });
     observer.observe(element);
-    return () => { live = false; observer.disconnect(); };
+    return () => observer.disconnect();
   }, [activityId]);
+  useEffect(() => {
+    if (!near || segments !== null) return;
+    let live = true;
+    void cardRoute(activityId).then((found) => { if (live) setSegments(found); });
+    return () => { live = false; };
+  }, [activityId, near, segments]);
   if (segments !== null && segments.length === 0) return null;
-  const paths = segments ? routeOutline(segments, THUMB_WIDTH, THUMB_HEIGHT, 10) : [];
+  const paths = segments ? routeOutline(segments, THUMB_WIDTH, THUMB_HEIGHT, 14) : [];
   return (
-    <span ref={ref} className={`route-thumb${segments ? '' : ' loading'}`}>
+    <span ref={ref} className={`route-thumb line-${family}${segments ? '' : ' loading'}`}>
       {paths.length > 0 && (
         <svg viewBox={`0 0 ${THUMB_WIDTH} ${THUMB_HEIGHT}`} role="img" aria-label="Route">
-          {paths.map((d, i) => <path key={i} d={d} className={`thumb-line line-${family}`} />)}
+          {paths.map((d, i) => <path key={i} d={d} className="thumb-line" />)}
         </svg>
       )}
+      {segments && segments.length > 0 && near ? <ThumbMap segments={segments} /> : null}
     </span>
   );
+}
+
+/** The route on a still, muted map over the card's shape. Removes itself
+ * when MapKit can't load, leaving the shape. */
+function ThumbMap({ segments }: { segments: LatLon[][] }) {
+  const element = useRef<HTMLSpanElement>(null);
+  const [failed, setFailed] = useState(false);
+  const [drawn, setDrawn] = useState(false);
+  useEffect(() => {
+    const parent = element.current;
+    if (failed || !parent) return;
+    let cancelled = false;
+    let map: ReturnType<typeof drawRoute> | null = null;
+    const stopWatching = onMapKitFailure(() => setFailed(true));
+    loadMapKit()
+      .then((mapkit) => {
+        if (cancelled) return;
+        map = drawRoute(mapkit, parent, segments, 'thumbnail');
+        setDrawn(true);
+      })
+      .catch(() => { if (!cancelled) setFailed(true); });
+    return () => {
+      cancelled = true;
+      stopWatching();
+      map?.map.destroy();
+    };
+  }, [segments, failed]);
+  if (failed) return null;
+  return <span ref={element} className={`thumb-map${drawn ? ' drawn' : ''}`} aria-hidden="true" />;
 }
 
 /** Keeps month headers just under the sticky filter bar, however tall it wraps. */

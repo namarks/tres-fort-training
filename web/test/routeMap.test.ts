@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, fetchActivityRoute, fetchMapToken, type StateResponse } from '../src/api';
-import { MAPKIT_LIBRARIES, MAPKIT_SCRIPT, MapUnavailableError, startMapKit, type MapKitApi } from '../src/mapkit';
+import { MAPKIT_LIBRARIES, MAPKIT_SCRIPT, MapUnavailableError, routeMapOptions, startMapKit, type MapKitApi } from '../src/mapkit';
 import { drawableSegments, recoveryText, routableActivityIds, routeOutline } from '../src/routeMap';
 
 /** The shape src/activityRoute.ts serves: two segments split by a pause. */
@@ -177,5 +177,22 @@ describe('heart rate recovery after a recorded run', () => {
     expect(recoveryText(null)).toBeNull();
     expect(recoveryText(undefined)).toBeNull();
     expect(recoveryText({ at_stop: 150, after_60s: null, after_120s: null })).toBeNull();
+  });
+});
+
+describe('a history card map', () => {
+  it('is a muted, still picture so a click reaches the card', () => {
+    const thumb = routeMapOptions('thumbnail');
+    expect(thumb).toMatchObject({
+      mapType: 'mutedStandard', isScrollEnabled: false, isZoomEnabled: false,
+      showsZoomControl: false, showsScale: 'hidden', showsCompass: 'hidden', showsPointsOfInterest: false,
+    });
+  });
+
+  it('leaves the day panel map as it was', () => {
+    const detail = routeMapOptions('detail');
+    expect(detail).toMatchObject({ showsScale: 'adaptive', showsPointsOfInterest: false });
+    expect(detail).not.toHaveProperty('mapType');
+    expect(detail).not.toHaveProperty('isScrollEnabled');
   });
 });

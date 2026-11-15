@@ -124,21 +124,42 @@ export function accentColor(element: Element): string {
   return getComputedStyle(element).getPropertyValue('--signal').trim() || '#c22d0c';
 }
 
-/** Draws each segment as its own line and frames the whole route. */
-export function drawRoute(mapkit: MapKitApi, element: HTMLElement, segments: LatLon[][]) {
-  const map = new mapkit.Map(element, {
+/** How a route map looks: the day panel's map, or a history card's still preview. */
+export type RouteMapLook = 'detail' | 'thumbnail';
+
+/** MapKit JS options for each look. A thumbnail is a muted, still picture
+ * of the route, like the iPhone app's card snapshots: no controls, no
+ * panning or zooming, so a click falls through to the card. */
+export function routeMapOptions(look: RouteMapLook): Record<string, unknown> {
+  const shared = {
     colorScheme: 'adaptive',
     showsPointsOfInterest: false,
     showsMapTypeControl: false,
     isRotationEnabled: false,
     showsCompass: 'hidden',
-    showsScale: 'adaptive',
-  });
+  };
+  if (look === 'detail') return { ...shared, showsScale: 'adaptive' };
+  return {
+    ...shared,
+    mapType: 'mutedStandard',
+    showsScale: 'hidden',
+    showsZoomControl: false,
+    showsUserLocationControl: false,
+    isScrollEnabled: false,
+    isZoomEnabled: false,
+  };
+}
+
+/** Draws each segment as its own line and frames the whole route. */
+export function drawRoute(mapkit: MapKitApi, element: HTMLElement, segments: LatLon[][], look: RouteMapLook = 'detail') {
+  const map = new mapkit.Map(element, routeMapOptions(look));
   const color = accentColor(element);
-  const styles = segments.map(() => new mapkit.Style({ lineWidth: 4, lineJoin: 'round', lineCap: 'round', strokeColor: color }));
+  const width = look === 'detail' ? 4 : 3;
+  const inset = look === 'detail' ? 24 : 14;
+  const styles = segments.map(() => new mapkit.Style({ lineWidth: width, lineJoin: 'round', lineCap: 'round', strokeColor: color }));
   const lines = segments.map((segment, i) =>
     new mapkit.PolylineOverlay(segment.map((p) => new mapkit.Coordinate(p.lat, p.lon)), { style: styles[i] }));
   map.addOverlays(lines);
-  map.showItems(lines, { animate: false, padding: new mapkit.Padding(24, 24, 24, 24) });
+  map.showItems(lines, { animate: false, padding: new mapkit.Padding(inset, inset, inset, inset) });
   return { map, styles };
 }
