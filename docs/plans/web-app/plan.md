@@ -1,6 +1,6 @@
 # Plan on the web
 
-Slug: web-app · Status: active · Updated: 2026-11-13 · Theme: platform
+Slug: web-app · Status: active · Updated: 2026-11-15 · Theme: platform
 
 ## Goal
 
@@ -182,6 +182,20 @@ partner training are not web features.
     `PUT/DELETE /api/plan/program` (a grid of days, targets by week and a
     ramp for any workout). The owner, 2026-11-10: the web is the place for
     detailed block design ([progressive plans](../progressive-plans/plan.md) P4).
+  - Then one Plan page (owner, 2026-11-15: one page instead of separate
+    Calendar and Block tabs, without two calendars, and creating a plan
+    should feel intuitive; the owner picked "Weeks, not months"): `#plan`
+    (`web/src/PlanPage.tsx`, rules in `web/src/planWeeks.ts`) shows one
+    calendar of week rows, from the block's start (at most four weeks back)
+    through two usual weeks after it, with each block week labeled in its
+    row. A date's panel keeps its date-only actions and changes a weekday
+    in the block for this week, every week of the block, or this week and
+    later; outside a block it changes the usual week's day. Block settings,
+    targets by week and the retained-draft review moved into
+    `web/src/BlockEditor.tsx`; date-only changes wait while the block has
+    unsaved changes, since the server checks them against the saved block.
+    With no block and an empty week, the page opens on "Make your plan".
+    `#calendar` and `#block` still open it. No API change.
 - [ ] **P3 — Trends and progress**
   - Equal in importance to plan editing; it can run alongside P2 once P1 is
     in.
@@ -272,6 +286,13 @@ partner training are not web features.
     session on the day is shown against the goal. The Methodology page's
     "Your event" section explains each figure and cites Riegel (1981).
     Everything else comes from `GET /api/state`.
+  - Then (owner, 2026-11-15: route previews looked broken without a map,
+    use wide windows, show start and finish and replay the route): history
+    cards draw their route on a muted, still Apple Maps (MapKit JS) map
+    while near the screen; the record's route map marks start and finish
+    and, the first time an activity is opened in a visit, a dot runs the
+    route (skipped for reduced motion); at 1500 px and wider the Activity
+    page shows summary, history and record in three columns. No API change.
   - Still to do in P3: the Analysis section's Strength (exercise charts:
     top set, estimated max, volume, best weight at each rep count, weekly
     sets per muscle), Running and rides (weekly distance, pace at a heart
@@ -332,8 +353,8 @@ publicly in P5. P3's Activity page and the Analysis section's
 Overview are built; the Event page (a goal event set without AI, with a
 finish estimate and the weeks heading in) is in review, then the Strength
 page (exercise charts), Running and rides, Recovery and Records. The owner
-also wants the calendar to grow into a fuller planning page, following the iPhone Plan tab's
-redesign. Each later deploy needs the owner's written go-ahead.
+also wanted one fuller planning page: the Plan page of weeks (P2) and the
+Activity page's maps and wide layout (P3) are in review in PR #4. Each later deploy needs the owner's written go-ahead.
 
 ## Notes / open questions
 
