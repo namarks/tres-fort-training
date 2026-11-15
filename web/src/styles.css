@@ -226,6 +226,15 @@ p { margin: 0 0 0.75rem; }
 .run-lap-target.on-target { color: var(--done); }
 .route-map.outline svg { display: block; width: 100%; height: 100%; }
 .route-line { fill: none; stroke: var(--signal); stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+/* Start and finish on a route (and the runner while it replays): white-ringed
+ * dots, so they read on any map; the label says which is which. */
+.route-marker { box-sizing: border-box; width: 14px; height: 14px; border-radius: 50%; border: 3px solid #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 0.35); }
+.route-marker.start { background: var(--done); }
+.route-marker.finish { background: var(--hero, #15273e); }
+.route-marker.runner { width: 16px; height: 16px; background: var(--signal); box-shadow: 0 0 0 5px color-mix(in srgb, var(--signal) 30%, transparent), 0 1px 3px rgb(0 0 0 / 0.35); }
+.route-end { stroke: #fff; stroke-width: 3; }
+.route-end.start { fill: var(--done); }
+.route-end.finish { fill: var(--hero, #15273e); }
 .activity-charts { margin-top: 0.75rem; display: grid; gap: 0.75rem; }
 .chart { margin: 0; }
 .chart figcaption { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; margin-bottom: 0.2rem; }

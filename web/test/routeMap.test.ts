@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, fetchActivityRoute, fetchMapToken, type StateResponse } from '../src/api';
 import { MAPKIT_LIBRARIES, MAPKIT_SCRIPT, MapUnavailableError, routeMapOptions, startMapKit, type MapKitApi } from '../src/mapkit';
-import { drawableSegments, recoveryText, routableActivityIds, routeOutline } from '../src/routeMap';
+import { drawableSegments, metersBetween, recoveryText, replayAt, routableActivityIds, routeEnds, routeOutline, routeOutlineEnds, routeReplay } from '../src/routeMap';
 
 /** The shape src/activityRoute.ts serves: two segments split by a pause. */
 const ROUTE = {
@@ -138,7 +138,7 @@ describe('loading Apple Maps', () => {
     expect(appendScript).not.toHaveBeenCalled();
   });
 
-  it('loads MapKit JS with the token and only the map and overlay libraries', async () => {
+  it('loads MapKit JS with the token and only the map, overlay and annotation libraries', async () => {
     const mapkit = fakeMapKit();
     let loaded: MapKitApi | undefined;
     const appendScript = vi.fn(async () => {
@@ -150,7 +150,7 @@ describe('loading Apple Maps', () => {
     expect(appendScript).toHaveBeenCalledWith(expect.objectContaining({
       src: MAPKIT_SCRIPT,
       'data-token': 'mapkit-token',
-      'data-libraries': 'map,overlays',
+      'data-libraries': 'map,overlays,annotations',
     }));
     expect(MAPKIT_SCRIPT.startsWith('https://cdn.apple-mapkit.com/')).toBe(true);
     expect(mapkit.load).toHaveBeenCalledWith(MAPKIT_LIBRARIES);
@@ -194,5 +194,62 @@ describe('a history card map', () => {
     expect(detail).toMatchObject({ showsScale: 'adaptive', showsPointsOfInterest: false });
     expect(detail).not.toHaveProperty('mapType');
     expect(detail).not.toHaveProperty('isScrollEnabled');
+  });
+});
+
+describe('replaying a route', () => {
+  const a = { lat: 45.5, lon: -122.6 };
+  const b = { lat: 45.51, lon: -122.6 };
+  const c = { lat: 45.52, lon: -122.6 };
+  const d = { lat: 45.53, lon: -122.6 };
+
+  it('starts at the first point and finishes at the last, across a pause', () => {
+    expect(routeEnds([[a, b], [c, d]])).toEqual({ start: a, end: d });
+    expect(routeEnds([])).toBeNull();
+  });
+
+  it('measures distance along the route, not across a pause', () => {
+    const replay = routeReplay([[a, b], [c, d]]);
+    const leg = metersBetween(a, b);
+    expect(leg).toBeGreaterThan(1100);
+    expect(leg).toBeLessThan(1120);
+    expect(replay.total).toBeCloseTo(2 * leg, 3);
+  });
+
+  it('moves the runner at an even pace by distance', () => {
+    const replay = routeReplay([[a, b, c]]);
+    const half = replayAt(replay, 0.5);
+    expect(half.at!.lat).toBeCloseTo(b.lat, 6);
+    const quarter = replayAt(replay, 0.25);
+    expect(quarter.at!.lat).toBeCloseTo(45.505, 6);
+    expect(quarter.done).toEqual([[a, quarter.at]]);
+  });
+
+  it('lights finished segments and stops at the finish', () => {
+    const replay = routeReplay([[a, b], [c, d]]);
+    const three = replayAt(replay, 0.75);
+    expect(three.done[0]).toEqual([a, b]);
+    expect(three.done[1]![0]).toEqual(c);
+    expect(replayAt(replay, 1)).toEqual({ done: replay.segments, at: d });
+    expect(replayAt(replay, 0).at).toEqual(a);
+  });
+
+  it('keeps each segment’s ends when it thins a long route', () => {
+    const long = Array.from({ length: 1001 }, (_, i) => ({ lat: 45.5 + i * 0.0001, lon: -122.6 }));
+    const replay = routeReplay([long], 100);
+    expect(replay.segments[0]!.length).toBeLessThanOrEqual(102);
+    expect(replay.segments[0]![0]).toEqual(long[0]);
+    expect(replay.segments[0]!.at(-1)).toEqual(long[1000]);
+  });
+});
+
+describe('start and finish on the route without a map', () => {
+  it('sit where the outline begins and ends', () => {
+    const route = [[{ lat: 45.5, lon: -122.6 }, { lat: 45.51, lon: -122.6 }], [{ lat: 45.51, lon: -122.59 }, { lat: 45.5, lon: -122.59 }]];
+    const paths = routeOutline(route, 320, 200);
+    const ends = routeOutlineEnds(route, 320, 200)!;
+    expect(paths[0]!.startsWith(`M${ends.start[0].toFixed(1)} ${ends.start[1].toFixed(1)}`)).toBe(true);
+    expect(paths[1]!.endsWith(`L${ends.end[0].toFixed(1)} ${ends.end[1].toFixed(1)}`)).toBe(true);
+    expect(routeOutlineEnds([], 320, 200)).toBeNull();
   });
 });
