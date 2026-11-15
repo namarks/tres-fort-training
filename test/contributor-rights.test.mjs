@@ -26,13 +26,16 @@ const OWNER_PR = {...FORK_PR, number: 8, user: {id: 5323089, login: 'namarks', t
   head: {sha: OTHER, repo: {full_name: REPOSITORY}}};
 const commit = (author, message = 'Synthetic commit') => ({sha: HEAD, author,
   commit: {author: {name: 'Synthetic', email: 'synthetic@example.test'}, message}});
-const ACCEPT = {user: SAM, body: `Thanks!\n\n${acceptanceLine('1.1')}`};
+const ACCEPT = {user: SAM, body: `Thanks!\n\n${acceptanceLine('1.1')}`,
+  html_url: `https://github.com/${REPOSITORY}/pull/3#issuecomment-1`};
 
 function fixture(options = {}) {
   const writes = [], reads = [];
   const prs = options.prs ?? [FORK_PR];
   const commits = options.commits ?? [commit(SAM)];
-  const comments = options.comments ?? [];
+  // Comments sit on a pull request unless a test says otherwise.
+  const comments = (options.comments ?? [])
+    .map(c => ({html_url: `https://github.com/${REPOSITORY}/pull/3#issuecomment-1`, ...c}));
   const api = async (method, path, body) => {
     if (method === 'POST') { writes.push({path, body}); return {}; }
     reads.push(path);
@@ -187,6 +190,12 @@ test('the owner can approve or revoke one exact head, and it sticks for that ter
   const after = fixture({comments: [ACCEPT], statuses: {[HEAD]: [{context: CONTEXT, ...revoked}]}});
   await after.run();
   assert.deepEqual(after.states(), [[HEAD, 'failure']]);
+});
+
+test('an acceptance posted on an ordinary issue does not count', async () => {
+  const f = fixture({comments: [{...ACCEPT, html_url: `https://github.com/${REPOSITORY}/issues/4#issuecomment-2`}]});
+  await f.run();
+  assert.deepEqual(f.states(), [[HEAD, 'pending']]);
 });
 
 test('a manual decision also re-checks the other open heads', async () => {

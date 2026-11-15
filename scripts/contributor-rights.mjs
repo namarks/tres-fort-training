@@ -129,6 +129,8 @@ export function contributors(pr, commits) {
   return {people, unresolved: [...new Set(unresolved)]};
 }
 
+const PR_COMMENT_URL = `https://github.com/${REPOSITORY}/pull/`;
+
 // Account ids that commented the acceptance line for this terms version.
 async function acceptedIds(api, version) {
   const wanted = normalize(acceptanceLine(version));
@@ -137,7 +139,9 @@ async function acceptedIds(api, version) {
     const batch = await api('GET', `/issues/comments?sort=created&direction=asc&per_page=100&page=${page}`);
     requireThat(Array.isArray(batch), 'Invalid comment inventory.');
     for (const c of batch) {
+      // Only comments on this repository's pull requests count, not issues.
       if (Number.isSafeInteger(c.user?.id) && c.user?.type !== 'Bot'
+        && typeof c.html_url === 'string' && c.html_url.startsWith(PR_COMMENT_URL)
         && typeof c.body === 'string' && normalize(c.body).includes(wanted)) ids.add(c.user.id);
     }
     if (batch.length < 100) return ids;
