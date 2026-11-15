@@ -22,8 +22,8 @@ shows whether everyone who wrote the work has accepted those terms.
    To accept on behalf of an employer or other entity, add a line naming it
    in the same comment.
 4. The `contributor rights` check updates within a minute. One acceptance
-   covers your later pull requests under the same terms version, so you
-   comment once, not on every pull request.
+   covers all your pull requests open at that moment and your later ones under
+   the same terms version, so you comment once, not on every pull request.
 
 Each co-author needs to post the same comment. Opening a pull request,
 checking a template box or passing CI is not acceptance. Do not post

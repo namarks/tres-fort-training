@@ -27,10 +27,12 @@ submitted work. Casual discussion, unsolicited ideas, private support or tester
 feedback, and material clearly designated “Not a Contribution” are excluded.
 Third-party material is handled separately as described below.
 
-Acceptance covers your identified Contribution and your intentional future
-Contributions under that same accepted version. Earlier work is covered only if
-you explicitly identify and include it in an acceptance record; these terms
-cannot supply rights that you or another rights-holder never granted.
+Acceptance covers your Contributions in the Project's pull requests that are
+open when you accept, as described under "Acceptance and merge records", and
+your intentional future Contributions under that same accepted version. Other
+earlier work is covered only if you explicitly identify and include it in an
+acceptance record; these terms cannot supply rights that you or another
+rights-holder never granted.
 
 ## Ownership and copyright license
 
@@ -120,9 +122,10 @@ applicable law does not permit excluding.
 ## Acceptance and merge records
 
 Acceptance is the comment above, posted by the authenticated GitHub account
-that authored the work. It covers that account's Contributions to the pull
-request it is posted on and its intentional future Contributions under the same
-version. If you accept on behalf of an entity, say so in the same comment and
+that authored the work. It covers that account's Contributions in every
+pull request to the Project that is open when the comment is posted, including
+the one it is posted on, and its intentional future Contributions under the
+same version. If you accept on behalf of an entity, say so in the same comment and
 name the entity. GitHub keeps the comment, its author account and its timestamp
 as the acceptance record; the agreement text for each version is the
 `CONTRIBUTOR-TERMS.md` file on the Project's `main` branch carrying that version
