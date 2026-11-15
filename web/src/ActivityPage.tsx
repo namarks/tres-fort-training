@@ -117,6 +117,9 @@ export function ActivityPage({ state, catalog, initialKey = null, ...feedbackAct
   return (
     <main className="activity-page">
       <div className="activity-main">
+        {/* This week, highlights and the last eight weeks: the left column of
+            three on a wide window, above History otherwise. */}
+        <div className="activity-overview">
         <h1>Activity</h1>
         <WeekCard summary={summary} miles={miles} />
 
@@ -159,6 +162,8 @@ export function ActivityPage({ state, catalog, initialKey = null, ...feedbackAct
             <WeeksChart summary={summary} />
           </section>
         )}
+
+        </div>
 
         <section className="activity-section" aria-labelledby="history-title">
           <div className="activity-section-head">

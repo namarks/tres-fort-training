@@ -406,6 +406,20 @@ input.short { width: 5.5rem; }
   padding: 24px; max-width: 1240px; margin: 0 auto;
 }
 .activity-main { min-width: 0; display: flex; flex-direction: column; gap: 24px; }
+.activity-overview { min-width: 0; display: flex; flex-direction: column; gap: 24px; }
+/* A wide window: this week and trends | history | the chosen record, so the
+   page uses the width instead of leaving it empty (owner, 2026-11-15). */
+@media (min-width: 1500px) {
+  .activity-page { max-width: 1880px; grid-template-columns: 400px minmax(0, 1fr) 440px; }
+  .activity-main { display: contents; }
+  .activity-overview {
+    position: sticky; top: 24px; align-self: start; max-height: calc(100vh - 48px); overflow: auto;
+    scrollbar-width: thin; padding-bottom: 4px;
+  }
+  .activity-overview .highlights { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .activity-overview .weeks-label { font-size: 0.6rem; }
+  .activity-main > .activity-section { min-width: 0; }
+}
 .activity-section-head { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; margin-bottom: 0.6rem; }
 /* Family colors, as the app's Activity tab: strength navy, endurance orange,
    sports teal; on the hero card, the fort's colors. */
