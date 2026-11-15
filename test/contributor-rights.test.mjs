@@ -55,9 +55,11 @@ function fixture(options = {}) {
     if (match) return commits.slice((Number(match[1])-1)*100, Number(match[1])*100);
     match = path.match(/^\/issues\/comments\?sort=created&direction=asc&per_page=100&page=(\d+)$/);
     if (match) return comments.slice((Number(match[1])-1)*100, Number(match[1])*100);
-    match = path.match(/^\/commits\/([a-f0-9]{40})\/status\?per_page=100&page=(\d+)$/);
-    if (match) return {statuses: (options.statuses?.[match[1]] ?? [])
-      .slice((Number(match[2])-1)*100, Number(match[2])*100)};
+    match = path.match(/^\/commits\/([a-f0-9]{40})\/statuses\?per_page=100&page=(\d+)$/);
+    if (match) {
+      if (options.failStatuses?.has(match[1])) throw new Error('GitHub unavailable');
+      return (options.statuses?.[match[1]] ?? []).slice((Number(match[2])-1)*100, Number(match[2])*100);
+    }
     throw new Error(`Unexpected API request ${method} ${path}`);
   };
   const run = (env = {}, event = {}) => execute({env: {...ENV, ...env}, event: {...EVENT, ...event}, api});
@@ -219,6 +221,17 @@ test('an owner decision is found past a full page of other contexts', async () =
   const f = fixture({comments: [ACCEPT], statuses: {[HEAD]: [...others, revoked]}});
   await f.run();
   assert.deepEqual(f.states(), [[HEAD, 'failure']]);
+});
+
+test('an owner block survives an interrupted check and later automatic runs', async () => {
+  const revoked = {context: CONTEXT, state: 'failure', description: 'Owner revoked this head under terms 1.1. PR #7.'};
+  const interrupted = fixture({comments: [ACCEPT], failStatuses: new Set([HEAD])});
+  await assert.rejects(interrupted.run());
+  const pending = {context: CONTEXT, ...interrupted.writes[0].body};
+  const auto = {context: CONTEXT, state: 'pending', description: 'Waiting for @sam-example.'};
+  const later = fixture({comments: [ACCEPT], statuses: {[HEAD]: [pending, auto, revoked]}});
+  await later.run();
+  assert.deepEqual(later.states(), [[HEAD, 'failure']]);
 });
 
 test('a check that cannot finish withdraws an earlier pass', async () => {

@@ -159,15 +159,17 @@ async function acceptedIds(api, version) {
 
 const clip = text => text.length <= 140 ? text : `${text.slice(0, 137)}...`;
 
-// The combined status lists only the latest status for each context, so
-// other contexts' history can't push this one off the page.
-async function latestStatus(api, sha) {
+// The owner's newest decision on this head. Automatic statuses never replace
+// it, so search the whole history (newest first), not just the latest status:
+// an interrupted or automatic run in between must not erase the decision.
+async function ownerDecision(api, sha) {
   for (let page = 1; page <= 10; page++) {
-    const combined = await api('GET', `/commits/${sha}/status?per_page=100&page=${page}`);
-    requireThat(Array.isArray(combined?.statuses), 'Invalid status inventory.');
-    const found = combined.statuses.find(s => s.context === CONTEXT);
+    const statuses = await api('GET', `/commits/${sha}/statuses?per_page=100&page=${page}`);
+    requireThat(Array.isArray(statuses), 'Invalid status inventory.');
+    const found = statuses.find(s => s.context === CONTEXT && typeof s.description === 'string'
+      && (s.description.startsWith(OWNER_APPROVED) || s.description.startsWith(OWNER_REVOKED)));
     if (found) return found;
-    if (combined.statuses.length < 100) return null;
+    if (statuses.length < 100) return null;
   }
   throw new Error('Status inventory exceeded its safety limit.');
 }
@@ -176,7 +178,7 @@ async function latestStatus(api, sha) {
 // commit status belongs to the commit rather than to one PR.
 async function decide(api, prs, version, accepted) {
   const sha = prs[0].head.sha;
-  const previous = await latestStatus(api, sha);
+  const previous = await ownerDecision(api, sha);
   const marker = `${version}.`;
   if (previous?.state === 'failure' && previous.description?.startsWith(`${OWNER_REVOKED} ${marker}`)) {
     return {state: 'failure', description: previous.description};
