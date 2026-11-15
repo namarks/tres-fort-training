@@ -141,9 +141,15 @@ gh pr checks "$PR"
 - PRs run one iOS smoke job on iPhone: the app build plus every unit test,
   with no UI journeys. The release check (six full UI shards plus the iPad Station and
   App Store device jobs) runs nightly on `main`, on demand with **Run
-  workflow**, and on a PR that changes `.github/workflows/ci.yml`,
-  `scripts/verify-ios.sh`, `scripts/ci-ios-scope.py`, their tests or a list
-  in `.github/ios-tests/`. UI journey breaks surface in the nightly check. A
+  workflow**, and on a PR that changes the native verifier, its tests, device
+  lists in `.github/ios-tests/`, or packaging inputs listed in
+  `scripts/ci-ios-scope.py`. Workflow setup, scope-selector and contract-test
+  changes use smoke plus the affected deterministic checks. The semantic
+  contract in `test/ci-ios-workflow.test.mjs` protects the full matrix and
+  native-test commands. If a workflow change alters native commands, devices,
+  matrix coverage or test filters, require a manual full run on its branch
+  before merge; a passing contract does not qualify changed native execution.
+  UI journey breaks surface in the nightly check. A
   green smoke run does not cover iPad, Station or App Store packaging: for a
   PR that changes those, run the workflow on its branch and report that
   result too. Merging or closing the

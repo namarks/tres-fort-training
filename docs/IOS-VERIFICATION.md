@@ -31,9 +31,26 @@ not substitute for the required CI unit and smoke coverage before merging an
 iOS change.
 
 CI uses `--ui-suite smoke` for ordinary iOS changes on pull requests and pushes
-to main: one iPhone job. Changes to the workflow, verifier, scope selector,
-their contract tests, or a device job's list in `.github/ios-tests/` select
-`full` on the PR and push, so they prove the full job budget before merging.
+to main: one iPhone job. Routine workflow download, caching and timeout edits,
+scope-selector changes and their contract tests also use smoke, together with
+the affected deterministic setup, scope, workflow and verifier checks.
+Changes to the native verifier, its tests, device lists in `.github/ios-tests/`,
+or the packaging inputs below select `full` on the PR and push.
+Those packaging inputs are both XcodeGen project specs, source-copy and plist
+preparation scripts, the App Store project guard and its packaging tests, and
+app/widget Info.plist and entitlement files.
+
+`test/ci-ios-workflow.test.mjs` parses the workflow and pins the full matrix,
+suite wiring, device commands and conditions, and blocking aggregate checks.
+It exercises the verification step with synthetic commands to check required
+invocations and failure handling. The scope test also invokes the contract, so
+removing either invocation alone is detected. Changes limited to selection or
+these contracts are checked directly and use the iPhone smoke job to exercise
+the workflow. Routine setup tests live separately in `test/ci-ios-setup.test.py`.
+If a workflow edit changes native commands, devices, matrix coverage or test
+filters, the reviewer must require a manual full run on that branch before
+merge. Passing the contracts alone does not qualify those native changes.
+These regression checks supplement the required independent review of the exact commit.
 The smoke job builds the app and both test bundles, then runs every
 `TresFortTests` unit test and no UI journeys. On November 7, 2026 Nick chose to
 keep PRs to build plus unit tests: the six smoke journeys took about 5 of the
@@ -53,7 +70,8 @@ regression that only those jobs catch can surface in the release check. It runs:
 - nightly on main at 11:17 UTC (early morning Pacific time);
 - on demand with the CI workflow's **Run workflow** action, on main or on a
   risky PR's branch (for example a Station or App Store packaging change);
-- on a PR that changes the CI machinery or a device test list, as above.
+- on a PR that changes the native verifier, its tests, device lists or packaging
+  inputs, as above; changes to native workflow execution require a manual full run.
 
 Before a TestFlight or App Store upload, confirm the release check passed on
 the exact main commit being built: use that night's run if main has not moved,
@@ -248,8 +266,10 @@ it to one particular workflow.
 
 Changes confined to backend source, migrations, backend TypeScript tests, the
 web app (`web/`), the marketing site (`website/`), the Claude plugin
-(`plugins/`), or documentation skip iOS jobs; the iOS build copies only `ios/`. Shared fixtures under `ios/`, verification scripts,
-workflow files, package configuration, and unknown paths trigger smoke coverage.
+(`plugins/`), or documentation skip iOS jobs; the iOS build copies only `ios/`.
+Ordinary app changes, shared fixtures under `ios/`, routine workflow/setup
+changes, package configuration and unknown paths trigger smoke coverage.
+The native-verification and packaging inputs listed above take precedence and run full.
 `scripts/ci-ios-scope.py` compares the tested PR merge with its base or the entire
 push range, including deletions and both sides of renames. A missing Git base or
 failed scope job fails the aggregate; only an explicit `skip` decision permits
