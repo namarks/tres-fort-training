@@ -11,7 +11,7 @@ Describe the checks run and anything that remains unverified.
 - [ ] Third-party code and assets retain their notices; any contribution-rights questions are identified for the maintainer before merge.
 
 Use the private channels in [SECURITY.md](https://github.com/namarks/tres-fort-training/blob/main/SECURITY.md) for sensitive reports.
-Contributions require the [contributor terms](https://github.com/namarks/tres-fort-training/blob/main/CONTRIBUTOR-TERMS.md)
+Contributions require the [contributor terms](https://github.com/namarks/tres-fort-training/blob/main/CONTRIBUTOR-TERMS.md).
 First-time contributors accept them by commenting "I accept the Très Fort
 Contributor Terms version 1.1." on this pull request (see
 [contributor acceptance](https://github.com/namarks/tres-fort-training/blob/main/docs/CONTRIBUTOR-ACCEPTANCE.md)).
