@@ -330,6 +330,8 @@ struct WorkoutsView: View {
         } label: {
             Label("Edit weeks", systemImage: "ellipsis.circle")
                 .font(Theme.mono(14, .bold))
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
         }
         .disabled(sync.isRoutineMutationInFlight)
         .accessibilityIdentifier("plan.block.menu")
