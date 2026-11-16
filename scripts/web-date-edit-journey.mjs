@@ -179,7 +179,7 @@ export async function oneDateRemovedJourney({ page, origin, apiCall }) {
   await recovery(page).getByRole('button', { name: 'Close and review the date again', exact: true }).click();
   await recovery(page).waitFor({ state: 'detached' });
   await page.reload();
-  await page.getByRole('region', { name: 'Your usual week', exact: true }).waitFor();
+  await page.getByRole('row', { name: 'Every week', exact: true }).waitFor();
   assert.equal(await recovery(page).count(), 0, 'A terminal missing copy must not trap the calendar after reload.');
   assert.equal((await apiCall('GET', '/api/state')).plan.workouts.filter(workout => workout.one_time_date).length, 0,
     'Closing a confirmed deleted copy never retries its creation.');

@@ -210,8 +210,8 @@ export function NewBlock({ state, workouts, write, busy, today, accountId, onCan
   </section>;
   return (
     <section className="block-intro panel" aria-labelledby="block-new-title">
-      <h2 id="block-new-title">Plan a block</h2>
-      <p>A block is a run of weeks that can differ from each other. It holds any mix of workouts, and each week can change its days and targets.</p>
+      <h2 id="block-new-title">Start a training block</h2>
+      <p>A block is a set number of weeks that can differ from each other: add load for three weeks, then take an easier one. It starts as copies of your usual week, and nothing changes until you start it.</p>
       {retained.record && <p className="muted">Your unfinished block is kept in this browser when you leave this page.</p>}
       {exists && <p role="alert" className="problem">A block has been saved since you started. Your new-block draft is kept below, but cannot replace that block. Discard this draft to work with the saved block.</p>}
       {needsReview && !exists && <section className="panel" aria-label="Review new-block draft">
@@ -238,7 +238,7 @@ export function NewBlock({ state, workouts, write, busy, today, accountId, onCan
           <button type="submit" disabled={busy || !body || needsReview || exists}>Start from my week</button>
           <button type="button" className="ghost" disabled={busy} onClick={cancel}>{retained.record ? 'Discard new-block draft' : 'Cancel'}</button>
         </div>
-        <p className="muted fine">Every week starts as a copy of your reviewed usual week. Then change any day on the calendar, give weeks their own targets, or ramp a target up week by week.</p>
+        <p className="muted fine">Then change any day on the calendar, give weeks their own targets, or ramp a target up week by week. Training for an event? <a href="#analysis/event">Set its date</a> to follow your progress toward it.</p>
       </form>
       <p className="muted fine">In the iPhone app, Plan a block can also lay out your runs to an event or keep building your long run. Those blocks show here too.</p>
     </section>

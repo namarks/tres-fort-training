@@ -2,11 +2,11 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import type { WeeklySchedule } from '../../src/types';
-import { RoutineEditor } from '../src/CalendarEditing';
+import { AddWorkoutToWeek, EveryWeekRow, EveryWeekdayPanel } from '../src/EveryWeek';
 import type { Slot, Workout } from '../src/model';
 import {
-  choosableWorkouts, routineAddProblem, routineAddingWorkout, routineDay, routineDayProblem,
-  routineExtra, routinePrimary, routineWithDay,
+  choosableWorkouts, routineAddProblem, routineAdded, routineAddingWorkout, routineDay, routineDayFull,
+  routineDayProblem, routineExtra, routinePrimary, routineWithDay,
 } from '../src/scheduling';
 
 function workout(id: string, name = id): Workout {
@@ -116,6 +116,27 @@ describe('reviewed weekly routine editing', () => {
     expect(result.ok && result.schedule.extras?.mon).toEqual(draft.extras);
   });
 
+  it('adds a replacement into an empty main position, even beside four separate workouts', () => {
+    // The main workout was removed and four separate ones remain: the day is not full.
+    const draft = routinePrimary({ primary: 'run', extras: ['core', 'stretch', 'ride', 'swim'], times: {} }, null);
+    expect(routineDayFull(draft)).toBe(false);
+    const added = routineAdded(draft, 'lift');
+    expect(added).toMatchObject({ primary: 'lift', extras: ['core', 'stretch', 'ride', 'swim'] });
+    expect(routineDayProblem(added, workouts)).toBeNull();
+    expect(routineDayFull(added)).toBe(true);
+    // With a main workout in place, the next one goes alongside.
+    expect(routineAdded({ primary: 'run', extras: ['core'], times: {} }, 'lift').extras).toEqual(['core', 'lift']);
+  });
+
+  it('offers Make main for a separate workout on a day with no main workout', () => {
+    const noMain: WeeklySchedule = { ...schedule(), week: { ...schedule().week, tue: null } };
+    const html = renderToStaticMarkup(createElement(EveryWeekdayPanel, {
+      day: 'tue', schedule: noMain, workouts, reviewed: { planId: 'plan', version: 1 }, write: vi.fn(), busy: false,
+      onClose: vi.fn(), onNewWorkout: vi.fn(), scope: 'Fills each Tuesday.',
+    }));
+    expect(html).toContain('Make Timed core the main workout');
+  });
+
   it('accepts only optional strict local HH:MM times', () => {
     for (const time of ['', '00:00', '23:59']) {
       expect(routineAddingWorkout(schedule(), ['mon'], 'core', time, workouts).ok).toBe(true);
@@ -150,26 +171,43 @@ describe('reviewed weekly routine editing', () => {
 });
 
 describe('weekly routine controls', () => {
-  const reviewed = { planId: 'plan', version: 42 };
-  it('shows separate workout names and times with explicit keyboard-accessible editing', () => {
-    const write = vi.fn();
-    const html = renderToStaticMarkup(createElement(RoutineEditor, { schedule: schedule(), workouts, reviewed, busy: false, write }));
+  const reviewed = { planId: 'plan', version: 42, accountId: 'account' };
+  it('shows the repeating week as one row of weekday buttons with names and times', () => {
+    const html = renderToStaticMarkup(createElement(EveryWeekRow, {
+      schedule: schedule(), workouts, selected: 'tue', onSelect: vi.fn(), hint: 'Fills every week below',
+    }));
+    expect(html).toContain('aria-label="Every week"');
     expect(html).toContain('aria-label="Edit Tuesday"');
-    expect(html).toContain('aria-label="Add Timed core to your week"');
+    expect(html).toContain('aria-pressed="true"');
     expect(html).toContain('Timed core');
-    expect(html).toContain('Separate');
     expect(html).toContain('7:00');
     expect(html).toContain('8:00');
+    expect(html).toContain('Rest');
     expect(html).not.toContain('Archived workout');
     expect(html).not.toContain('One-time workout');
-    expect(html).not.toContain('Save Tuesday');
+  });
+
+  it('opens a weekday with its workouts, times, an add list and explicit Save and Cancel', () => {
+    const write = vi.fn();
+    const html = renderToStaticMarkup(createElement(EveryWeekdayPanel, {
+      day: 'tue', schedule: schedule(), workouts, reviewed, busy: false, write, onClose: vi.fn(), onNewWorkout: vi.fn(),
+      scope: 'Fills each Tuesday you haven’t changed on its own date.',
+    }));
+    expect(html).toContain('aria-label="Edit Tuesday"');
+    expect(html).toContain('Every Tuesday');
+    expect(html).toContain('Time for Timed core · optional');
+    expect(html).toContain('aria-label="Remove Timed core from Tuesday"');
+    expect(html).toContain('Add a workout to Tuesday');
+    expect(html).toContain('Save Tuesday');
+    expect(html).not.toContain('Archived workout');
     expect(write).not.toHaveBeenCalled();
   });
 
   it('opens the selected workout handoff with days, an optional time, Save and Cancel', () => {
     const write = vi.fn();
-    const html = renderToStaticMarkup(createElement(RoutineEditor, {
-      schedule: schedule(), workouts, reviewed, selectedWorkoutId: 'core', busy: false, write,
+    const html = renderToStaticMarkup(createElement(AddWorkoutToWeek, {
+      schedule: schedule(), workouts, reviewed, workout: workouts.find(workout => workout.id === 'core')!, busy: false, write,
+      onDone: vi.fn(), onCancel: vi.fn(),
     }));
     expect(html).toContain('aria-label="Add Timed core to your week"');
     expect(html).toContain('Already on this day');

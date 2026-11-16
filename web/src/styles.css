@@ -31,6 +31,8 @@
   --hero-edge: #15273e;
   --hero-raised: #2a4466;
   --fort-label: #83a4ce;
+  /* Text on the hero navy (BrandPalette.fortText). */
+  --fort-text: #dce6f2;
   --fort-orange: #ed4929;
   --fort-orange-text: #ee694f;
   --fort-idle: #2c4362;
@@ -163,27 +165,9 @@ p { margin: 0 0 0.75rem; }
 .chip.endurance.completed { background: color-mix(in srgb, var(--done) 10%, transparent); color: var(--done); }
 .chip.away { background: var(--surface-2); color: var(--muted); }
 
-.routine { margin-top: 24px; }
-.routine h2 { margin-bottom: 0.75rem; }
-.routine ol {
-  list-style: none; margin: 0; padding: 0;
-  display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px;
-}
-.routine li {
-  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
-  padding: 0.6rem; display: flex; flex-direction: column; gap: 0.2rem; min-width: 0;
-}
-.routine li span:last-child { overflow-wrap: anywhere; }
-.routine li select { width: 100%; }
-.routine li.drop { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--surface)); }
 .hint { font-size: 0.8125rem; margin: -0.25rem 0 0.75rem; }
-.palette { list-style: none; margin: 0 0 0.75rem; padding: 0; display: flex; flex-wrap: wrap; gap: 0.35rem; }
-.palette li {
-  cursor: grab; border: 1px solid var(--line); border-radius: 999px; padding: 0.15rem 0.6rem; font-size: 0.8125rem;
-  background: var(--surface);
-}
-.palette li.rest { color: var(--muted); }
-.away { margin-top: 24px; }
+.away { margin: 0.25rem 0 1rem; padding: 0.9rem 1rem; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+.away h2 { margin: 0; font-size: 1.25rem; }
 .away-list { list-style: none; margin: 0.5rem 0; padding: 0; display: grid; gap: 0.5rem; }
 .away-list > li { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 0.6rem 0.75rem; }
 .away-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
@@ -268,6 +252,16 @@ p { margin: 0 0 0.75rem; }
 .group-head > div:first-child { display: flex; flex-direction: column; }
 .group-head strong { color: var(--accent); font-weight: 650; }
 .group-block > .slots { border-left: 2px solid color-mix(in srgb, var(--accent) 50%, transparent); padding-left: 0.75rem; }
+
+/* ---- Plan's own tabs -------------------------------------------------- */
+.plan-tabs { display: flex; gap: 1.5rem; padding: 0 max(24px, calc((100% - 1392px) / 2)); border-bottom: 1px solid var(--line); }
+.plan-tabs a {
+  padding: 0.7rem 0.15rem 0.55rem; color: var(--muted); font-weight: 600; text-decoration: none;
+  border-bottom: 3px solid transparent; margin-bottom: -1px;
+}
+.plan-tabs a:hover { color: var(--text); }
+/* Orange marks where you are (DESIGN-SYSTEM.md), as the app's tab bar does. */
+.plan-tabs a[aria-current='page'] { color: var(--text); border-bottom-color: var(--signal-fill); }
 
 /* ---- views and notices ------------------------------------------------ */
 .views { display: flex; gap: 0.25rem; }
@@ -599,10 +593,10 @@ input.short { width: 5.5rem; }
   .planner { grid-template-columns: 1fr; padding: 16px; }
   .workouts { grid-template-columns: 1fr; padding: 16px; }
   .detail { position: static; max-height: none; }
-  .routine ol { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 640px) {
   .topbar { padding: 0.75rem 16px; flex-wrap: wrap; }
+  .plan-tabs { padding: 0 16px; }
   /* Wrap additional views instead of widening the phone's whole page. */
   .views { order: 3; flex: 1 0 100%; flex-wrap: wrap; justify-content: space-between; }
   .views a { padding: 0.4rem 0.5rem; letter-spacing: 0.02em; }
@@ -913,10 +907,41 @@ a.ghost { text-decoration: none; display: inline-block; }
 .weeks .grid-row { grid-template-columns: 9.5rem repeat(7, minmax(0, 1fr)); }
 .grid.weeks {
   /* The weeks scroll in their own box; earlier and later weeks load at its ends. */
-  max-height: min(66vh, 900px); overflow-y: auto; overflow-anchor: none;
+  max-height: min(72vh, 960px); overflow-y: auto; overflow-anchor: none;
 }
-.weeks .weekdays { position: sticky; top: 0; z-index: 2; background: var(--surface); border-bottom: 1px solid var(--line); }
-.weeks .weekdays + .grid-row { border-top: 0; }
+/* The weekday names and the repeating week stay pinned above the dates. */
+.weeks .weeks-top { position: sticky; top: 0; z-index: 2; background: var(--surface); border-bottom: 2px solid var(--accent); }
+.weeks .weekdays { background: var(--surface); }
+.weeks .weeks-top + .grid-row { border-top: 0; }
+.every-week { background: color-mix(in srgb, var(--accent) 7%, var(--surface)); }
+.every-week .week-head { background: var(--hero); color: var(--fort-text); }
+.every-week .week-head .kicker { color: var(--fort-label); }
+.every-hint { font-size: 0.75rem; color: var(--fort-text); }
+.weeks .every-week .day { min-height: 84px; background: transparent; }
+.weeks .every-week .day:hover:not(:disabled), .weeks .every-week .day.selected { background: var(--surface); }
+.every-entry {
+  display: block; min-width: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+  padding: 0.25rem 0.4rem; line-height: 1.25;
+}
+.every-entry strong {
+  font-size: 0.78rem; font-weight: 650; overflow: hidden; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
+}
+/* A workout's name and time take two lines before they are cut short. */
+.weeks .chip { white-space: normal; }
+.weeks .day .own-date { font-size: 0.68rem; font-weight: 600; letter-spacing: 0.02em; color: var(--muted); }
+.weeks .day .own-rest { font-size: 0.78rem; color: var(--muted); }
+.weeks .chip > small { display: block; font-size: 0.7rem; opacity: 0.8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.weeks .chip > span {
+  overflow: hidden; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
+}
+.every-entry small { display: block; font-size: 0.7rem; color: var(--muted); }
+.every-rest { color: var(--muted); font-size: 0.8125rem; }
+.every-add {
+  align-self: flex-start; font-size: 0.75rem; font-weight: 600; color: var(--accent);
+  border: 1px dashed color-mix(in srgb, var(--accent) 50%, transparent); border-radius: 6px; padding: 0.1rem 0.4rem;
+}
 .weeks .weeks-more { grid-template-columns: minmax(0, 1fr); }
 .weeks-more > div { display: flex; justify-content: center; padding: 0.35rem; background: var(--surface); }
 .weeks .week-row .day { min-height: 96px; }
@@ -954,8 +979,11 @@ a.ghost { text-decoration: none; display: inline-block; }
   .weeks .week-col { display: none; }
   .weeks .week-head { grid-column: 1 / -1; flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.6rem; }
   .weeks .week-head .week-menu { flex-basis: 100%; }
-  .weeks .week-row .day { min-height: 64px; }
-  .grid.weeks { max-height: 60vh; }
+  .weeks .week-row .day, .weeks .every-week .day { min-height: 64px; }
+  .every-entry { padding: 0.1rem 0.2rem; }
+  .every-entry strong { font-size: 0.68rem; }
+  .every-add { display: none; }
+  .grid.weeks { max-height: 70vh; }
 }
 .plan-page .day-number { align-self: flex-start; }
 .plan-page a.ghost { color: var(--text); }

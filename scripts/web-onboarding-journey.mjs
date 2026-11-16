@@ -292,8 +292,6 @@ export async function mixedWeekJourney({ page, origin, width, apiCall }) {
   };
   await page.goto(origin);
   await page.getByRole('heading', { name: 'Plan your week', exact: true }).waitFor();
-  assert.equal(await page.getByRole('region', { name: 'Build on your week', exact: true }).count(), 0,
-    'Progression guidance should follow a saved week, not distract from empty setup.');
   await click(page.getByRole('button', { name: 'Create your first workout', exact: true }));
   await click(page.getByRole('button', { name: /^Run Start with an open run/ }));
   await page.getByLabel('Workout name', { exact: true }).fill('Morning run');
@@ -303,7 +301,7 @@ export async function mixedWeekJourney({ page, origin, width, apiCall }) {
   await click(runForm.getByRole('button', { name: 'Add to selected days', exact: true }));
   await runForm.waitFor({ state: 'detached' });
 
-  await click(page.getByRole('button', { name: 'Create another workout', exact: true }));
+  await click(page.getByRole('link', { name: 'Workouts', exact: true }));
   await click(page.getByRole('button', { name: /^At home Core, stretching/ }));
   await page.getByLabel('Workout name', { exact: true }).fill('Evening core');
   await page.getByRole('checkbox', { name: 'Do one set of each exercise per round', exact: true }).check();
@@ -418,40 +416,52 @@ export async function mixedWeekJourney({ page, origin, width, apiCall }) {
     assert.deepEqual(state.plan.schedule.extras[day], [core.id]);
     assert.deepEqual(state.plan.schedule.times[day], { [run.id]: '07:00', [core.id]: '18:00' });
   }
-  const routine = page.getByRole('region', { name: 'Your usual week', exact: true });
+  const routine = page.getByRole('row', { name: 'Every week', exact: true });
   await routine.waitFor();
   assert.match(await routine.innerText(), /Evening core/);
-  await click(routine.getByRole('button', { name: 'Edit Tuesday', exact: true }));
+  await click(routine.getByRole('gridcell', { name: 'Edit Tuesday', exact: true }));
   let edit = page.getByRole('form', { name: 'Edit Tuesday', exact: true });
   await edit.getByLabel('Time for Evening core · optional', { exact: true }).fill('18:30');
   await click(edit.getByRole('button', { name: 'Cancel', exact: true }));
   assert.equal((await apiCall('GET', '/api/state')).plan.version, state.plan.version, 'Cancelling a day edit writes nothing.');
-  await click(routine.getByRole('button', { name: 'Edit Tuesday', exact: true }));
+  await click(routine.getByRole('gridcell', { name: 'Edit Tuesday', exact: true }));
   edit = page.getByRole('form', { name: 'Edit Tuesday', exact: true });
   assert.equal(await edit.getByLabel('Time for Evening core · optional', { exact: true }).inputValue(), '18:00');
+  await screenshot(page, `web-plan-every-tuesday-${width}.png`);
   await edit.getByLabel('Time for Evening core · optional', { exact: true }).fill('18:30');
+  // Choosing another weekday or a date asks before an unsaved day is replaced; declining keeps it.
+  for (const other of [routine.getByRole('gridcell', { name: 'Edit Wednesday', exact: true }), page.locator('.week-row .day').first()]) {
+    const asked = new Promise(resolve => page.once('dialog', async dialog => { const text = dialog.message(); await dialog.dismiss(); resolve(text); }));
+    await other.click();
+    assert.match(await asked, /Discard your unsaved changes to Tuesday\?/);
+    assert.equal(await edit.getByLabel('Time for Evening core · optional', { exact: true }).inputValue(), '18:30');
+  }
   await click(edit.getByRole('button', { name: 'Save Tuesday', exact: true }));
   await edit.waitFor({ state: 'detached' });
   const edited = await apiCall('GET', '/api/state');
   assert.deepEqual(edited.plan.schedule.times.tue, { [run.id]: '07:00', [core.id]: '18:30' });
   assert.deepEqual(edited.plan.schedule.times.thu, { [run.id]: '07:00', [core.id]: '18:00' });
-  await page.getByRole('heading', { name: 'Take your week to iPhone' }).waitFor();
-  assert.equal(await page.getByRole('link', { name: 'Get the iPhone app', exact: true }).getAttribute('href'), 'https://apps.apple.com/us/app/id6772375823');
-  assert.equal(await page.getByRole('link', { name: 'Open the iPhone app', exact: true }).getAttribute('href'), 'tresfort://today');
   await screenshot(routine, `web-mixed-week-${width}.png`);
-  await screenshot(page.locator('.phone-handoff'), `web-phone-handoff-${width}.png`);
-  const nextSteps = page.getByRole('region', { name: 'Build on your week', exact: true });
-  await nextSteps.waitFor();
+  await screenshot(page, `web-plan-page-${width}.png`, { fullPage: true });
+  // The Plan page ends with the week and away dates: no iPhone handoff and
+  // no guidance sections under them (owner, 2026-11-16).
+  assert.equal(await page.getByRole('heading', { name: 'Take your week to iPhone' }).count(), 0);
+  assert.equal(await page.getByRole('region', { name: 'Build on your week', exact: true }).count(), 0);
   const beforeGuidance = (await apiCall('GET', '/api/state')).plan.version;
-  await click(nextSteps.getByRole('link', { name: 'Explore a training block', exact: true }));
-  await page.getByRole('heading', { name: 'Plan a block', exact: true }).waitFor();
+  await click(page.getByRole('button', { name: 'Training block', exact: true }));
+  await page.getByRole('heading', { name: 'Start a training block', exact: true }).waitFor();
+  await screenshot(page.locator('.block-intro'), `web-training-block-${width}.png`);
   await page.getByRole('button', { name: 'Start from my week', exact: true }).waitFor();
   assert.equal((await apiCall('GET', '/api/state')).plan.version, beforeGuidance,
-    'Exploring a block must not create one or alter the established week.');
+    'Opening the block form must not create one or alter the established week.');
   await page.goto(`${origin}/#calendar`);
-  await nextSteps.waitFor();
-  await click(nextSteps.getByRole('link', { name: 'Adjust saved workout targets', exact: true }));
+  const sections = page.getByRole('navigation', { name: 'Plan sections', exact: true });
+  assert.equal(await sections.getByRole('link', { name: 'Schedule', exact: true }).getAttribute('aria-current'), 'page');
+  await click(sections.getByRole('link', { name: 'Workouts', exact: true }));
   await page.getByRole('heading', { name: 'Workouts', exact: true }).waitFor();
+  assert.equal(await page.getByRole('navigation', { name: 'Views', exact: true }).getByRole('link', { name: 'Plan', exact: true }).getAttribute('aria-current'), 'page',
+    'Workouts is a tab of Plan.');
+  await screenshot(page, `web-plan-workouts-tab-${width}.png`);
   assert.equal((await apiCall('GET', '/api/state')).plan.version, beforeGuidance);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1), false, 'No horizontal page overflow.');
   assert.deepEqual(errors, []);

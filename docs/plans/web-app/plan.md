@@ -201,6 +201,45 @@ partner training are not web features.
     the mouse wheel, under fixed weekday names; reaching its top or bottom
     adds four weeks there without moving the weeks in view, and "This week"
     goes back to the starting weeks with last week at the top.
+  - Then (owner, 2026-11-16: the Plan page is busy and unclear, its bottom
+    sections are text heavy, the iPhone handoff does not belong on it, and
+    Workouts should be a tab of planning): Plan in the top bar holds two
+    tabs, Schedule (`#plan`) and Workouts (`#workouts`,
+    `web/src/PlanTabs.tsx`); the top bar no longer lists Workouts. "Plan
+    week by week" and "Build up to an event" become one Training block
+    button, whose form says what a block is before anything is saved. The
+    "Take your week to iPhone" and "Build on your week" sections and the
+    "Create another workout" button are removed, which retires the
+    2026-11-12 handoff and the 2026-11-13 block guidance above. No API
+    change.
+  - Then (owner, 2026-11-16, picked from three mocked options: the usual
+    week was shown twice, as calendar rows and as seven "Your usual week"
+    cards over a row of workout chips whose purpose was unclear): the
+    repeating week is the calendar's first row, "Every week", in the same
+    seven columns as the dates and fixed above them while the weeks scroll
+    (`web/src/EveryWeek.tsx`). Choosing a day in it opens "Every Tuesday"
+    beside the calendar: the day's workouts with a time each, Remove, Make
+    main, and a searchable list to add a workout, run or activity. It saves
+    through the same `PUT /api/plan/schedule` write. The seven cards, the
+    chip row and dragging a chip onto a day are removed; "Add to my week"
+    from a workout opens its form at the top of the Schedule tab. No API
+    change. Away dates open from a button beside "This week" instead of
+    a section under the calendar, a date planned, emptied or skipped on
+    its own is marked "This date only", a chip keeps its time on its own
+    line, and the Workouts tab names the days each workout is on
+    (`workoutWeekdays` in `web/src/scheduling.ts`).
+  - Open (owner, 2026-11-16: the repeating week and training blocks
+    "don't interact well"; editing the week must not override a running
+    block, and standing weekly items such as a nightly core routine or a
+    weekly game sit apart from the block). Today a block's own week
+    replaces the top row for its dates, and the panel says so. Proposed
+    and with the owner, not built: the top row holds what repeats every
+    week and carries on beside a block; a block holds only its own
+    workouts and their targets by week; starting a block moves the chosen
+    workouts out of the top row into it; each date shows both, and
+    neither edit reaches the other. It needs a Worker change to how a
+    block week and the schedule combine, kept compatible with released
+    iPhone builds, and so an API release.
 - [ ] **P3 — Trends and progress**
   - Equal in importance to plan editing; it can run alongside P2 once P1 is
     in.
@@ -348,6 +387,13 @@ PR #4 are merged. The source also includes mixed-week creation, connection
 discovery, signed-out entry, primary date-only editing, Event analysis, Strength
 charts and exact workout correction. Earlier private PR numbers are historical
 source-delivery references, not pending public-repository work.
+
+Plan page simplification (owner, 2026-11-16): the tabs, the Training block
+button, the removed sections, the repeating week as the calendar's first
+row, away dates behind a button, the "This date only" mark and the days on
+the Workouts tab are built. The block side waits for the owner's answer on
+the model described in P2 (the block beside the every-week row); nothing
+for blocks is built before it.
 
 **Later (@agent):** Date-only replacement of scheduled extras still needs a
 shared replacement/lineage contract, as described in member activation P7.

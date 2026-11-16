@@ -164,6 +164,7 @@ export async function workoutFeedbackJourney({ page, origin, apiCall, width, swi
       })]);
     } finally { clearTimeout(captureTimeout); }
     if (heldError) throw heldError;
+    await page.getByRole('link', { name: 'Plan', exact: true }).click();
     await page.getByRole('link', { name: 'Workouts', exact: true }).click();
     await page.getByRole('heading', { name: 'Workouts', exact: true }).waitFor();
     await page.evaluate(key => { location.hash = `#activity/${encodeURIComponent(key)}`; }, `workout:${primary.id}`);

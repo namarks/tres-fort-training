@@ -1,30 +1,50 @@
-.routine-editor .routine-days {
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  gap: 10px;
+/* One weekday of the repeating week, in the side panel. */
+.every-day h2 { margin: 0.1rem 0 0.35rem; }
+.every-day-rest { margin: 0.75rem 0 0; }
+.every-day-entries { list-style: none; margin: 0.75rem 0 0; padding: 0; display: grid; gap: 0.5rem; }
+.every-day-entries > li { border: 1px solid var(--line); border-radius: 10px; padding: 0.6rem 0.7rem; background: var(--bg); min-width: 0; }
+.every-day-entry-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 0.5rem; }
+.every-day-entry-head > div { min-width: 0; overflow-wrap: anywhere; }
+.every-day-entry-head strong, .every-day-group strong { display: block; font-weight: 650; }
+.every-day-entry-head small, .every-day-group small { display: block; font-size: 0.78rem; }
+.every-day .routine-time { margin: 0.5rem 0 0; }
+.every-day .routine-time > label { color: var(--muted); font-size: 0.78rem; }
+.every-day-entries > li > button { margin-top: 0.5rem; }
+.every-day-add {
+  width: 100%; min-height: 44px; margin-top: 0.5rem; text-align: left; background: transparent;
+  border: 1px dashed color-mix(in srgb, var(--accent) 50%, transparent); border-radius: 10px;
+  padding: 0.6rem 0.7rem; color: var(--accent); font-weight: 600;
 }
-.routine-editor .routine-days > li { padding: 0.85rem; gap: 0.65rem; }
-.routine-days h3 { font-size: 0.875rem; margin: 0; }
-.routine-days p { margin: 0; }
-.routine-days > li > button { margin-top: auto; min-height: 44px; }
-.routine-entry { display: flex; flex-direction: column; gap: 0.15rem; overflow-wrap: anywhere; }
-.routine-entry small { font-size: 0.75rem; }
-.routine-editor .palette > li { display: block; padding: 0; border: 0; background: none; }
-.routine-editor .palette button { min-height: 44px; cursor: grab; }
-.routine-editor .palette button:disabled { cursor: default; }
+.every-day-add:hover:not(:disabled) { border-style: solid; }
+.every-day-picker { margin-top: 0.5rem; border: 1px solid var(--accent); border-radius: 10px; padding: 0.7rem; }
+.every-day-picker > label { display: block; font-weight: 600; font-size: 0.875rem; margin-bottom: 0.35rem; }
+.every-day-picker input[type='search'] { width: 100%; min-height: 44px; }
+.every-day-group { margin-top: 0.6rem; }
+.every-day-group ul { list-style: none; margin: 0; padding: 0; }
+.every-day-group li {
+  display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; padding: 0.35rem 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+.every-day-group li > div { min-width: 0; overflow-wrap: anywhere; }
+.every-day-picker .head-actions { margin-top: 0.6rem; }
+.every-day .form-actions { margin-top: 0.9rem; flex-wrap: wrap; }
+.every-day button { min-height: 44px; }
+
+/* Adding one workout to several weekdays, from the Workouts tab. */
 .routine-form { max-width: 720px; }
 .routine-form fieldset { border: 1px solid var(--line); border-radius: 10px; padding: 0.85rem; margin: 0 0 1rem; min-width: 0; }
 .routine-form legend { color: var(--text); font-weight: 600; font-size: 0.875rem; padding: 0 0.25rem; }
 .routine-form fieldset > label, .routine-time > label { display: block; font-size: 0.8125rem; margin-bottom: 0.35rem; }
-.routine-form select { width: 100%; min-height: 44px; }
 .routine-form button { min-height: 44px; }
 .routine-time { margin: 0.75rem 0; }
 .routine-time input { min-height: 44px; max-width: 100%; margin-right: 0.5rem; }
 .routine-form .form-actions { flex-wrap: wrap; }
+.routine-add { margin-bottom: 1rem; }
 .routine-day-choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.5rem; }
 .routine-day-choices > label { display: flex; gap: 0.6rem; align-items: flex-start; padding: 0.5rem 0; min-height: 44px; }
 .routine-day-choices input { margin: 0.2rem 0 0; width: 20px; height: 20px; flex-shrink: 0; }
 .routine-day-choices span { min-width: 0; overflow-wrap: anywhere; }
 .routine-day-choices small { display: block; margin-top: 0.2rem; font-size: 0.75rem; }
 @media (max-width: 480px) {
-  .routine-editor .routine-days, .routine-day-choices { grid-template-columns: 1fr; }
+  .routine-day-choices { grid-template-columns: 1fr; }
 }
