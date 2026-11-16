@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { addDays, programWeekOn, weekdayOf } from '../../src/calendarProjection';
 import { MAX_SCHEDULE_EXTRAS, WEEKDAYS, type TrainingProgram, type Weekday, type WeeklySchedule } from '../../src/types';
 import type { StateActivity, StateResponse } from './api';
@@ -49,14 +49,113 @@ import {
   workoutsInBlock,
 } from './blocks';
 import { BlockReview, BlockSettings, blockSummary, NewBlock, TargetsByWeek, useBlockEditor, type ActiveBlock } from './BlockEditor';
-import { addingExtraIn, blockEndMonday, planRows, removingExtraIn, scopeDiffers, scopedWeeks, settingDayIn, type DayScope, type PlanRow } from './planWeeks';
+import { addingExtraIn, blockEndMonday, MAX_PLAN_ROWS, planRows, removingExtraIn, scopeDiffers, scopedWeeks, settingDayIn, type DayScope, type PlanRow } from './planWeeks';
 import { PhoneHandoff } from './PhoneHandoff';
 import { PlanNextSteps } from './PlanNextSteps';
 import { DateWorkoutEdit } from './DateWorkoutEdit';
 import type { DateWorkoutSelection } from './dateEditState';
 import type { Write } from './WorkoutEditor';
+import { prefersReducedMotion } from './mapkit';
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** Weeks added each time the list reaches its top or bottom. */
+const WEEKS_PER_LOAD = 4;
+
+/** Scrolls the week box so last week sits under the weekday names. False
+ * when the box can't scroll that far yet (too few weeks below). */
+function placeLastWeek(box: HTMLElement, thisMonday: string, smooth: boolean): boolean {
+  const lastWeek = box.querySelector<HTMLElement>(`[data-monday="${addDays(thisMonday, -7)}"]`)
+    ?? box.querySelector<HTMLElement>(`[data-monday="${thisMonday}"]`);
+  const header = box.querySelector<HTMLElement>('.weekdays');
+  const top = Math.max(0, lastWeek
+    ? box.scrollTop + lastWeek.getBoundingClientRect().top - box.getBoundingClientRect().top - box.clientTop - (header?.offsetHeight ?? 0)
+    : 0);
+  if (typeof box.scrollTo === 'function') box.scrollTo({ top, behavior: smooth ? 'smooth' : 'auto' });
+  else box.scrollTop = top;
+  return top <= box.scrollHeight - box.clientHeight + 1;
+}
+
+/**
+ * The week list scrolls inside its own box (owner, 2026-11-16: earlier weeks
+ * took over the page and couldn't be put away). Reaching the top or bottom
+ * adds four weeks there, keeping the weeks in view where they were, and
+ * "This week" goes back to the starting weeks with last week at the top.
+ */
+function useWeekScroller(firstMonday: string, rowCount: number, thisMonday: string,
+  setEarlier: (update: (n: number) => number) => void, setLater: (update: (n: number) => number) => void) {
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const topRef = useRef<HTMLDivElement | null>(null);
+  const bottomRef = useRef<HTMLDivElement | null>(null);
+  // The week at the top of the box, and where it sat, just before earlier
+  // weeks were added above it.
+  const anchor = useRef<{ monday: string; offset: number } | null>(null);
+  // Last week couldn't reach the top yet; place it again as weeks load.
+  const unplaced = useRef(false);
+  const [jump, setJump] = useState<{ key: number; smooth: boolean }>({ key: 0, smooth: false });
+  const [ready, setReady] = useState(false);
+  const canAdd = rowCount + WEEKS_PER_LOAD <= MAX_PLAN_ROWS;
+
+  const loadEarlier = useCallback(() => {
+    if (!canAdd) return;
+    const box = boxRef.current;
+    if (box) {
+      const boxTop = box.getBoundingClientRect().top;
+      const row = [...box.querySelectorAll<HTMLElement>('[data-monday]')].find((el) => el.getBoundingClientRect().bottom > boxTop);
+      anchor.current = row ? { monday: row.dataset.monday!, offset: row.getBoundingClientRect().top - boxTop } : null;
+    }
+    setEarlier((n) => n + WEEKS_PER_LOAD);
+  }, [canAdd, setEarlier]);
+  const loadLater = useCallback(() => {
+    if (canAdd) setLater((n) => n + WEEKS_PER_LOAD);
+  }, [canAdd, setLater]);
+  const toThisWeek = useCallback(() => {
+    setReady(false);
+    setEarlier(() => 0);
+    setLater(() => 0);
+    setJump((current) => ({ key: current.key + 1, smooth: !prefersReducedMotion() }));
+  }, [setEarlier, setLater]);
+
+  // Weeks added: keep the weeks in view where they were.
+  useLayoutEffect(() => {
+    const box = boxRef.current;
+    const kept = anchor.current;
+    anchor.current = null;
+    if (box && unplaced.current) { unplaced.current = !placeLastWeek(box, thisMonday, false); return; }
+    const row = kept && box?.querySelector<HTMLElement>(`[data-monday="${kept.monday}"]`);
+    if (box && kept && row) box.scrollTop += row.getBoundingClientRect().top - box.getBoundingClientRect().top - kept.offset;
+  }, [firstMonday, rowCount, thisMonday]);
+
+  // On opening and on "This week": last week at the top, under the weekday names.
+  useLayoutEffect(() => {
+    const box = boxRef.current;
+    if (!box) return;
+    unplaced.current = !placeLastWeek(box, thisMonday, jump.smooth);
+    // Weeks load at the ends only once a smooth scroll has settled.
+    if (!jump.smooth) { setReady(true); return; }
+    const timer = window.setTimeout(() => setReady(true), 700);
+    return () => window.clearTimeout(timer);
+  }, [jump, thisMonday]);
+
+  // Add weeks when the top or bottom of the list comes into view, once the
+  // list has been placed.
+  useEffect(() => {
+    const box = boxRef.current;
+    if (!ready || !box || typeof IntersectionObserver !== 'function') return;
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        if (entry.target === topRef.current) loadEarlier();
+        if (entry.target === bottomRef.current) loadLater();
+      }
+    }, { root: box, rootMargin: '120px 0px' });
+    if (topRef.current) observer.observe(topRef.current);
+    if (bottomRef.current) observer.observe(bottomRef.current);
+    return () => observer.disconnect();
+  }, [ready, loadEarlier, loadLater, firstMonday, rowCount]);
+
+  return { boxRef, topRef, bottomRef, loadEarlier, loadLater, toThisWeek, canAdd };
+}
 
 function scrollToId(id: string) {
   document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -118,6 +217,7 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
     [cells, inputs, today],
   );
   const selectedCell = useMemo(() => cellFor(selected), [cellFor, selected]);
+  const scroller = useWeekScroller(first, rows.length, thisMonday, setEarlier, setLater);
   // A date-only copy is made from the saved block's targets, so it waits
   // until unsaved block changes are saved or discarded.
   const blockDirty = !!active?.dirty;
@@ -201,16 +301,22 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
         {active && <BlockSettings block={active} today={today} />}
 
         <div className="plan-more">
-          <button type="button" className="ghost small" onClick={() => setEarlier((n) => n + 4)}>Show earlier weeks</button>
+          <p className="muted fine">Scroll the weeks to see earlier and later ones.</p>
+          <button type="button" className="ghost small" onClick={scroller.toThisWeek}>This week</button>
         </div>
-        <div className="grid weeks" role="grid" aria-labelledby="plan-title">
+        <div className="grid weeks" role="grid" aria-labelledby="plan-title" ref={scroller.boxRef}>
           <div className="grid-row weekdays" role="row">
             <div role="columnheader" className="week-col">Week</div>
             {WEEKDAYS.map((day) => <div key={day} role="columnheader">{WEEKDAY_LABELS[day].slice(0, 3)}</div>)}
           </div>
+          {scroller.canAdd && (
+            <div role="row" className="grid-row weeks-more" ref={scroller.topRef}>
+              <div role="gridcell"><button type="button" className="ghost small" onClick={scroller.loadEarlier}>Earlier weeks</button></div>
+            </div>
+          )}
           {rows.map((row, index) => (
             <Fragment key={row.monday}>
-              <div role="row" className={['grid-row', 'week-row', row.week != null ? 'in-block' : '',
+              <div role="row" data-monday={row.monday} className={['grid-row', 'week-row', row.week != null ? 'in-block' : '',
                 row.monday === thisMonday ? 'current' : ''].filter(Boolean).join(' ')}>
                 <WeekHeader row={row} block={active} thisMonday={thisMonday} today={today} />
                 {WEEKDAYS.map((day, d) => {
@@ -250,9 +356,13 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
               )}
             </Fragment>
           ))}
+          {scroller.canAdd && (
+            <div role="row" className="grid-row weeks-more" ref={scroller.bottomRef}>
+              <div role="gridcell"><button type="button" className="ghost small" onClick={scroller.loadLater}>Later weeks</button></div>
+            </div>
+          )}
         </div>
         <div className="plan-more">
-          <button type="button" className="ghost small" onClick={() => setLater((n) => n + 4)}>Show later weeks</button>
           <p className="muted fine">Dashed: planned. Filled: done or started. Choose any day to change it.</p>
         </div>
 

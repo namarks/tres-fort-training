@@ -1,6 +1,6 @@
 # Plan on the web
 
-Slug: web-app · Status: active · Updated: 2026-11-15 · Theme: platform
+Slug: web-app · Status: active · Updated: 2026-11-16 · Theme: platform
 
 ## Goal
 
@@ -196,6 +196,11 @@ partner training are not web features.
     unsaved changes, since the server checks them against the saved block.
     With no block and an empty week, the page opens on "Make your plan".
     `#calendar` and `#block` still open it. No API change.
+  - Then (owner, 2026-11-16: earlier weeks couldn't be put away and the
+    calendar took over the page): the weeks scroll in their own box with
+    the mouse wheel, under fixed weekday names; reaching its top or bottom
+    adds four weeks there without moving the weeks in view, and "This week"
+    goes back to the starting weeks with last week at the top.
 - [ ] **P3 — Trends and progress**
   - Equal in importance to plan editing; it can run alongside P2 once P1 is
     in.

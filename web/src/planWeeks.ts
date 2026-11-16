@@ -10,11 +10,11 @@ import { addingExtra, mondayOnOrBefore, removingExtra, settingDay, type ProgramB
  * when the usual week applies). */
 export type PlanRow = { monday: string; week: number | null };
 
-/** Rows shown before any "Show earlier weeks" or "Show later weeks". */
+/** Rows shown before scrolling adds earlier or later weeks. */
 const PAST_WEEKS_SHOWN = 4;
 const WEEKS_AFTER_BLOCK = 2;
 const WEEKS_WITHOUT_BLOCK = 6;
-export const MAX_PLAN_ROWS = 80;
+export const MAX_PLAN_ROWS = 160;
 
 function weekOf(program: ProgramBody | null, date: string): number | null {
   return program ? programWeekOn(program as TrainingProgram, date) : null;

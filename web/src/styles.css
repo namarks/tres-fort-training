@@ -911,6 +911,14 @@ a.ghost { text-decoration: none; display: inline-block; }
 .plan-more { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; margin: 0.5rem 0; }
 .plan-more .fine { margin: 0; }
 .weeks .grid-row { grid-template-columns: 9.5rem repeat(7, minmax(0, 1fr)); }
+.grid.weeks {
+  /* The weeks scroll in their own box; earlier and later weeks load at its ends. */
+  max-height: min(66vh, 900px); overflow-y: auto; overflow-anchor: none;
+}
+.weeks .weekdays { position: sticky; top: 0; z-index: 2; background: var(--surface); border-bottom: 1px solid var(--line); }
+.weeks .weekdays + .grid-row { border-top: 0; }
+.weeks .weeks-more { grid-template-columns: minmax(0, 1fr); }
+.weeks-more > div { display: flex; justify-content: center; padding: 0.35rem; background: var(--surface); }
 .weeks .week-row .day { min-height: 96px; }
 .week-head {
   display: flex; flex-direction: column; gap: 0.15rem; min-width: 0;
@@ -947,6 +955,7 @@ a.ghost { text-decoration: none; display: inline-block; }
   .weeks .week-head { grid-column: 1 / -1; flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.6rem; }
   .weeks .week-head .week-menu { flex-basis: 100%; }
   .weeks .week-row .day { min-height: 64px; }
+  .grid.weeks { max-height: 60vh; }
 }
 .plan-page .day-number { align-self: flex-start; }
 .plan-page a.ghost { color: var(--text); }
