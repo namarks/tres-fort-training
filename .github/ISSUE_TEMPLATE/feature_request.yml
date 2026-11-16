@@ -1,0 +1,36 @@
+name: Feature idea
+description: Suggest a new feature or a change to how something works.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This idea will be public. Describe it with made-up examples, not your own
+        workouts, health data, routes or screenshots of your account.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Publication check
+      options:
+        - label: This idea uses made-up examples and contains no personal information, credentials or private attachment links.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The training situation or problem this would help with.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help?
+      description: How you picture it working in the app, on the web or through an AI coach. Every feature has to work in the app without AI.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Anything you've tried instead?
+    validations:
+      required: false

@@ -23,9 +23,7 @@ git switch -c yourname/short-description
 
 Replace `YOUR-USERNAME` with your GitHub username. Target
 `namarks/tres-fort-training:main` with your pull request. You do not need write
-access to the official repository to propose a change. During private setup,
-authorized collaborators can accept their invitation and clone the official
-repository instead.
+access to the official repository to propose a change.
 
 Commands below run from the repository root unless stated otherwise. Read
 [AGENTS.md](AGENTS.md) for repository conventions and
@@ -341,11 +339,23 @@ still reviews third-party material and provenance before merging. See
 - Documentation-only changes: check links, commands, and `git diff --check`.
 
 Commit only intended files and push your branch. Open the PR ready for review.
-The [Codex gate](.agents/skills/codex-gate/SKILL.md) requires review of the exact
-current head plus green `plan graph`, `typecheck + tests`, and
-`iOS build + tests` checks. Documentation-only PRs may skip backend/iOS jobs
-while their aggregate checks pass; that is not evidence that those tests ran.
-Substantive fixes need fresh review. Nick merges after the gate passes.
+On your first pull request, GitHub holds its CI until Nick approves the run;
+after that, CI starts on every push.
+
+A pull request can merge when the
+[Codex gate](.agents/skills/codex-gate/SKILL.md) passes on its exact current
+head commit:
+
+- Four required checks are green: `plan graph`, `typecheck + tests`,
+  `iOS build + tests` and `contributor rights`.
+- Codex has reviewed that head with no open findings. On a pull request from a
+  fork, Nick (or an agent working for him) requests the review by commenting
+  `@codex review`. Fix what it finds and push; each new push gets a fresh
+  review, which Nick requests again.
+
+Documentation-only PRs may skip backend/iOS jobs while their aggregate checks
+pass; that is not evidence that those tests ran. Nick merges after the gate
+passes.
 
 Production migrations, deployment, and TestFlight/App Store distribution each
 need separate owner authorization. None is part of contributor setup.

@@ -250,10 +250,9 @@ account's GitHub-hosted concurrency limits.
 Actions are pinned to full commit SHAs, and checkouts do not retain GitHub
 credentials in Git configuration. CI has no production or signing credentials.
 
-During private preparation, Actions is disabled. The workflow also refuses
-hosted macOS jobs while the repository is private; required iOS coverage then
-fails with an explanation rather than passing through skipped tests. This
-repository has no self-hosted runner route and must have no Mac mini runner
+The workflow refuses hosted macOS jobs if the repository is ever made private
+again; required iOS coverage then fails with an explanation rather than
+passing through skipped tests. This repository has no self-hosted runner route and must have no Mac mini runner
 registration. Public fork work runs on GitHub-hosted machines without signing,
 deployment or provider credentials.
 
@@ -324,10 +323,13 @@ and duplicates iOS compilation; it reduces elapsed wait rather than total
 build work. Existing test assertions, timeouts, and production behavior are
 unchanged; broader UI regression detection moves to the periodic full runs.
 
-The workflow does not configure GitHub branch protection. Before publication,
-configure the repository rules to require all three aggregate/check names and
-the current-head independent review policy. Verify the live rules separately;
-workflow success is not evidence that GitHub enforces them. CI uses unsigned
+The workflow does not configure GitHub branch protection. The rules on `main`
+require the four checks in [main-protection.json](../.github/main-protection.json)
+(`plan graph`, `typecheck + tests`, `iOS build + tests` and
+`contributor rights`); the current-head Codex review is enforced by the
+[Codex gate](../.agents/skills/codex-gate/SKILL.md), not by GitHub. Verify the
+live rules separately when changing them; workflow success is not evidence that
+GitHub enforces them. CI uses unsigned
 simulator builds. Release signing and distribution require a separately
 controlled owner workflow and their own credentials; they are not granted to
 public contributor jobs.
