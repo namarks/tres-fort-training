@@ -223,12 +223,23 @@ partner training are not web features.
     through the same `PUT /api/plan/schedule` write. The seven cards, the
     chip row and dragging a chip onto a day are removed; "Add to my week"
     from a workout opens its form at the top of the Schedule tab. No API
-    change. Open (owner, 2026-11-16: the repeating week and training
-    blocks "don't interact well"): inside a block the block's own week
-    still replaces the top row for its dates, and the panel says so. A
-    proposal that the top row always applies, with a block holding only
-    the weeks that differ, is with the owner; it needs an optional flag on
-    the schedule write and so an API release.
+    change. Away dates open from a button beside "This week" instead of
+    a section under the calendar, a date planned, emptied or skipped on
+    its own is marked "This date only", a chip keeps its time on its own
+    line, and the Workouts tab names the days each workout is on
+    (`workoutWeekdays` in `web/src/scheduling.ts`).
+  - Open (owner, 2026-11-16: the repeating week and training blocks
+    "don't interact well"; editing the week must not override a running
+    block, and standing weekly items such as a nightly core routine or a
+    weekly game sit apart from the block). Today a block's own week
+    replaces the top row for its dates, and the panel says so. Proposed
+    and with the owner, not built: the top row holds what repeats every
+    week and carries on beside a block; a block holds only its own
+    workouts and their targets by week; starting a block moves the chosen
+    workouts out of the top row into it; each date shows both, and
+    neither edit reaches the other. It needs a Worker change to how a
+    block week and the schedule combine, kept compatible with released
+    iPhone builds, and so an API release.
 - [ ] **P3 — Trends and progress**
   - Equal in importance to plan editing; it can run alongside P2 once P1 is
     in.
@@ -378,13 +389,11 @@ charts and exact workout correction. Earlier private PR numbers are historical
 source-delivery references, not pending public-repository work.
 
 Plan page simplification (owner, 2026-11-16): the tabs, the Training block
-button, the removed sections and the repeating week as the calendar's first
-row are built. Still to build from the picked option: away dates behind a
-button, a shorter date panel (swap, move, skip, and a link to change that
-weekday every week), a mark on dates that differ from the week, and the
-Workouts tab naming the days each workout is on. How a block shows against
-the top row waits for the owner's choice between the proposal above and
-keeping the two separate with clearer labels.
+button, the removed sections, the repeating week as the calendar's first
+row, away dates behind a button, the "This date only" mark and the days on
+the Workouts tab are built. The block side waits for the owner's answer on
+the model described in P2 (the block beside the every-week row); nothing
+for blocks is built before it.
 
 **Later (@agent):** Date-only replacement of scheduled extras still needs a
 shared replacement/lineage contract, as described in member activation P7.

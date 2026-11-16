@@ -332,6 +332,7 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
           selectedId={view.workoutId}
           onSelect={(workoutId) => go({ kind: 'workouts', workoutId })}
           onSchedule={(scheduleWorkoutId) => go({ kind: 'plan', scheduleWorkoutId })}
+          schedule={state.plan?.schedule}
           accountId={me.id}
           planId={state.plan?.id ?? null}
           reload={reload}

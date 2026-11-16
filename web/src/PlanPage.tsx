@@ -3,6 +3,7 @@ import { addDays, programWeekOn, weekdayOf } from '../../src/calendarProjection'
 import { MAX_SCHEDULE_EXTRAS, WEEKDAYS, type TrainingProgram, type Weekday, type WeeklySchedule } from '../../src/types';
 import type { StateActivity, StateResponse } from './api';
 import { AwayDates, DateActions } from './CalendarEditing';
+import { splitTrips } from './scheduling';
 import { AddWorkoutToWeek, EveryWeekRow, EveryWeekdayPanel } from './EveryWeek';
 import { RouteMap } from './RouteMapView';
 import { ActivityCharts } from './ActivityChartsView';
@@ -196,6 +197,7 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
   const [lighterWeek, setLighterWeek] = useState<number | null>(null);
   // The weekday of the repeating week open in the side panel, if any.
   const [weekday, setWeekday] = useState<Weekday | null>(null);
+  const [awayOpen, setAwayOpen] = useState(false);
   const [addDismissed, setAddDismissed] = useState<string | null>(null);
   const [editSelection, setEditSelection] = useState<DateWorkoutSelection | null>(null);
   const [editBlocked, setEditBlocked] = useState(false);
@@ -266,6 +268,7 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
     ? (active.draft.repeat ? 'Your block has its own weeks, so this week waits until the block ends.' : 'Fills the weeks before and after your block. The block has its own weeks.')
     : null;
   const selectedWeek = programWeekOn(program, selected);
+  const awayCount = splitTrips(plan.trips ?? [], today).upcoming.length;
 
   return (
     <main className="planner plan-page">
@@ -314,8 +317,14 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
 
         <div className="plan-more">
           <p className="muted fine">Scroll the weeks to see earlier and later ones.</p>
-          <button type="button" className="ghost small" onClick={scroller.toThisWeek}>This week</button>
+          <div className="head-actions">
+            <button type="button" className="ghost small" aria-expanded={awayOpen} onClick={() => setAwayOpen(!awayOpen)}>
+              {awayCount ? `Away dates (${awayCount})` : 'Away dates'}
+            </button>
+            <button type="button" className="ghost small" onClick={scroller.toThisWeek}>This week</button>
+          </div>
         </div>
+        {awayOpen && <AwayDates trips={plan.trips ?? []} today={today} version={plan.version} write={write} busy={busy} />}
         <div className="grid weeks" role="grid" aria-labelledby="plan-title" ref={scroller.boxRef}>
           <div className="weeks-top" role="rowgroup">
             <div className="grid-row weekdays" role="row">
@@ -348,6 +357,7 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
                       activities={state.external_activities}
                       monthLabel={index === 0 && d === 0}
                       isToday={date === today}
+                      ownDate={date >= today && dateSetOnItsOwn(cells.get(date))}
                       isSelected={weekday === null && date === selected}
                       sports={sports}
                       onSelect={() => { setSelected(date); setWeekday(null); }}
@@ -379,14 +389,13 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
           )}
         </div>
         <div className="plan-more">
-          <p className="muted fine">Dashed: planned. Filled: done or started. Choose any day to change it.</p>
+          <p className="muted fine">Dashed: planned. Filled: done or started. “This date only” marks a date you changed on its own.</p>
         </div>
 
         {active && (
           <TargetsByWeek draft={active.draft} workouts={workoutsInBlock(active.draft, plan.workouts)} onChange={active.setDraft}
             inputs={active.inputs} onInput={active.editInput} onReset={active.resetInputs} />
         )}
-        <AwayDates trips={plan.trips ?? []} today={today} version={plan.version} write={write} busy={busy} />
         {active?.dirty && (
           <div className="block-savebar" role="status">
             <span>Unsaved changes to your block.</span>
@@ -631,10 +640,15 @@ function UsualDay({ date, schedule, workouts, busy, onEdit }: {
   return (
     <section className="block-day panel" aria-labelledby="usual-day-title">
       <h3 id="usual-day-title">Every {name}</h3>
-      <p className="muted">{ids.length ? ids.map((id) => workouts.get(id)?.name ?? 'Unavailable workout').join(', ') : 'Rest'} in your usual week.</p>
+      <p className="muted">{ids.length ? ids.map((id) => workouts.get(id)?.name ?? 'Unavailable workout').join(', ') : 'Rest'} every week.</p>
       <button type="button" className="ghost small" disabled={busy} onClick={() => onEdit(day)}>Change every {name}</button>
     </section>
   );
+}
+
+/** A date the member planned, emptied or skipped on its own: its main workout is a saved choice, not the week's. */
+function dateSetOnItsOwn(cell: CalendarCell | undefined): boolean {
+  return !!cell?.real && (cell.status === 'planned' || cell.status === 'skipped');
 }
 
 function workoutFor(cell: CalendarCell | undefined, workouts: Map<string, Workout>): Workout | undefined {
@@ -657,12 +671,14 @@ function DayCell(props: {
   /** Name the month beside the day number. */
   monthLabel: boolean;
   isToday: boolean;
+  /** This date was planned or skipped on its own, apart from the week. */
+  ownDate: boolean;
   isSelected: boolean;
   activities: StateActivity[];
   sports: Map<string, string>;
   onSelect: () => void;
 }) {
-  const { date, cell, workout, workouts, schedule, monthLabel, isToday, isSelected, activities, sports, onSelect } = props;
+  const { date, cell, workout, workouts, schedule, monthLabel, isToday, ownDate, isSelected, activities, sports, onSelect } = props;
   const status = cell?.status;
   const dayOfMonth = Number(date.slice(8));
   // A finished run workout is its run: show the run once, not both under one name.
@@ -675,29 +691,37 @@ function DayCell(props: {
     const time = plannedReminderTime(schedule, id, date, workoutStatus);
     return time ? `${name} · ${formatScheduleTime(time)}` : name;
   };
+  // A chip keeps the time on its own line, so a long name never cuts it short.
+  const chipText = (name: string, id: string | null, workoutStatus: string | undefined) => {
+    const time = plannedReminderTime(schedule, id, date, workoutStatus);
+    return <><span>{name}</span>{time ? <small>{formatScheduleTime(time)}</small> : null}</>;
+  };
   const additionalNames = additional.map((session) =>
     `${nameAt(session.kind === 'freestyle' ? 'Freestyle' : workouts.get(session.workout_id ?? '')?.name ?? 'Workout', session.workout_id, session.status)}, ${session.status.replaceAll('_', ' ')}`);
   const label = [formatLongDate(date), calendarStatusLabel(cell),
     ...(workout ? [nameAt(workout.name, workout.id, status)] : []), ...additionalNames,
-    ...extras.map((extra) => `${nameAt(extra.name, extra.id, 'projected')}, planned`)].join(', ');
+    ...extras.map((extra) => `${nameAt(extra.name, extra.id, 'projected')}, planned`),
+    ...(ownDate ? ['this date only'] : [])].join(', ');
   return (
     <button type="button" role="gridcell" className={classes} onClick={onSelect} aria-label={label} aria-pressed={isSelected}>
       <span className="day-number">{monthLabel || dayOfMonth === 1 ? `${MONTHS[Number(date.slice(5, 7)) - 1]} ${dayOfMonth}` : dayOfMonth}</span>
       {status === 'unavailable' || status === 'light' ? <span className="chip away">Away</span> : null}
-      {workout && showWorkout ? <span className={`chip lift ${status ?? ''}`}><span>{nameAt(workout.name, workout.id, status)}</span></span> : null}
+      {workout && showWorkout ? <span className={`chip lift ${status ?? ''}`}>{chipText(workout.name, workout.id, status)}</span> : null}
       {additional.map((session) => (
         <span key={session.id} className={`chip lift ${session.status}`}>
-          <span>{nameAt(session.kind === 'freestyle' ? 'Freestyle' : workouts.get(session.workout_id ?? '')?.name ?? 'Workout', session.workout_id, session.status)}</span>
+          {chipText(session.kind === 'freestyle' ? 'Freestyle' : workouts.get(session.workout_id ?? '')?.name ?? 'Workout', session.workout_id, session.status)}
         </span>
       ))}
       {extras.map((extra) => (
-        <span key={`planned:${extra.id}`} className="chip lift projected"><span>{nameAt(extra.name, extra.id, 'projected')}</span></span>
+        <span key={`planned:${extra.id}`} className="chip lift projected">{chipText(extra.name, extra.id, 'projected')}</span>
       ))}
       {cell?.items.map((item) => (
         <span key={item.id} className={`chip endurance ${item.completed ? 'completed' : ''}`}>
           <span>{itemTitle(item, sports)}</span>
         </span>
       ))}
+      {ownDate && !(workout && showWorkout) ? <span className="own-rest">{status === 'skipped' ? 'Skipped' : 'Rest'}</span> : null}
+      {ownDate ? <small className="own-date">This date only</small> : null}
     </button>
   );
 }

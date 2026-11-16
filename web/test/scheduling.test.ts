@@ -13,6 +13,7 @@ import {
   moveBlocked,
   splitTrips,
   weekWith,
+  workoutWeekdays,
 } from '../src/scheduling';
 
 type Session = StateResponse['sessions'][number];
@@ -111,5 +112,19 @@ describe('away dates', () => {
     expect(upcoming.map((t) => t.id)).toEqual(['now', 't1', 'later']);
     expect(past.map((t) => t.id)).toEqual(['old', 'older']);
     expect(awayKindLabel({ ...trip, can_train_light: false })).toBe('Travel · no training');
+  });
+});
+
+describe('the days a workout is on', () => {
+  const week = { mon: 'run', tue: null, wed: null, thu: 'run', fri: null, sat: null, sun: null };
+  it('names main and extra days in week order, and nothing when it is on none', () => {
+    expect(workoutWeekdays({ week, extras: { sat: ['core'], tue: ['core'] } }, 'core')).toBe('Tue, Sat');
+    expect(workoutWeekdays({ week }, 'run')).toBe('Mon, Thu');
+    expect(workoutWeekdays({ week }, 'core')).toBe('');
+    expect(workoutWeekdays(null, 'run')).toBe('');
+  });
+  it('says every day for a nightly workout', () => {
+    const extras = { mon: ['core'], tue: ['core'], wed: ['core'], thu: ['core'], fri: ['core'], sat: ['core'], sun: ['core'] };
+    expect(workoutWeekdays({ week, extras }, 'core')).toBe('Every day');
   });
 });

@@ -164,7 +164,8 @@ p { margin: 0 0 0.75rem; }
 .chip.away { background: var(--surface-2); color: var(--muted); }
 
 .hint { font-size: 0.8125rem; margin: -0.25rem 0 0.75rem; }
-.away { margin-top: 24px; }
+.away { margin: 0.25rem 0 1rem; padding: 0.9rem 1rem; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+.away h2 { margin: 0; font-size: 1.25rem; }
 .away-list { list-style: none; margin: 0.5rem 0; padding: 0; display: grid; gap: 0.5rem; }
 .away-list > li { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 0.6rem 0.75rem; }
 .away-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
@@ -926,6 +927,9 @@ a.ghost { text-decoration: none; display: inline-block; }
 }
 /* A workout's name and time take two lines before they are cut short. */
 .weeks .chip { white-space: normal; }
+.weeks .day .own-date { font-size: 0.68rem; font-weight: 600; letter-spacing: 0.02em; color: var(--muted); }
+.weeks .day .own-rest { font-size: 0.78rem; color: var(--muted); }
+.weeks .chip > small { display: block; font-size: 0.7rem; opacity: 0.8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .weeks .chip > span {
   overflow: hidden; overflow-wrap: anywhere;
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;

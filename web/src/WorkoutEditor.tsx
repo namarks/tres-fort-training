@@ -31,6 +31,8 @@ import {
   type WeightUnit,
 } from './editing';
 import { describeGroup, describeRunSteps, describeSlot, slotBlocks, type Slot, type SlotBlock, type Workout } from './model';
+import { workoutWeekdays } from './scheduling';
+import type { WeeklySchedule } from '../../src/types';
 import { RunPlanEditor } from './RunPlanEditor';
 import { SlotFields } from './SlotFields';
 import { GuidedWorkoutCreator } from './GuidedWorkoutCreator';
@@ -77,6 +79,8 @@ export function WorkoutsPage(props: {
   reload: () => Promise<void>;
   onSignedOut: (error?: unknown) => void;
   onSchedule?: (workoutId: string) => void;
+  /** The repeating week, to name the days each workout is on. */
+  schedule?: WeeklySchedule | null;
   /** The live plan version; retained drafts require explicit review after it changes. */
   version: number;
   selectedId: string | null;
@@ -86,7 +90,7 @@ export function WorkoutsPage(props: {
   catalog: Catalog;
   miles: boolean;
 }) {
-  const { workouts, version, selectedId, onSelect, write, busy, catalog, miles, planId, accountId, reload, onSignedOut, onSchedule } = props;
+  const { workouts, version, selectedId, onSelect, write, busy, catalog, miles, planId, accountId, reload, onSignedOut, onSchedule, schedule } = props;
   const [showArchived, setShowArchived] = useState(false);
   // A one-time workout (made for one date, workout-library P3) is not part
   // of the library; it opens from its date.
@@ -134,7 +138,7 @@ export function WorkoutsPage(props: {
                   onClick={() => selectWorkout(workout.id)}
                 >
                   <span>{workout.name}</span>
-                  <span className="muted">{exerciseCount(workout)}</span>
+                  <span className="muted">{exerciseCount(workout)}{!showArchived && workoutWeekdays(schedule, workout.id) ? ` · ${workoutWeekdays(schedule, workout.id)}` : ''}</span>
                 </button>
                 {!showArchived && active.length > 1 && (
                   <span className="order-actions">

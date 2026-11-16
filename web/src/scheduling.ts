@@ -219,6 +219,14 @@ export function awayFields(draft: AwayDraft, original: Trip | null): { ok: true;
   return { ok: true, fields };
 }
 
+/** The weekdays a workout is on in the repeating week, as "Tue, Thu". Empty when it is on none. */
+export function workoutWeekdays(schedule: WeeklySchedule | null | undefined, workoutId: string): string {
+  if (!schedule) return '';
+  const days = WEEKDAYS.filter((day) => schedule.week[day] === workoutId || (schedule.extras?.[day] ?? []).includes(workoutId));
+  if (days.length === WEEKDAYS.length) return 'Every day';
+  return days.map((day) => day[0]!.toUpperCase() + day.slice(1)).join(', ');
+}
+
 /** Away dates that haven't ended, soonest first, then the past ones, latest first. */
 export function splitTrips(trips: readonly Trip[], today: string): { upcoming: Trip[]; past: Trip[] } {
   const sorted = [...trips].sort((a, b) => a.start.localeCompare(b.start) || a.end.localeCompare(b.end));
