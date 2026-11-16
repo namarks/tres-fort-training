@@ -219,6 +219,19 @@ export function sortingBlock(program: ProgramBody, schedule: WeeklySchedule, pic
   return ownForm({ ...program, workout_ids: [...picked] }, trimmed);
 }
 
+/** Most workouts one day holds: its main one and the ones beside it. */
+export const MAX_DAY_WORKOUTS = 1 + MAX_SCHEDULE_EXTRAS;
+
+/** A new block's own workouts on one weekday: the ticked ones the repeating
+ * week holds there, in its order, then the ones added for the block. */
+export function newBlockDay(
+  schedule: WeekPattern, picked: readonly string[], added: readonly { id: string; day: Weekday }[], day: Weekday,
+): string[] {
+  const entries = dayEntries(schedule, day).filter((id) => picked.includes(id));
+  for (const entry of added) if (entry.day === day && !entries.includes(entry.id)) entries.push(entry.id);
+  return entries;
+}
+
 /** A new block of `weeks` equal weeks holding only its own workouts: the
  * ticked ones on the weekdays the repeating week has them, plus any added. */
 export function newLayeredBlock(
@@ -232,9 +245,7 @@ export function newLayeredBlock(
   const added = (options.added ?? []).filter((entry) => live.has(entry.id));
   let week: ProgramWeek = { week: { ...EMPTY.week } };
   for (const day of WEEKDAYS) {
-    const entries = dayEntries(schedule, day).filter((id) => picked.includes(id));
-    for (const entry of added) if (entry.day === day && !entries.includes(entry.id)) entries.push(entry.id);
-    week = withDay(week, day, entries);
+    week = withDay(week, day, newBlockDay(schedule, picked, added, day));
   }
   const ids = [...picked, ...added.map((entry) => entry.id)].filter((id, index, all) => all.indexOf(id) === index);
   const count = Math.min(Math.max(Math.round(options.weeks), 1), MAX_PROGRAM_WEEKS);

@@ -25,7 +25,7 @@ import {
   type TargetField,
 } from './blocks';
 import { planBlocks } from './event';
-import { ownForm, trimmedSchedule } from './blockLayers';
+import { MAX_DAY_WORKOUTS, newBlockDay, ownForm, trimmedSchedule } from './blockLayers';
 import type { Slot, Workout } from './model';
 import type { Write } from './WorkoutEditor';
 import { useEditorDraft } from './useEditorDraft';
@@ -198,6 +198,10 @@ export function NewBlock({ state, workouts, write, busy, today, accountId, onCan
   const addable = live.filter(workout => !inWeek.some(entry => entry.workout.id === workout.id));
   const [addId, setAddId] = useState('');
   const [addDay, setAddDay] = useState<Weekday>('mon');
+  // A day holds five workouts; one more would be dropped, so it is never offered or sent.
+  const ownOn = (day: Weekday) => newBlockDay(week, picked.filter(id => live.some(w => w.id === id)), added.filter(entry => live.some(w => w.id === entry.id)), day);
+  const addDayFull = !!addId && !ownOn(addDay).includes(addId) && ownOn(addDay).length >= MAX_DAY_WORKOUTS;
+  const overfull = WEEKDAYS.filter(day => ownOn(day).length > MAX_DAY_WORKOUTS);
   const change = (patch: Partial<NewBlockDraft>) => retained.save({ ...draft, ...patch }, retained.record?.version ?? version);
   const cancel = () => {
     if (retained.record && !window.confirm('Discard your unfinished new block?')) return;
@@ -205,7 +209,7 @@ export function NewBlock({ state, workouts, write, busy, today, accountId, onCan
   };
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!body || busy || needsReview || exists || !state.plan || retained.unreadable) return;
+    if (!body || busy || needsReview || exists || overfull.length > 0 || !state.plan || retained.unreadable) return;
     const schedule = state.plan.schedule;
     const captured = retained.record ?? retained.save(draft, version);
     await write(async at => {
@@ -280,15 +284,17 @@ export function NewBlock({ state, workouts, write, busy, today, accountId, onCan
               <select id="block-new-add-day" value={addDay} onChange={e => setAddDay(e.target.value as Weekday)}>
                 {WEEKDAYS.map(day => <option key={day} value={day}>{WEEKDAY_LABELS[day]}</option>)}
               </select>
-              <button type="button" className="ghost small" disabled={added.some(entry => entry.id === addId && entry.day === addDay)}
+              <button type="button" className="ghost small" disabled={addDayFull || added.some(entry => entry.id === addId && entry.day === addDay)}
                 onClick={() => { change({ added: [...added, { id: addId, day: addDay }] }); setAddId(''); }}>Add</button>
+              {addDayFull && <p role="status" className="muted fine">{WEEKDAY_LABELS[addDay]} already has {MAX_DAY_WORKOUTS} workouts in this block. Choose another day.</p>}
             </>}
           </div>}
         </fieldset>
         {!validBlockWeeks(draft.weeks) && <p role="alert" className="problem">Choose a valid start and between 1 and {MAX_PROGRAM_WEEKS} whole weeks.</p>}
         {validBlockWeeks(draft.weeks) && !body && <p role="alert" className="problem">Tick or add at least one workout for this block to train.</p>}
+        {overfull.length > 0 && <p role="alert" className="problem">{overfull.map(day => WEEKDAY_LABELS[day]).join(', ')} {overfull.length === 1 ? 'has' : 'have'} more than {MAX_DAY_WORKOUTS} workouts in this block. Untick or remove one to start.</p>}
         <div className="form-actions">
-          <button type="submit" disabled={busy || !body || needsReview || exists}>Start block</button>
+          <button type="submit" disabled={busy || !body || needsReview || exists || overfull.length > 0}>Start block</button>
           <button type="button" className="ghost" disabled={busy} onClick={cancel}>{retained.record ? 'Discard new-block draft' : 'Cancel'}</button>
         </div>
         <p className="muted fine">Then give each week its own targets, ramp a target up week by week, or make a week lighter. Training for an event? <a href="#analysis/event">Set its date</a> to follow your progress toward it.</p>

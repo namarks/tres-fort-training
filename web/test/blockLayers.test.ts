@@ -10,6 +10,8 @@ import {
   daysLabel,
   hasWeekTargets,
   headlineName,
+  MAX_DAY_WORKOUTS,
+  newBlockDay,
   newLayeredBlock,
   ownForm,
   placingOn,
@@ -66,6 +68,15 @@ describe('a block beside the repeating week', () => {
     expect(block.weeks[0]).toEqual({ week: { ...none, tue: 'lift', fri: 'tempo', sat: 'core' } });
     expect(block.workout_ids).toEqual(['lift', 'tempo', 'core']);
     expect(block.weeks[0]).not.toBe(block.weeks[1]);
+  });
+
+  it('counts a new block’s workouts on a day, so a sixth is never offered', () => {
+    const added = ['a', 'b', 'c', 'd'].map(id => ({ id, day: 'tue' as const }));
+    // The ticked lift first, then the ones added for the block; core stays every week.
+    expect(newBlockDay(usual, ['lift', 'tempo'], added, 'tue')).toEqual(['lift', 'a', 'b', 'c', 'd']);
+    expect(newBlockDay(usual, ['lift', 'tempo'], added, 'tue')).toHaveLength(MAX_DAY_WORKOUTS);
+    expect(newBlockDay(usual, ['lift', 'tempo'], [...added, { id: 'lift', day: 'tue' }], 'tue')).toHaveLength(5);
+    expect(newBlockDay(usual, ['lift', 'tempo'], added, 'wed')).toEqual([]);
   });
 
   it('takes the block’s workouts out of the repeating week and keeps the rest', () => {
