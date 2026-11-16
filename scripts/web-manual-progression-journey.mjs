@@ -44,8 +44,13 @@ export async function manualProgressionJourney({ page, origin, apiCall, width = 
   assert.deepEqual(afterProgram.weeks[1], beforeProgram.weeks[1], 'Later weeks keep their own targets.');
   assert.deepEqual(after.plan.workouts[0], baseWorkout, 'Reusable workout is unchanged.');
   // A session known to the server must not have its active targets changed.
-  await apiCall('POST', '/api/sessions', { date: start, workout_id: created.id, expected_attempt: 0 },
+  const session = await apiCall('POST', '/api/sessions', { date: start, workout_id: created.id, expected_attempt: 0 },
     { 'X-TresFort-Write-Protocol': 'attempt-v1' });
+  assert.equal(session.status, 'planned', 'Creating the session alone does not start it.');
+  await apiCall('PATCH', `/api/sessions/${session.id}?expected_attempt=${session.attempt}`, { status: 'in_progress' },
+    { 'X-TresFort-Write-Protocol': 'attempt-v1' });
+  const active = (await apiCall('GET', '/api/state')).sessions.find(s => s.id === session.id);
+  assert.equal(active?.status, 'in_progress', 'The refusal check requires a genuinely active session.');
   await firstWeek.locator('summary').click();
   await firstWeek.getByRole('button', { name: 'Make week lighter', exact: true }).click();
   await preview.getByRole('button', { name: 'Apply to block draft', exact: true }).click();
