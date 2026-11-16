@@ -526,8 +526,7 @@ final class RunnerStreamlineJourneyTests: XCTestCase {
         let app = launch("groups", groupContract: encoded)
         let menu = app.buttons["runner.exerciseMenu"]
         reveal(menu, in: app); menu.tap()
-        // Native Menu actions expose their visible titles to XCTest.
-        app.buttons["Add a round (all group movements)"].tapWhenReady()
+        app.buttons["runner.menu.addRound"].tap()
         XCTAssertTrue(app.staticTexts["runner.group"].label.contains("Round 1 of 2"))
         XCTAssertTrue(app.staticTexts["runner.sessionAddition"].label.contains("1 extra round"))
         let log = app.buttons["runner.logSet"]
