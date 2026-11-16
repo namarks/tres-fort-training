@@ -79,7 +79,7 @@ final class PlanNextStepsJourneyTests: XCTestCase {
     private func openTargetsOnWeb(_ app: XCUIApplication) {
         let link = app.descendants(matching: .any).matching(identifier: "plan.block.targets.web").firstMatch
         XCTAssertTrue(app.scroll(toReveal: link))
-        XCTAssertEqual(link.label, "Edit week targets on web")
+        XCTAssertEqual(link.label, "Compare week targets on web")
         link.tap()
     }
 

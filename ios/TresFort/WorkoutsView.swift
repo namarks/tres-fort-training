@@ -117,6 +117,7 @@ struct WorkoutsView: View {
     @State private var renamingProgramWeek: Int?
     @State private var programWeekLabel = ""
     @State private var endingProgram = false
+    @State private var programTargetEdit: ProgramTargetEditRequest?
     /// Your week folds to one row while a block is in use; this opens it.
     @State private var showsYourWeek = false
     /// The tab stays put when a workout starts; the sheet closes.
@@ -255,6 +256,7 @@ struct WorkoutsView: View {
                     showBlockChooser = false
                 }
             }
+            .sheet(item: $programTargetEdit) { request in ProgramTargetEditorSheet(sync: sync, request: request) }
             .sheet(isPresented: $showProgramSetup) { ProgramSetupSheet(sync: sync) }
             .sheet(isPresented: $showEventBuild) { EventBuildSheet(sync: sync) }
             .sheet(isPresented: $showKeepBuilding) { EventBuildSheet(sync: sync, keepBuilding: true) }
@@ -296,6 +298,11 @@ struct WorkoutsView: View {
     /// the block, or end it.
     private func programMenu(_ program: PlanProgram, week: Int) -> some View {
         Menu {
+            Button("Edit week targets") { programTargetEdit = ProgramTargetEditRequest(week: week) }
+                .accessibilityIdentifier("plan.block.editTargets")
+            Button("Make week lighter") { programTargetEdit = ProgramTargetEditRequest(week: week, lighter: true) }
+                .accessibilityIdentifier("plan.block.lighten")
+            Divider()
             Button {
                 programWeekLabel = program.weeks[week].label ?? ""
                 renamingProgramWeek = week
@@ -323,6 +330,8 @@ struct WorkoutsView: View {
         } label: {
             Label("Edit weeks", systemImage: "ellipsis.circle")
                 .font(Theme.mono(14, .bold))
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
         }
         .disabled(sync.isRoutineMutationInFlight)
         .accessibilityIdentifier("plan.block.menu")

@@ -102,6 +102,7 @@ final class SyncModel: ObservableObject {
     // Rest timer (local Live Activity arrives in milestone g).
     private(set) var restControlID: String?
     private var restSource: RunnerPrescription?
+    private var restGroupSource: RunnerGroupRestSource?
     private(set) var timedControlID: String?
     private var timedCountdown: TimedSetCountdown?
     private var timedCueGeneration: Int?
@@ -2785,9 +2786,10 @@ final class SyncModel: ObservableObject {
             if let group = groupBeforeCommit {
                 let completedRound = (groupProgress(for: ex)?.completedRounds ?? group.completedRounds) > group.completedRounds
                 normalizeMountedRunnerAfterLocalCommit(for: intent.date)
-                let seconds = completedRound
-                    ? ex.group_rest_seconds ?? ex.rest_seconds : ex.group_transition_seconds ?? 0
-                startWorkoutRest(seconds: seconds, name: ex.exercise_name)
+                let kind: RunnerGroupRestKind = completedRound ? .round : .transition
+                let seconds = runnerGroupRestSeconds(for: ex, kind: kind)
+                startWorkoutRest(seconds: seconds, name: ex.exercise_name,
+                                 groupSource: groupRestSource(for: ex, kind: kind))
             } else {
                 startWorkoutRest(seconds: runnerRestSeconds(for: ex), name: ex.exercise_name, source: ex)
             }
@@ -4285,7 +4287,49 @@ final class SyncModel: ObservableObject {
 
     func sessionAddedSetCount(for exercise: TemplateExercise) -> Int {
         guard let id = selectedDayID, let base = baseRunnerDay(id: id) else { return 0 }
-        return sessionAdjustments.normalized(for: base).extraSets[exercise.id]?.count ?? 0
+        let normalized = sessionAdjustments.normalized(for: base)
+        if let groupID = exercise.group_id { return normalized.groups[groupID]?.extraRounds ?? 0 }
+        return normalized.extraSets[exercise.id]?.count ?? 0
+    }
+
+    /// Capture every member and reserved physical set index. A stale menu
+    /// cannot silently extend a different group, round or session attempt.
+    func sessionRoundTarget(for exercise: TemplateExercise) -> SessionRoundActionTarget? {
+        guard canAdjustSessionWork, let groupID = exercise.group_id,
+              let session = terminalActionTarget, let dayID = selectedDayID,
+              let base = baseRunnerDay(id: dayID),
+              let prescription = RunnerGroupPrescription(groupID: groupID, workout: base),
+              exercises.first(where: { $0.id == exercise.id }) == exercise else { return nil }
+        let members = exercises.filter { $0.group_id == groupID }
+        guard members.map(\.id) == prescription.members.map(\.id),
+              members.allSatisfy({ $0.target_sets < 100 && sessionNextSetNumber(for: $0) <= 100
+                  && !isSetEntryBlocked($0) }) else { return nil }
+        return SessionRoundActionTarget(session: session, prescription: prescription,
+            members: members, nextSetNumbers: members.map { sessionNextSetNumber(for: $0) },
+            skippedSlotIDs: members.filter { skipped.contains($0.id) }.map(\.id))
+    }
+
+    @discardableResult
+    func addSessionRound(expected target: SessionRoundActionTarget) -> Bool {
+        guard let first = target.members.first, sessionRoundTarget(for: first) == target,
+              matchesTerminalActionTarget(target.session), let dayID = selectedDayID,
+              let base = baseRunnerDay(id: dayID) else { return false }
+        sessionAdjustments = sessionAdjustments.normalized(for: base)
+        var adjustment = sessionAdjustments.groups[target.prescription.groupID]
+            ?? .init(prescription: target.prescription)
+        adjustment.extraRounds = max(adjustment.extraRounds + 1,
+            (target.nextSetNumbers.max() ?? 1) - target.prescription.rounds)
+        sessionAdjustments.groups[target.prescription.groupID] = adjustment
+        for member in target.members { skipped.remove(member.id) }
+        finished = false
+        deferredGroupRepair = nil
+        runnerFocus.revision &+= 1
+        runnerFocus.isExplicit = true
+        let nextID = groupProgress(for: first)?.nextMemberID ?? first.id
+        exerciseIndex = exercises.firstIndex(where: { $0.id == nextID }) ?? 0
+        seedInputs()
+        rememberGroupProgress()
+        return persistRunnerCheckpoint()
     }
 
     func canAddSessionSet(for exercise: TemplateExercise) -> Bool {
@@ -4434,6 +4478,10 @@ final class SyncModel: ObservableObject {
            extra.prescription.matches(current: RunnerPrescription(ex)),
            ex.target_sets == extra.prescribedSets + extra.count {
             comparison = ex.applying(SlotTargets(sets: extra.prescribedSets))
+        } else if let groupID = ex.group_id, let group = sessionAdjustments.groups[groupID],
+                  let original = group.prescription.members.first(where: { $0.id == ex.id }),
+                  ex == original.applying(SlotTargets(sets: original.target_sets + group.extraRounds)) {
+            comparison = original
         } else { comparison = ex }
         guard let base = plan?.workouts.flatMap(\.exercises).first(where: { $0.id == ex.id }),
               let swap = session?.exerciseSwap(for: base),
@@ -6641,13 +6689,40 @@ final class SyncModel: ObservableObject {
     /// meantime comes back as a conflict to review, never overwritten.
     @discardableResult
     func saveProgram(_ program: PlanProgram?, expectedVersion version: Int) async -> Bool {
+        guard !programWouldChangeLocalRunnerTargets(program) else {
+            loadError = APIError.activeWorkoutTargetsMessage
+            return false
+        }
         let live = plan.map(ProgramEditing.liveSlots)
         let activities = plan.map(ProgramEditing.liveWorkouts)
         let body = program.map { ProgramEditing.wire($0, liveSlots: live, activities: activities) }
         let result: APIClient.ProgramWriteResult? = await performRoutineMutation { api, jwt in
-            try await api.setProgram(body, expectedVersion: version, jwt: jwt)
+            // The mutation queue may have waited while a local runner started.
+            // Starting is itself blocked once this mutation owns the queue.
+            guard !self.programWouldChangeLocalRunnerTargets(program) else {
+                throw APIError.http(400, "{\"error\":\"active_workout_targets_changed\"}")
+            }
+            return try await api.setProgram(body, expectedVersion: version, jwt: jwt)
         }
         return result?.ok == true
+    }
+
+    /// A phone can mount a runner before its first server session write. Protect
+    /// that local runner/checkpoint here; the Worker separately protects known
+    /// in-progress sessions. A remote client cannot observe an offline/unlogged
+    /// start on another phone, so it must not claim to freeze that unseen runner.
+    private func programWouldChangeLocalRunnerTargets(_ proposed: PlanProgram?) -> Bool {
+        let checkpoint = persistedRunnerCheckpoint
+        guard let plan,
+              let workoutID = running ? selectedDayID : checkpoint?.selectedDayID,
+              let workout = plan.availableWorkouts.first(where: { $0.id == workoutID }) else { return false }
+        let date = running ? (todaySession?.date ?? todayString) : (checkpoint?.date ?? todayString)
+        let slot = running ? currentWorkoutScope.slot : (checkpoint?.sessionSlot ?? 0)
+        let session = (running ? todaySession : nil)
+            ?? sessions.first { $0.date == date && ($0.slot ?? 0) == slot }
+        let swapped = session?.applyingExerciseSwaps(to: workout) ?? workout
+        return ProgramTargetEditing.targetsDiffer(workout: swapped, date: date,
+                                                   current: plan.program, proposed: proposed)
     }
 
     /// "Train for an event": the weeks the rules lay out, without saving.
@@ -6858,14 +6933,31 @@ final class SyncModel: ObservableObject {
     /// new set's rest), so it never double-fires or fires for a stale timer.
     private var restCueTask: Task<Void, Never>?
 
-    private func startWorkoutRest(seconds: Int, name: String, source: TemplateExercise? = nil) {
+    private func startWorkoutRest(seconds: Int, name: String, source: TemplateExercise? = nil,
+                                  groupSource: RunnerGroupRestSource? = nil) {
         guard !isPartnerWorkout else { return }
         guard seconds > 0, !exercises.isEmpty,
               !exercises.allSatisfy({ isRunnerResolved($0) }) else {
             if restEndDate != nil { skipRest() }
             return
         }
-        startRest(seconds: seconds, name: name, source: source.map(RunnerPrescription.init))
+        startRest(seconds: seconds, name: name, source: source.map(RunnerPrescription.init), groupSource: groupSource)
+    }
+
+    private func groupRestSource(for exercise: TemplateExercise, kind: RunnerGroupRestKind) -> RunnerGroupRestSource? {
+        guard let groupID = exercise.group_id, let dayID = selectedDayID,
+              let base = baseRunnerDay(id: dayID),
+              let prescription = RunnerGroupPrescription(groupID: groupID, workout: base) else { return nil }
+        return RunnerGroupRestSource(prescription: prescription, kind: kind)
+    }
+
+    func runnerGroupRestSeconds(for exercise: TemplateExercise, kind: RunnerGroupRestKind) -> Int {
+        let fallback = kind == .round ? exercise.group_rest_seconds ?? exercise.rest_seconds
+            : exercise.group_transition_seconds ?? 0
+        guard let groupID = exercise.group_id, let dayID = selectedDayID,
+              let base = baseRunnerDay(id: dayID), let group = sessionAdjustments.normalized(for: base).groups[groupID]
+        else { return fallback }
+        return (kind == .round ? group.roundRest : group.transitionRest) ?? fallback
     }
 
     func runnerRestSeconds(for exercise: TemplateExercise) -> Int {
@@ -6884,32 +6976,49 @@ final class SyncModel: ObservableObject {
             exercises.first { $0.id == source.slotID && $0.group_id == nil
                 && source.matches(current: RunnerPrescription($0)) }.map(RunnerPrescription.init)
         }
+        let validGroupSource = restGroupSource.flatMap { source -> RunnerGroupRestSource? in
+            guard let dayID = selectedDayID, let base = baseRunnerDay(id: dayID),
+                  source.prescription.matches(base) else { return nil }
+            return source
+        }
         return RestEditTarget(controlID: controlID, seconds: restTotal, exerciseName: restExercise,
-                              prescription: validSource)
+                              prescription: validSource, groupSource: validGroupSource)
     }
 
-    /// Exact entry restarts this countdown from now. Remaining-set scope also
-    /// persists the duration for this ordinary slot in this session only.
+    /// Exact entry restarts this countdown from now. Remaining scope persists
+    /// this ordinary slot or this group's rest kind in this session only.
     @discardableResult
     func setRest(seconds: Int, forRemainingSets: Bool, expected: RestEditTarget) -> Bool {
         guard (0...3_600).contains(seconds), !isPartnerWorkout,
               canInitiateBoundFeatureAction, canControlSharedRestArtifacts,
               let current = restEditTarget, current.controlID == expected.controlID,
-              current.prescription == expected.prescription else { return false }
+              current.prescription == expected.prescription, current.groupSource == expected.groupSource else { return false }
         if forRemainingSets {
-            guard let prescription = current.prescription,
+            if let source = current.groupSource {
+                guard let dayID = selectedDayID, let base = baseRunnerDay(id: dayID),
+                      source.prescription.matches(base) else { return false }
+                sessionAdjustments = sessionAdjustments.normalized(for: base)
+                var group = sessionAdjustments.groups[source.prescription.groupID]
+                    ?? .init(prescription: source.prescription)
+                if source.kind == .round { group.roundRest = seconds }
+                else { group.transitionRest = seconds }
+                sessionAdjustments.groups[source.prescription.groupID] = group
+            } else {
+                guard let prescription = current.prescription,
                   let exercise = exercises.first(where: { $0.id == prescription.slotID }),
                   exercise.group_id == nil,
                   prescription.matches(current: RunnerPrescription(exercise)) else { return false }
-            sessionAdjustments.restOverrides[exercise.id] = RunnerRestOverride(prescription: prescription, seconds: seconds)
+                sessionAdjustments.restOverrides[exercise.id] = RunnerRestOverride(prescription: prescription, seconds: seconds)
+            }
             guard persistRunnerCheckpoint() else { return false }
         }
         if seconds == 0 { skipRest() }
-        else { startRest(seconds: seconds, name: current.exerciseName, source: current.prescription) }
+        else { startRest(seconds: seconds, name: current.exerciseName, source: current.prescription, groupSource: current.groupSource) }
         return true
     }
 
-    func startRest(seconds: Int, name: String, source: RunnerPrescription? = nil) {
+    func startRest(seconds: Int, name: String, source: RunnerPrescription? = nil,
+                   groupSource: RunnerGroupRestSource? = nil) {
         guard canControlSharedRestArtifacts else {
             relinquishStaleRunnerCheckpoint()
             return
@@ -6917,6 +7026,7 @@ final class SyncModel: ObservableObject {
         restExercise = name
         restTotal = seconds
         restSource = source
+        restGroupSource = groupSource
         let end = Date().addingTimeInterval(TimeInterval(seconds))
         restEndDate = end
         restControlID = UUID().uuidString
@@ -6958,6 +7068,7 @@ final class SyncModel: ObservableObject {
     private func relinquishLocalRest() {
         restControlID = nil
         restSource = nil
+        restGroupSource = nil
         restEndDate = nil
         restCueTask?.cancel()
         restCueTask = nil

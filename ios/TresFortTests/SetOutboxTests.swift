@@ -5,6 +5,137 @@ import XCTest
 
 // Session-only extra work retains the original plan and the queued write's identity.
 extension SetOutboxTests {
+    func testExtraGroupRoundReopensAllMembersAndSurvivesOfflineRecovery() async throws {
+        let defaults = defaults(), sharedAuth = retainedAuth(defaults: defaults), api = SetWriteAPIStub()
+        api.logHandler = { _, _, _ in throw URLError(.notConnectedToInternet) }
+        let a = exercise(targetSets: 1, groupID: "group-a")
+        let b = exercise(id: "slot-b", exerciseID: "exercise-b", targetSets: 1, groupID: "group-a")
+        let logs = [a, b].map { ex in
+            setLog(body: SetRequestBody(id: "done-\(ex.id)", exercise_id: ex.exercise_id,
+                template_exercise_id: ex.id, set_index: 1, weight: 100, reps: 5,
+                is_warmup: false, logged_at: 1, duration_s: nil, is_timed: false))
+        }
+        let original = state(session: session(attempt: 0), sets: logs, exercises: [a, b])
+        let model = SyncModel(auth: sharedAuth, setWriteAPI: api, defaults: defaults, now: { self.fixedDate })
+        model.replaceState(with: original); model.startWorkout(); model.finished = true
+        let target = try XCTUnwrap(model.sessionRoundTarget(for: a))
+        XCTAssertTrue(model.addSessionRound(expected: target))
+        XCTAssertFalse(model.finished)
+        XCTAssertEqual(model.exercises.map(\.target_sets), [2, 2])
+        XCTAssertEqual(model.plan?.workouts.first?.exercises.map(\.target_sets), [1, 1])
+        XCTAssertFalse(model.addSessionRound(expected: target), "A double tap cannot append another round")
+        let checkpoint = try XCTUnwrap(WorkoutRunnerCheckpointStore.load(userID: "user-a", defaults: defaults))
+        XCTAssertEqual(checkpoint.sessionAdjustments?.groups["group-a"]?.extraRounds, 1)
+
+        let cold = SyncModel(auth: sharedAuth, setWriteAPI: api, defaults: defaults, now: { self.fixedDate })
+        cold.replaceState(with: original); cold.resumeWorkout()
+        XCTAssertEqual(cold.exercises.map(\.target_sets), [2, 2])
+        for id in [a.id, b.id] {
+            let ex = try XCTUnwrap(cold.currentExercise)
+            XCTAssertEqual(ex.id, id)
+            XCTAssertEqual(cold.currentPhysicalSetNumber, 2)
+            await cold.logCurrentSet(expected: ex, expectedSetNumber: 2)
+            await cold.drainSetOutbox()
+        }
+        XCTAssertTrue(cold.finished)
+        XCTAssertEqual(cold.setOutbox.pending.map { $0.body.set_index }, [2, 2])
+        XCTAssertEqual(Set(cold.setOutbox.pending.map(\.id)).count, 2)
+        XCTAssertEqual(cold.plan?.workouts.first?.exercises.map(\.target_sets), [1, 1])
+        let queued = cold.setOutbox.pending
+        let accepted = queued.map { setLog(body: $0.body) }
+        cold.replaceState(with: state(session: session(attempt: 0), sets: logs + accepted, exercises: [a, b]))
+        XCTAssertEqual(cold.exercises.map { cold.runnerSetsDone($0) }, [2, 2], "ACKs never add another physical set")
+    }
+
+    func testGroupRoundRestoresSkippedMembersAndRejectsChangedScope() throws {
+        let defaults = defaults(), sharedAuth = retainedAuth(defaults: defaults)
+        let a = exercise(groupID: "group-a"), b = exercise(id: "slot-b", exerciseID: "exercise-b", groupID: "group-a")
+        let model = SyncModel(auth: sharedAuth, defaults: defaults, now: { self.fixedDate })
+        model.replaceState(with: state(session: session(attempt: 0), sets: [], exercises: [a, b]))
+        model.startWorkout()
+        let stale = try XCTUnwrap(model.sessionRoundTarget(for: a))
+        model.skipped.insert(b.id)
+        XCTAssertFalse(model.addSessionRound(expected: stale))
+        let skipped = try XCTUnwrap(model.sessionRoundTarget(for: a))
+        XCTAssertTrue(model.addSessionRound(expected: skipped))
+        XCTAssertFalse(model.skipped.contains(b.id))
+        let current = try XCTUnwrap(model.currentExercise)
+        let target = try XCTUnwrap(model.sessionRoundTarget(for: current))
+        model.timedActive = true
+        XCTAssertFalse(model.addSessionRound(expected: target))
+        model.timedActive = false
+        model.partnerReserved = true
+        XCTAssertFalse(model.addSessionRound(expected: target), "Shared steps cannot be changed by one phone")
+        model.partnerReserved = false
+        model.todaySession = session(attempt: 1)
+        XCTAssertFalse(model.addSessionRound(expected: target))
+        model.todaySession = session(attempt: 0)
+        sharedAuth.signOut()
+        XCTAssertFalse(model.addSessionRound(expected: target))
+    }
+
+    func testGroupChoicesStayWithExactAdditionalSessionAndExpireOnLiveRegroup() throws {
+        let defaults = defaults(), a = exercise(groupID: "group-a")
+        let b = exercise(id: "slot-b", exerciseID: "exercise-b", groupID: "group-a")
+        let primary = session(attempt: 0)
+        var extra = session(id: "second-session", attempt: 0); extra.slot = 1
+        let model = SyncModel(auth: retainedAuth(defaults: defaults), defaults: defaults, now: { self.fixedDate })
+        model.replaceState(with: state(session: primary, sets: [], exercises: [a, b]))
+        model.sessions.append(extra)
+        XCTAssertTrue(model.selectWorkout(extra)); model.startWorkout()
+        let target = try XCTUnwrap(model.sessionRoundTarget(for: a))
+        XCTAssertEqual(target.session.slot, 1)
+        XCTAssertTrue(model.addSessionRound(expected: target))
+        XCTAssertTrue(model.selectWorkout(primary)); model.startWorkout()
+        XCTAssertEqual(model.exercises.map(\.target_sets), [3, 3])
+        XCTAssertFalse(model.addSessionRound(expected: target))
+        XCTAssertTrue(model.selectWorkout(extra)); model.resumeWorkout()
+        XCTAssertEqual(model.exercises.map(\.target_sets), [4, 4])
+        let stale = try XCTUnwrap(model.sessionRoundTarget(for: try XCTUnwrap(model.currentExercise)))
+        model.plan = PlanTree(id: "plan-a", name: "Plan", version: 2,
+            workouts: [day(with: [b, a])], meta: nil)
+        XCTAssertEqual(model.exercises.map(\.target_sets), [3, 3])
+        XCTAssertFalse(model.addSessionRound(expected: stale))
+    }
+
+    func testFailedGroupRoundSaveRollsBackEveryMemberAndFocus() throws {
+        let harness = LocalPersistenceTestHarness()
+        addTeardownBlock { harness.cleanup() }
+        let defaults = harness.open(), sharedAuth = retainedAuth(defaults: defaults)
+        let a = exercise(groupID: "group-a"), b = exercise(id: "slot-b", exerciseID: "exercise-b", groupID: "group-a")
+        let model = SyncModel(auth: sharedAuth, defaults: defaults, now: { self.fixedDate })
+        model.replaceState(with: state(session: session(attempt: 0), sets: [], exercises: [a, b]))
+        model.startWorkout()
+        let before = try XCTUnwrap(WorkoutRunnerCheckpointStore.load(userID: "user-a", defaults: defaults))
+        let target = try XCTUnwrap(model.sessionRoundTarget(for: a))
+        harness.faults.failWrites = true
+        XCTAssertFalse(model.addSessionRound(expected: target))
+        XCTAssertEqual(model.exercises.map(\.target_sets), [3, 3])
+        XCTAssertEqual(model.currentExercise?.id, before.currentSlotID)
+        harness.faults.failWrites = false
+        XCTAssertTrue(defaults.retry(userID: "user-a"))
+        XCTAssertEqual(WorkoutRunnerCheckpointStore.load(userID: "user-a", defaults: defaults), before)
+    }
+
+    func testExtraGroupRoundRetainsSwappedMovementSetLineage() throws {
+        let defaults = defaults(), original = exercise(groupID: "group-a")
+        let replacement = exercise(exerciseID: "replacement", groupID: "group-a")
+        let second = exercise(id: "slot-b", exerciseID: "exercise-b", groupID: "group-a")
+        let active = try swappedSession(session(attempt: 0), original: original, replacement: replacement)
+        let old = setLog(body: SetRequestBody(id: "old", exercise_id: original.exercise_id,
+            template_exercise_id: original.id, set_index: 1, weight: 100, reps: 5,
+            is_warmup: false, logged_at: 100, duration_s: nil, is_timed: false))
+        let model = SyncModel(auth: retainedAuth(defaults: defaults), defaults: defaults, now: { self.fixedDate })
+        model.replaceState(with: state(session: active, sets: [old], exercises: [original, second]))
+        model.startWorkout()
+        XCTAssertEqual(model.runnerSetsDone(replacement), 1)
+        XCTAssertTrue(model.addSessionRound(expected: try XCTUnwrap(model.sessionRoundTarget(for: replacement))))
+        let extended = try XCTUnwrap(model.exercises.first { $0.id == replacement.id })
+        XCTAssertEqual(extended.target_sets, 4)
+        XCTAssertEqual(model.runnerSetsDone(extended), 1)
+        XCTAssertEqual(model.sessionNextSetNumber(for: extended), 2)
+    }
+
     func testExtraSetSurvivesRecoveryAndKeepsOriginalPrescription() async throws {
         let defaults = defaults(), sharedAuth = retainedAuth(defaults: defaults), api = SetWriteAPIStub()
         api.logHandler = { _, _, _ in throw URLError(.notConnectedToInternet) }
@@ -614,6 +745,8 @@ private final class SetRoutineEditingAPIStub: RoutineEditingAPI {
     var scheduleHandler: (([String: String], String, Int, String) async throws -> APIClient.ScheduleWriteResult)?
     var calendarHandler: ((String, String?, Int?, String) async throws -> APIClient.CalendarWriteResult)?
     var calendarMoveHandler: ((APIClient.CalendarMoveRequest) async throws -> APIClient.CalendarMoveResult)?
+    var programHandler: (([String: Any]?, Int, String) async throws -> APIClient.ProgramWriteResult)?
+    private(set) var programCalls = 0
     private(set) var updateDayCalls = 0
     private(set) var deleteDayCalls = 0
     private(set) var scheduleCalls = 0
@@ -724,6 +857,12 @@ private final class SetRoutineEditingAPIStub: RoutineEditingAPI {
         calendarCalls += 1
         guard let calendarHandler else { throw URLError(.badServerResponse) }
         return try await calendarHandler(date, dayID, expectedAttempt, jwt)
+    }
+
+    func setProgram(_ program: [String: Any]?, expectedVersion: Int, jwt: String) async throws -> APIClient.ProgramWriteResult {
+        programCalls += 1
+        guard let programHandler else { throw URLError(.badServerResponse) }
+        return try await programHandler(program, expectedVersion, jwt)
     }
 
     /// (trip id or nil for a new range, fields, expected version)
@@ -15953,21 +16092,49 @@ extension SetOutboxTests {
         XCTAssertEqual(cold.runnerRestSeconds(for: changedPrescription), 90, "A different prescription must not inherit a stale rest choice")
     }
 
-    func testGroupRestEditorOnlyChangesCurrentCountdown() async throws {
+    func testGroupRestChoicesKeepRoundAndTransitionSeparateAcrossRecovery() async throws {
         let defaults = defaults(), api = SetWriteAPIStub()
         api.logHandler = { _, _, _ in throw URLError(.notConnectedToInternet) }
         let first = exercise(groupID: "group-a"), second = exercise(id: "slot-b", exerciseID: "exercise-b", groupID: "group-a")
-        let model = SyncModel(auth: retainedAuth(defaults: defaults), setWriteAPI: api, defaults: defaults, now: { self.fixedDate })
-        model.replaceState(with: state(session: session(attempt: 0), sets: [], exercises: [first, second]))
+        let sharedAuth = retainedAuth(defaults: defaults)
+        let original = state(session: session(attempt: 0), sets: [], exercises: [first, second])
+        let model = SyncModel(auth: sharedAuth, setWriteAPI: api, defaults: defaults, now: { self.fixedDate })
+        model.replaceState(with: original)
         model.startWorkout()
         await model.logCurrentSet(expected: first, expectedSetNumber: 1)
         let target = try XCTUnwrap(model.restEditTarget)
-        XCTAssertFalse(target.allowsRemainingSets)
-        XCTAssertFalse(model.setRest(seconds: 125, forRemainingSets: true, expected: target))
-        XCTAssertTrue(model.setRest(seconds: 25, forRemainingSets: false, expected: target))
+        XCTAssertTrue(target.allowsRemainingSets)
+        XCTAssertEqual(target.groupSource?.kind, .transition)
+        XCTAssertEqual(target.remainingLabel, "Remaining transitions")
+        XCTAssertTrue(model.setRest(seconds: 25, forRemainingSets: true, expected: target))
         XCTAssertEqual(model.restTotal, 25)
+        XCTAssertEqual(model.runnerGroupRestSeconds(for: second, kind: .transition), 25)
+        XCTAssertEqual(model.runnerGroupRestSeconds(for: second, kind: .round), 75)
+        XCTAssertFalse(model.setRest(seconds: 99, forRemainingSets: true, expected: target))
+        await model.drainSetOutbox()
+        await model.logCurrentSet(expected: second, expectedSetNumber: 1)
+        let round = try XCTUnwrap(model.restEditTarget)
+        XCTAssertEqual(round.groupSource?.kind, .round)
+        XCTAssertEqual(round.remainingLabel, "Remaining round rests")
+        XCTAssertEqual(model.restTotal, 75)
+        XCTAssertTrue(model.setRest(seconds: 125, forRemainingSets: true, expected: round))
+        let replaced = try XCTUnwrap(model.restEditTarget)
+        XCTAssertTrue(model.setRest(seconds: 15, forRemainingSets: false, expected: replaced))
+        XCTAssertEqual(model.runnerGroupRestSeconds(for: first, kind: .round), 125)
+        XCTAssertEqual(model.runnerGroupRestSeconds(for: first, kind: .transition), 25)
         XCTAssertEqual(model.currentExercise?.group_transition_seconds, 10)
         XCTAssertEqual(model.currentExercise?.group_rest_seconds, 75)
+        let cold = SyncModel(auth: sharedAuth, setWriteAPI: api, defaults: defaults, now: { self.fixedDate })
+        cold.replaceState(with: original); cold.resumeWorkout()
+        XCTAssertEqual(cold.runnerGroupRestSeconds(for: first, kind: .round), 125)
+        XCTAssertEqual(cold.runnerGroupRestSeconds(for: first, kind: .transition), 25)
+        await cold.logCurrentSet(expected: first, expectedSetNumber: 2)
+        XCTAssertEqual(cold.restTotal, 25)
+        let transition = try XCTUnwrap(cold.restEditTarget)
+        XCTAssertTrue(cold.setRest(seconds: 0, forRemainingSets: true, expected: transition))
+        XCTAssertNil(cold.restEndDate)
+        XCTAssertEqual(cold.runnerGroupRestSeconds(for: second, kind: .transition), 0)
+        XCTAssertEqual(cold.runnerGroupRestSeconds(for: second, kind: .round), 125)
     }
 }
 
@@ -16182,5 +16349,51 @@ extension SetOutboxTests {
         guard case .unavailable = outcome else { return XCTFail("Old feature session must be fenced") }
         XCTAssertNil(model.sessions.first?.notes)
         XCTAssertNil(StateSnapshotStore.load(userID: "user-b", defaults: storage))
+    }
+}
+
+
+// Block planning also protects a local runner before its first server write.
+extension SetOutboxTests {
+    func testProgramTargetsProtectUnloggedLocalRunnerButAllowAnotherWeek() async throws {
+        let defaults = defaults(), api = SetRoutineEditingAPIStub(), stateAPI = SetWriteAPIStub()
+        let auth = retainedAuth(defaults: defaults), ex = exercise(), workout = day(with: [exercise()])
+        let week = PlanProgram.Week(label: nil, week: ["mon": workout.id], extras: nil,
+                                    targets: [ex.id: SlotTargets(weight: .some(120))])
+        let program = PlanProgram(id: "block", name: nil, start: ProgramEditing.monday(onOrBefore: fixedCivilDate)!,
+                                  repeats: false, weeks: [week, week])
+        var wire = ProgramEditing.wire(program); wire["id"] = program.id
+        let meta = String(data: try JSONSerialization.data(withJSONObject: ["program": wire]), encoding: .utf8)!
+        let initial = StateResponse(plan: PlanTree(id: "plan-a", name: "Plan A", version: 1, workouts: [workout], meta: meta),
+            plan_version: 1, sessions: [], sets: [], external_events: [], external_activities: [], activities: [],
+            server_time: 2_000_000_000_000, planGroupsVersion: 1)
+        let model = SyncModel(auth: auth, setWriteAPI: stateAPI, routineEditingAPI: api, defaults: defaults, now: { self.fixedDate })
+        model.replaceState(with: initial); model.selectedDayID = workout.id; model.startWorkout()
+        XCTAssertTrue(model.running); XCTAssertNil(model.todaySession)
+        XCTAssertEqual(model.currentExercise?.target_weight, 120)
+        let current = ProgramTargetEditing.setting(.load, value: 90, slot: ex, workout: workout, week: 0, later: false, in: program).program
+        let refused = await model.saveProgram(current, expectedVersion: 1)
+        XCTAssertFalse(refused); XCTAssertEqual(api.programCalls, 0)
+        XCTAssertEqual(model.currentExercise?.target_weight, 120)
+        XCTAssertEqual(model.loadError, APIError.activeWorkoutTargetsMessage)
+        let remove = await model.saveProgram(nil, expectedVersion: 1)
+        XCTAssertFalse(remove); XCTAssertEqual(api.programCalls, 0, "Ending a block cannot remove active targets")
+        api.programHandler = { _, version, _ in .init(ok: true, version: version + 1) }
+        stateAPI.stateHandler = { _ in throw URLError(.notConnectedToInternet) }
+        let nextWeek = ProgramTargetEditing.setting(.load, value: 90, slot: ex, workout: workout, week: 1, later: false, in: program).program
+        let accepted = await model.saveProgram(nextWeek, expectedVersion: 1)
+        XCTAssertTrue(accepted); XCTAssertEqual(api.programCalls, 1)
+        XCTAssertEqual(model.currentExercise?.target_weight, 120)
+        // A cold process protects the same durable checkpoint before Resume.
+        let cold = SyncModel(auth: auth, setWriteAPI: stateAPI, routineEditingAPI: api, defaults: defaults, now: { self.fixedDate })
+        cold.replaceState(with: initial)
+        let coldRefused = await cold.saveProgram(current, expectedVersion: 1)
+        XCTAssertFalse(coldRefused); XCTAssertEqual(api.programCalls, 1)
+    }
+
+    func testProgramActiveSessionErrorKeepsActionableFeedback() {
+        let error = APIError.http(400, "{\"error\":\"active_workout_targets_changed\"}")
+        XCTAssertEqual(error.localizedDescription, APIError.activeWorkoutTargetsMessage)
+        XCTAssertTrue(APIError.http(400, "{\"error\":\"different_error\"}").localizedDescription.contains("HTTP 400"))
     }
 }

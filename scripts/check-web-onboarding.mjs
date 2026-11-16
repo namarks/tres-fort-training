@@ -16,10 +16,12 @@ import { liftingPrescriptionJourney } from './web-lifting-prescription-journey.m
 import { workoutFeedbackJourney } from './web-workout-feedback-journey.mjs';
 import { strengthReviewJourney } from './web-strength-review-journey.mjs';
 import { groupMaintenanceJourney } from './web-group-maintenance-journey.mjs';
+import { programmingDraftJourney } from './web-programming-drafts-journey.mjs';
+import { manualProgressionJourney } from './web-manual-progression-journey.mjs';
 
 // Optional exact journey names keep a diagnosed failure's rerun focused.
 // With no arguments the standard command still runs every journey.
-const journeyNames = [1280, 800, 'account-switch', 'conflict-refresh', 'one-date-edit', 'one-date-account', 'one-date-removed', 'lifting-prescriptions', 'lifting-creation', 'lifting-creation-mobile', 'workout-feedback', 'workout-feedback-mobile', 'strength-review', 'strength-review-mobile', 'group-maintenance', 'group-maintenance-mobile'];
+const journeyNames = [1280, 800, 'account-switch', 'conflict-refresh', 'one-date-edit', 'one-date-account', 'one-date-removed', 'lifting-prescriptions', 'lifting-creation', 'lifting-creation-mobile', 'workout-feedback', 'workout-feedback-mobile', 'strength-review', 'strength-review-mobile', 'group-maintenance', 'group-maintenance-mobile', 'programming-drafts', 'programming-drafts-mobile', 'manual-progression', 'manual-progression-mobile'];
 const requested = new Set(process.argv.slice(2));
 const known = new Set([...journeyNames.map(String), 'signed-out-1280', 'signed-out-390']);
 assert([...requested].every(name => known.has(name)), 'Unknown browser journey name.');
@@ -159,7 +161,13 @@ try {
         assert(response.ok, `${method} ${pathname}: ${response.status} ${await response.clone().text()}`);
         return response.json();
       };
-      if (width === 'group-maintenance' || width === 'group-maintenance-mobile') {
+      if (width === 'programming-drafts' || width === 'programming-drafts-mobile') {
+        await programmingDraftJourney({ page, origin: webOrigin, apiCall, width: width.endsWith('-mobile') ? 390 : 1280 });
+        console.log('PASS: unfinished block setup and workout details survive navigation and conflicts, keep saved data on cancel, and retire only acknowledged drafts.');
+      } else if (width === 'manual-progression' || width === 'manual-progression-mobile') {
+        await manualProgressionJourney({ page, origin: webOrigin, apiCall, width: width.endsWith('-mobile') ? 390 : 1280 });
+        console.log('PASS: a reviewed lighter week changes only selected block targets, preserves reusable workouts and other weeks, and explains repeating-cycle scope.');
+      } else if (width === 'group-maintenance' || width === 'group-maintenance-mobile') {
         await groupMaintenanceJourney({ page, origin: webOrigin, apiCall, width: width.endsWith('-mobile') ? 390 : 1280 });
         console.log('PASS: group membership/order updates preserve slot rests and other groups; cancel never writes; conflicts retain exact drafts for review; missing/moved members stay visible and blocked; ACK retires drafts despite refresh failure.');
       } else if (width === 'strength-review' || width === 'strength-review-mobile') {

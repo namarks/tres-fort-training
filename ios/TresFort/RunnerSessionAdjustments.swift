@@ -1,5 +1,35 @@
 import Foundation
 
+struct SessionRoundActionTarget: Equatable {
+    let session: WorkoutTerminalActionTarget
+    let prescription: RunnerGroupPrescription
+    let members: [TemplateExercise]
+    let nextSetNumbers: [Int]
+    let skippedSlotIDs: [String]
+}
+
+/// The entire saved group owns a session choice. A reorder, regroup, swap or
+/// prescription change invalidates the choice instead of moving it to new work.
+struct RunnerGroupPrescription: Codable, Equatable {
+    let groupID: String
+    let members: [TemplateExercise]
+
+    init?(groupID: String, workout: Workout) {
+        let members = workout.exercises.filter { $0.group_id == groupID }
+        guard members.count >= 2, let first = members.first,
+              members.allSatisfy({ $0.target_sets == first.target_sets }),
+              (1...100).contains(first.target_sets) else { return nil }
+        self.groupID = groupID
+        self.members = members
+    }
+
+    var rounds: Int { members.first?.target_sets ?? 0 }
+
+    func matches(_ workout: Workout) -> Bool {
+        self == RunnerGroupPrescription(groupID: groupID, workout: workout)
+    }
+}
+
 /// Local choices for one running session. They never become library targets
 /// or change the server's immutable starting-target comparison.
 struct RunnerSessionAdjustments: Codable, Equatable {
@@ -15,11 +45,38 @@ struct RunnerSessionAdjustments: Codable, Equatable {
         }
     }
 
+    struct GroupAdjustment: Codable, Equatable {
+        let prescription: RunnerGroupPrescription
+        var extraRounds: Int = 0
+        var roundRest: Int?
+        var transitionRest: Int?
+
+        func matches(_ workout: Workout) -> Bool {
+            prescription.matches(workout) && extraRounds >= 0
+                && extraRounds <= 100 - prescription.rounds
+                && (roundRest.map { (0...3600).contains($0) } ?? true)
+                && (transitionRest.map { (0...3600).contains($0) } ?? true)
+        }
+    }
+
     var addedExercises: [TemplateExercise] = []
     var extraSets: [String: ExtraSets] = [:]
     var restOverrides: [String: RunnerRestOverride] = [:]
+    var groups: [String: GroupAdjustment] = [:]
 
-    var isEmpty: Bool { addedExercises.isEmpty && extraSets.isEmpty && restOverrides.isEmpty }
+    init() {}
+
+    private enum CodingKeys: String, CodingKey { case addedExercises, extraSets, restOverrides, groups }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        addedExercises = try values.decodeIfPresent([TemplateExercise].self, forKey: .addedExercises) ?? []
+        extraSets = try values.decodeIfPresent([String: ExtraSets].self, forKey: .extraSets) ?? [:]
+        restOverrides = try values.decodeIfPresent([String: RunnerRestOverride].self, forKey: .restOverrides) ?? [:]
+        groups = try values.decodeIfPresent([String: GroupAdjustment].self, forKey: .groups) ?? [:]
+    }
+
+    var isEmpty: Bool { addedExercises.isEmpty && extraSets.isEmpty && restOverrides.isEmpty && groups.isEmpty }
 
     /// A live edit may replace a movement or change its prescription while a
     /// runner is open. Never transfer the old extra work to that replacement.
@@ -43,12 +100,19 @@ struct RunnerSessionAdjustments: Codable, Equatable {
                   (0...3600).contains(value.seconds) else { return false }
             return value.prescription.matches(current: RunnerPrescription(slot))
         }
+        normalized.groups = groups.filter { id, value in
+            id == value.prescription.groupID && value.matches(workout)
+                && (value.extraRounds > 0 || value.roundRest != nil || value.transitionRest != nil)
+        }
         return normalized
     }
 
     func applying(to workout: Workout) -> Workout {
         let normalized = normalized(for: workout)
         let exercises = (workout.exercises + normalized.addedExercises).map { exercise in
+            if let groupID = exercise.group_id, let group = normalized.groups[groupID] {
+                return exercise.applying(SlotTargets(sets: exercise.target_sets + group.extraRounds))
+            }
             guard let extra = normalized.extraSets[exercise.id] else { return exercise }
             return exercise.applying(SlotTargets(sets: exercise.target_sets + extra.count))
         }

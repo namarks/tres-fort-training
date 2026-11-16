@@ -94,4 +94,39 @@ final class RunnerSessionAdjustmentsTests: XCTestCase {
         XCTAssertNil(cleared.sessionAdjustments,
             "An explicitly normalized empty choice still clears invalidated adjustments")
     }
+
+    func testGroupChoicesComposeAllMembersAndRejectChangedWholeGroup() throws {
+        let a = exercise(group: "group"), b = exercise(id: "b", exerciseID: "press", group: "group")
+        func group(_ members: [TemplateExercise]) -> Workout {
+            Workout(id: "workout", name: "Strength", day_label: nil, order_index: 0, exercises: members)
+        }
+        let baseline = group([a, b])
+        let signature = try XCTUnwrap(RunnerGroupPrescription(groupID: "group", workout: baseline))
+        var adjustments = RunnerSessionAdjustments()
+        adjustments.groups["group"] = .init(prescription: signature, extraRounds: 2, roundRest: 125, transitionRest: 0)
+        XCTAssertEqual(adjustments.applying(to: baseline).exercises.map(\.target_sets), [5, 5])
+        XCTAssertEqual(baseline.exercises.map(\.target_sets), [3, 3])
+        XCTAssertEqual(try JSONDecoder().decode(RunnerSessionAdjustments.self,
+            from: JSONEncoder().encode(adjustments)), adjustments)
+        for changed in [group([b, a]), group([a]),
+                        group([a, exercise(id: "b", exerciseID: "row", group: "group")]),
+                        group([a, b.applying(SlotTargets(reps: 8))])] {
+            XCTAssertTrue(adjustments.normalized(for: changed).groups.isEmpty,
+                          "A group choice must not move across membership, order or prescription changes")
+        }
+        adjustments.groups["group"]?.extraRounds = 98
+        XCTAssertTrue(adjustments.normalized(for: baseline).groups.isEmpty)
+    }
+
+    func testLegacyAdjustmentPayloadRetainsOrdinaryChoices() throws {
+        var adjustments = RunnerSessionAdjustments()
+        let planned = exercise()
+        adjustments.extraSets[planned.id] = .init(prescription: RunnerPrescription(planned), prescribedSets: 3, count: 1)
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(adjustments)) as? [String: Any])
+        legacy.removeValue(forKey: "groups")
+        let decoded = try JSONDecoder().decode(RunnerSessionAdjustments.self,
+            from: JSONSerialization.data(withJSONObject: legacy))
+        XCTAssertEqual(decoded.extraSets, adjustments.extraSets)
+        XCTAssertTrue(decoded.groups.isEmpty)
+    }
 }

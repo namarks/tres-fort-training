@@ -2,6 +2,7 @@ import { applyD1Migrations, env, SELF } from 'cloudflare:test';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { applySlotTargets, weekTargetsOn } from '../src/programTargets';
 import { normalizeProgram, parsePlanMeta } from '../src/types';
+import { buildEventBlock, setProgram } from '../src/db';
 import shared from '../ios/TresFortTests/Fixtures/ProgramTargets.json';
 
 // Targets that change from week to week (docs/plans/progressive-plans P1).
@@ -54,6 +55,158 @@ async function setup() {
 }
 
 const weekOf = (day: string, run: string) => ({ mon: day, sun: run });
+
+async function programWriteCounts(planID: string) {
+  return env.DB.prepare(`SELECT
+    (SELECT COUNT(*) FROM plan_snapshots WHERE plan_id=?1) AS snapshots,
+    (SELECT COUNT(*) FROM audit_log WHERE user_id=(SELECT user_id FROM plans WHERE id=?1)) AS audit,
+    (SELECT COUNT(*) FROM notes WHERE user_id=(SELECT user_id FROM plans WHERE id=?1)) AS notes`)
+    .bind(planID).first();
+}
+
+describe('program edits preserve started workout targets', () => {
+  it('rejects changed active lifting prescriptions but allows effective no-ops and future or other-workout edits', async () => {
+    const f = await setup();
+    const base = { start: '2030-01-07', weeks: [
+      { week: weekOf(f.day.id, f.run.id), targets: { [f.swing.id]: { target_weight: 28 } } },
+      { week: weekOf(f.day.id, f.run.id) },
+    ] };
+    expect((await f.call('PUT', 'plan/program', { expected_version: (await f.version()).version, program: base })).status).toBe(200);
+    const session = (await f.call('POST', 'sessions', { date: '2030-01-07', workout_id: f.day.id })).body;
+    expect((await f.call('PATCH', `sessions/${session.id}?expected_attempt=${session.attempt}`, { status: 'in_progress' })).status).toBe(200);
+    const before = await f.version(), counts = await programWriteCounts(f.plan.id);
+    for (const targets of [
+      { [f.swing.id]: { target_weight: 20 } }, { [f.swing.id]: { target_sets: 2 } },
+      { [f.swing.id]: { target_reps: 8 } }, { [f.plank.id]: { target_duration_s: 30 } },
+      { [f.swing.id]: { target_rpe: 6 } },
+    ]) {
+      const changed = { ...base, weeks: [{ ...base.weeks[0], targets }, base.weeks[1]] };
+      expect(await f.call('PUT', 'plan/program', { expected_version: before.version, program: changed }))
+        .toEqual({ status: 400, body: { error: 'active_workout_targets_changed' } });
+      expect(await f.version()).toEqual(before);
+      expect(await programWriteCounts(f.plan.id)).toEqual(counts);
+    }
+    const harmless = { ...base, name: 'Reviewed', weeks: [
+      { ...base.weeks[0], targets: {
+        [f.swing.id]: { target_weight: 28, target_sets: 5, target_reps: 10 },
+        [f.runSlot.id]: { run_steps: [{ kind: 'work', distance_m: 9000 }] },
+      } },
+      { ...base.weeks[1], targets: { [f.swing.id]: { target_weight: 32 } } },
+    ] };
+    expect((await f.call('PUT', 'plan/program', { expected_version: before.version, program: harmless })).status).toBe(200);
+    const after = await f.version();
+    expect(after.version).toBe(before.version + 1);
+    expect((await f.call('DELETE', `plan/program?expected_version=${after.version}`)).body)
+      .toEqual({ error: 'active_workout_targets_changed' });
+    expect(await f.version()).toEqual(after);
+  });
+
+  it('checks a repeating week on an additional session exact date, including run steps', async () => {
+    const f = await setup();
+    const base = { start: '2030-01-07', repeat: true, weeks: [
+      { week: weekOf(f.day.id, f.run.id) }, { week: weekOf(f.day.id, f.run.id) },
+    ] };
+    expect((await f.call('PUT', 'plan/program', { expected_version: (await f.version()).version, program: base })).status).toBe(200);
+    const primary = (await f.call('POST', 'sessions', { date: '2030-02-04', workout_id: f.day.id })).body;
+    const extra = (await f.call('POST', 'sessions', { id: crypto.randomUUID(), date: primary.date,
+      workout_id: f.run.id, additional: true, expected_attempt: 0 })).body;
+    expect(extra.slot).toBe(1);
+    expect((await f.call('PATCH', `sessions/${extra.id}?expected_attempt=${extra.attempt}`, { status: 'in_progress' })).status).toBe(200);
+    const version = (await f.version()).version;
+    const altered = { ...base, weeks: [
+      { ...base.weeks[0], targets: { [f.runSlot.id]: { run_steps: [{ kind: 'work', distance_m: 5000 }] } } },
+      base.weeks[1],
+    ] };
+    expect((await f.call('PUT', 'plan/program', { expected_version: version, program: altered })).body)
+      .toEqual({ error: 'active_workout_targets_changed' });
+    // The scheduled primary has not started and is a different workout.
+    const harmless = { ...base, weeks: [
+      { ...base.weeks[0], targets: { [f.swing.id]: { target_weight: 20 } } }, base.weeks[1],
+    ] };
+    expect((await f.call('PUT', 'plan/program', { expected_version: version, program: harmless })).status).toBe(200);
+    expect((await env.DB.prepare('SELECT status FROM sessions WHERE id=?1').bind(primary.id).first<any>()).status).toBe('planned');
+  });
+
+  it('protects every active circuit member when a valid round-count change is proposed', async () => {
+    const f = await setup();
+    expect((await f.call('PUT', `workouts/${f.day.id}/groups`, {
+      group_id: crypto.randomUUID(), exercises: [f.swing.id, f.plank.id], target_sets: 3,
+      round_rest: 60, transition_rest: 10, expected_version: (await f.version()).version,
+    })).status).toBe(200);
+    const session = (await f.call('POST', 'sessions', { date: '2030-01-07', workout_id: f.day.id })).body;
+    await f.call('PATCH', `sessions/${session.id}?expected_attempt=${session.attempt}`, { status: 'in_progress' });
+    const before = await f.version();
+    const program = { start: '2030-01-07', weeks: [{ week: weekOf(f.day.id, f.run.id), targets: {
+      [f.swing.id]: { target_sets: 2 }, [f.plank.id]: { target_sets: 2 },
+    } }] };
+    expect(await f.call('PUT', 'plan/program', { expected_version: before.version, program }))
+      .toEqual({ status: 400, body: { error: 'active_workout_targets_changed' } });
+    expect(await f.version()).toEqual(before);
+  });
+
+  it('compares session swap prescriptions and allows clearing a block with no active target change', async () => {
+    const f = await setup();
+    const session = (await f.call('POST', 'sessions', { date: '2030-01-07', workout_id: f.day.id })).body;
+    await f.call('PATCH', `sessions/${session.id}?expected_attempt=${session.attempt}`, { status: 'in_progress' });
+    const version = (await f.version()).version;
+    const swap = await f.call('POST', `sessions/${session.id}/exercises/${f.swing.id}/swap`, {
+      to_exercise: 'ex_goblet_squat', expected_attempt: session.attempt, expected_version: version, expected_revision: 0,
+    });
+    expect(swap.status).toBe(200);
+    const program = { start: '2030-01-07', weeks: [{ week: weekOf(f.day.id, f.run.id),
+      targets: { [f.swing.id]: { target_weight: 24 } } }] };
+    expect((await f.call('PUT', 'plan/program', { expected_version: version, program })).body)
+      .toEqual({ error: 'active_workout_targets_changed' });
+    const harmless = { ...program, weeks: [{ week: weekOf(f.day.id, f.run.id) }] };
+    expect((await f.call('PUT', 'plan/program', { expected_version: version, program: harmless })).status).toBe(200);
+    expect((await f.call('DELETE', `plan/program?expected_version=${version + 1}`)).status).toBe(200);
+  });
+
+  it('closes the race when a workout starts between target review and the atomic plan claim', async () => {
+    const f = await setup(), before = await f.version(), counts = await programWriteCounts(f.plan.id);
+    const user = (await env.DB.prepare('SELECT user_id FROM plans WHERE id=?1').bind(f.plan.id).first<{ user_id: string }>())!.user_id;
+    let started = false;
+    const racingDb = new Proxy(env.DB, {
+      get(target, property) {
+        if (property === 'batch') return async (statements: D1PreparedStatement[]) => {
+          if (!started) {
+            started = true;
+            await env.DB.prepare(`INSERT INTO sessions
+              (id,user_id,plan_id,workout_id,date,status,started_at,created_at,updated_at)
+              VALUES (?1,?2,?3,?4,'2030-01-07','in_progress',1,1,1)`)
+              .bind(crypto.randomUUID(), user, f.plan.id, f.day.id).run();
+          }
+          return target.batch(statements);
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as D1Database;
+    expect(await setProgram(racingDb, user, { start: '2030-01-07', weeks: [
+      { week: weekOf(f.day.id, f.run.id), targets: { [f.swing.id]: { target_weight: 20 } } },
+    ] }, before.version)).toEqual({ error: 'active_workout_targets_changed' });
+    expect(started).toBe(true);
+    expect(await f.version()).toEqual(before);
+    expect(await programWriteCounts(f.plan.id)).toEqual(counts);
+  });
+
+  it('uses the same guard when an event builder atomically replaces the block and event', async () => {
+    const f = await setup();
+    await f.call('PUT', 'plan/schedule', { expected_version: (await f.version()).version,
+      week: weekOf(f.day.id, f.run.id) });
+    const session = (await f.call('POST', 'sessions', { date: '2030-01-13', workout_id: f.run.id })).body;
+    await f.call('PATCH', `sessions/${session.id}?expected_attempt=${session.attempt}`, { status: 'in_progress' });
+    const before = await f.version(), counts = await programWriteCounts(f.plan.id);
+    const user = (await env.DB.prepare('SELECT user_id FROM plans WHERE id=?1').bind(f.plan.id).first<{ user_id: string }>())!.user_id;
+    const result = await buildEventBlock(env.DB, user, { today: '2030-01-07', start: '2030-01-07',
+      race: { name: 'Race', date: '2030-03-31', discipline: 'run', distance_m: 21097 },
+      long_run_weekday: 'sun', long_run_now_m: 5000, peak_m: 18000, workout_weekday: null,
+    }, { expectedVersion: before.version, attribution: { actor: 'ios', operation: 'build_program' } });
+    expect(result).toEqual({ error: 'active_workout_targets_changed' });
+    expect(await f.version()).toEqual(before);
+    expect(await programWriteCounts(f.plan.id)).toEqual(counts);
+  });
+});
 
 describe('per-week targets over REST', () => {
   it('stores each week its own targets and captures them when the workout starts', async () => {

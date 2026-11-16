@@ -1,6 +1,6 @@
 # Plan without an AI coach
 
-Slug: coach-free-planning · Status: active · Updated: 2026-11-09 · Theme: gym-floor
+Slug: coach-free-planning · Status: active · Updated: 2026-11-15 · Theme: gym-floor
 
 ## Goal
 
@@ -57,29 +57,54 @@ P5).
   - Still to do: the iOS editor for the event, and training phases in the
     app and on the web.
 - [ ] **P2 — Deload or lighten a week**
-  - The member can make the change `adjust_today` makes: scale target
-    weights or sets for one workout or the whole plan.
+  - Offer a reviewed lighter-week action in native and web block planning:
+    one scheduled lifting workout or all lifting workouts in the selected
+    week, with explicit set and/or load reduction and before/after targets.
+  - Change only that block week's target overrides through `setProgram`.
+    Do not use `adjust_today`: it changes reusable targets, which is a
+    different scope. In a repeating block explain that the indexed week
+    changes each cycle; do not imply a single calendar occurrence.
+  - Start from effective week targets, include primary and extra workouts
+    once each, preserve equal group rounds, and leave warm-ups and cardio
+    alone. Unknown loads stay unknown; reducing assisted work increases
+    assistance rather than moving the signed load toward zero. Preserve units.
+  - Preview before applying; stale versions require explicit review. Keep
+    reusable workouts, other weeks and history unchanged. Recorded active
+    workouts are protected by the shared writer, and the same phone guards
+    its pre-first-set runner; the remote offline/unlogged limitation is
+    recorded in progressive-plans P6, which also owns native manual targets.
 - [ ] **P3 — Smaller coach-only edits**
   - Exercise cues and the progression rule on a slot, notes on a workout,
     and deleting an intervals.icu activity that Tres Fort created.
+
+## Execution frontier
+
+- P2
 
 ## Dependencies
 
 | Local phase | Relationship | Target | Reason |
 |---|---|---|---|
 | P0 | coordinates_with | plan:app-design-pass#P5 | Both change the Plan tab and ship in the same TestFlight build. |
+| P2 | coordinates_with | plan:progressive-plans#P6 | Both edit reviewed week targets through the existing program writer. |
 
 ## Next step
 
-**Now (@owner):** P0 merged in PR #295 (2026-11-01). Its new REST routes
-need a Worker deploy, with the owner's go-ahead, before any TestFlight build
-that shows the Away dates row reaches members. An older Worker answers the
-row's writes with 404, which the app shows as an error.
+**Now (@agent):** Qualify and deliver the implemented P2 on
+`codex/lifting-core-ux`, selected in the November 15 core lifting UX pass.
+Keep it open until exact-head qualification and owner merge.
+Coordinate native per-week/future-target editing with
+progressive-plans P6 and draft preservation with workout-library P0.15.
 
-**Next (@agent):** P1's race goal REST and web editor are in review (owner,
-2026-11-09); the iOS event editor follows, then training phases. The new
-routes need a Worker deploy, with the owner's go-ahead, before the web
-Event page can save.
+**Later (@agent):** P1's standalone native event editor and training phases,
+then P3's remaining edits. REST and web event editing already exist in source;
+the native run builder can create an event with its block but is not a
+standalone event editor. Creation-time lifting cues exist; editing existing
+slot cues/progression and native workout notes remain separate gaps.
+
+Deployments and client distribution require separate authority. Confirm the
+chosen release's routes and client support from live evidence, rather than
+treating historical deployment requests as current tasks.
 
 ## Notes / open questions
 

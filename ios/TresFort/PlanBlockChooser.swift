@@ -129,7 +129,7 @@ struct PlanBlockChooserSheet: View {
     }
 }
 
-/// Detailed target authoring lives in the web block designer. Keep the
+/// The web also offers a full cross-week target grid. Keep the
 /// destination and scope consistent at setup, block and day entry points.
 struct ProgramTargetsWebLink: View {
     var week: Int? = nil
@@ -138,7 +138,7 @@ struct ProgramTargetsWebLink: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Link(destination: AppInformation.blockPlannerURL) {
-                Label("Edit week targets on web", systemImage: "arrow.up.right.square")
+                Label("Compare week targets on web", systemImage: "arrow.up.right.square")
                     .font(Theme.mono(15, .bold))
                     .foregroundStyle(Theme.text)
                     .frame(minHeight: 44, alignment: .leading)

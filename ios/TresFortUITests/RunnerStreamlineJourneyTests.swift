@@ -509,6 +509,66 @@ final class RunnerStreamlineJourneyTests: XCTestCase {
         capture("focus-four-member-circuit")
     }
 
+    func testExtraGroupRoundAndRemainingRestReachableThroughFinishReview() throws {
+        let contractURL = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "ExerciseGroups", withExtension: "json"))
+        var contract = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: contractURL)) as? [String: Any])
+        let all = try XCTUnwrap(contract["slots"] as? [[String: Any]])
+        var slots = Array(all.prefix(2))
+        for index in slots.indices {
+            slots[index]["group_id"] = "extra-round-group"
+            slots[index]["target_sets"] = 1
+            slots[index]["group_rest_seconds"] = 60
+            slots[index]["group_transition_seconds"] = 15
+            slots[index]["is_warmup"] = 0
+        }
+        contract["slots"] = slots
+        let encoded = String(data: try JSONSerialization.data(withJSONObject: contract), encoding: .utf8)!
+        let app = launch("groups", groupContract: encoded)
+        let menu = app.buttons["runner.exerciseMenu"]
+        reveal(menu, in: app); menu.tap()
+        app.buttons["runner.menu.addRound"].tap()
+        XCTAssertTrue(app.staticTexts["runner.group"].label.contains("Round 1 of 2"))
+        XCTAssertTrue(app.staticTexts["runner.sessionAddition"].label.contains("1 extra round"))
+        let log = app.buttons["runner.logSet"]
+        reveal(log, in: app); log.tap()
+        let expand = app.buttons["Expand rest timer"]
+        XCTAssertTrue(expand.waitForExistence(timeout: UITestWait.screen)); expand.tap()
+        let change = app.buttons["rest.changeDuration"]
+        reveal(change, in: app); change.tap()
+        XCTAssertTrue(app.buttons["rest.duration.scope"].waitForExistence(timeout: UITestWait.screen))
+        app.buttons["rest.duration.scope"].tap()
+        app.buttons["Remaining transitions"].tap()
+        app.buttons["rest.duration.apply"].tap()
+        XCTAssertTrue(app.buttons["rest.minimize"].waitForExistence(timeout: UITestWait.screen))
+        app.buttons["rest.minimize"].tap()
+        app.buttons["rest.done"].tap()
+        reveal(log, in: app); log.tap()
+        XCTAssertTrue(expand.waitForExistence(timeout: UITestWait.screen)); expand.tap()
+        reveal(change, in: app); change.tap()
+        XCTAssertTrue(app.buttons["rest.duration.scope"].waitForExistence(timeout: UITestWait.screen))
+        app.buttons["rest.duration.scope"].tap()
+        app.buttons["Remaining round rests"].tap()
+        app.buttons["rest.duration.apply"].tap()
+        app.buttons["rest.minimize"].tap()
+        app.buttons["rest.done"].tap()
+        for index in 0..<2 {
+            reveal(log, in: app); log.tap()
+            if index == 0 {
+                XCTAssertTrue(app.buttons["rest.done"].waitForExistence(timeout: UITestWait.screen))
+                app.buttons["rest.done"].tap()
+            }
+        }
+        let more = app.buttons["finished.addSet"]
+        XCTAssertTrue(more.waitForExistence(timeout: UITestWait.screen))
+        reveal(more, in: app); more.tap()
+        let round = app.buttons["session.addRound.extra-round-group"]
+        XCTAssertTrue(round.waitForExistence(timeout: UITestWait.screen)); round.tap()
+        XCTAssertTrue(log.waitForExistence(timeout: UITestWait.screen))
+        XCTAssertEqual(log.label, "LOG SET 3")
+        XCTAssertTrue(app.staticTexts["runner.group"].label.contains("Round 3 of 3"))
+        capture("runner-extra-group-round-after-finish-review")
+    }
+
     func testExpandedRestIsExplicitAndEndRestNeverBecomesLog() {
         let app = launch()
         app.buttons["LOG SET 1"].tap()

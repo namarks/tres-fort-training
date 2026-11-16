@@ -1,6 +1,6 @@
 # Gym-Floor Experience
 
-Slug: gym-floor-experience · Status: planned · Updated: 2026-09-09
+Slug: gym-floor-experience · Status: active · Updated: 2026-11-15
 
 ## Objective
 
@@ -11,8 +11,10 @@ the next scheduled session.
 
 ## Scope
 
-- plan:member-activation-and-adherence
-- plan:workout-library#P0
+- plan:workout-library#P0.14
+- plan:workout-library#P0.15
+- plan:progressive-plans#P6
+- plan:coach-free-planning#P2
 
 ## Priority policy
 
@@ -34,20 +36,22 @@ Completed bodyweight support
 provides the comparable-metrics repository foundation. Its Worker/app release
 remains separate from repository completion.
 
-1. Treat completed manual authoring as the shared foundation; prioritize the
-   remaining entry, bodyweight-progression, runner, and adherence gaps by their
-   own plan frontiers.
-2. Entry-path fixes and runner improvements may proceed in parallel when they
-   do not overlap the same iOS surface; member-plan dependencies remain
-   authoritative.
-3. Treat reminder, plate-math, warm-up, and progress features as bounded slices
-   of the existing product, not foundations for new platforms.
-4. Keep bodyweight progression and runner changes on the shared routine editor
-   and plan tree delivered by manual authoring; do not fork a second editor or
-   client-only workout model.
-5. Prioritize prescription seeding, observable failures and final-set correction
-   before new aids. Use accessible synthetic walkthroughs and measured history
-   scale; a green backend job cannot stand in for iOS verification.
+The owner activated this core lifting pass on November 15. Child plans own
+status and acceptance; this initiative only orders their work:
+
+1. Adapt a solo workout in progress: extra circuit/superset rounds and rest
+   changes for the remaining group rounds or transitions.
+2. Protect unfinished programming: new-block setup and workout metadata,
+   including explicit review after concurrent changes.
+3. Make manual progression reachable: edit one or later block weeks from the
+   phone and preview a lighter week on phone/web. Distinguish active session,
+   indexed block week (including repeated cycles) and reusable workout.
+
+Use the shared plan tree, versioned writers and runner checkpoint contract.
+Independent surfaces may proceed in parallel; shared editor changes coordinate
+through the child plans. Existing history/correction and shared exercise
+instructions are foundations, not work to rebuild. Qualify actual user journeys
+alongside deterministic rules; backend checks alone do not qualify native UI.
 
 ## Completion condition
 
@@ -66,5 +70,9 @@ size has measured client performance and reproducible iOS verification.
 
 ## Stop rules
 
-- Only the optional starter-plan choice requires a product decision. Do not
-  gate manual authoring, ordinary onboarding, or runner improvements on it.
+- This selection does not activate paused member-activation P4, partner camera
+  counting, automatic weight suggestions, or a separate web workout runner.
+- Shared ending/invitation recovery and date-only replacement of scheduled
+  extras remain follow-ups in their owning plans. They do not block this pass.
+- Production deployment, migration, client distribution and physical acceptance
+  retain their separate authority and evidence requirements.

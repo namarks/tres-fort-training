@@ -197,6 +197,13 @@ struct ProgramSetupSheet: View {
     @State private var repeats = false
     @State private var name = ""
     @State private var saving = false
+    @State private var reviewedPlan: PlanTree?
+    @State private var initialStart = ""
+    @State private var confirmDiscard = false
+    private var dirty: Bool { name != "" || weeks != 8 || repeats || start != initialStart }
+    private var competingBlock: Bool { sync.plan?.program != nil }
+    private var samePlan: Bool { reviewedPlan != nil && reviewedPlan?.id == sync.plan?.id }
+    private var needsReview: Bool { reviewedPlan?.version != sync.plan?.version }
 
     private var choices: [String] { ProgramEditing.startChoices(today: sync.todayString) }
 
@@ -226,6 +233,27 @@ struct ProgramSetupSheet: View {
                          ? "Each week starts as a copy of your week. After the last week, the block starts over."
                          : "Each week starts as a copy of your week. After the last week, your week comes back.")
                 }
+                if competingBlock {
+                    Section {
+                        Text("A block has been saved since you started. Your choices are kept here, but cannot replace that block. Cancel to return to the saved block.")
+                            .foregroundStyle(Theme.danger)
+                    }
+                } else if !samePlan && reviewedPlan != nil {
+                    Section { Text("The active plan changed. Your choices are kept here, but cannot be saved to another plan.").foregroundStyle(Theme.danger) }
+                } else if needsReview, let current = sync.plan, let previous = reviewedPlan {
+                    Section("Review your usual week") {
+                        Text("Your plan changed. Review the current week before copying it into your new block. Your name, dates and week count are kept.")
+                        ForEach(["mon", "tue", "wed", "thu", "fri", "sat", "sun"], id: \.self) { day in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(WorkoutLibraryPolicy.weekdayNames[day] ?? day).font(.headline)
+                                Text("Previously reviewed: \(weekDescription(previous, day: day))")
+                                Text("Current: \(weekDescription(current, day: day))")
+                            }
+                        }
+                        Button("Use current week with my choices") { reviewedPlan = current }
+                            .accessibilityIdentifier("plan.blockSetup.review")
+                    }
+                }
                 if let error = sync.loadError {
                     Section {
                         Text(error).foregroundStyle(Theme.danger)
@@ -239,32 +267,45 @@ struct ProgramSetupSheet: View {
                         Text("Start the block").frame(maxWidth: .infinity)
                     }
                     .buttonStyle(WorkoutPrimaryButtonStyle())
-                    .disabled(saving || sync.isRoutineMutationInFlight || sync.plan == nil || start.isEmpty)
+                    .disabled(saving || sync.isRoutineMutationInFlight || !samePlan || needsReview || competingBlock || start.isEmpty)
                     .listRowBackground(Color.clear)
                     .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
                     .accessibilityIdentifier("plan.blockSetup.save")
                 }
             }
+            .disabled(saving)
             .scrollContentBackground(.hidden)
             .background(Theme.background)
             .navigationTitle("Plan a block")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }.foregroundStyle(Theme.accent)
+                    Button("Cancel") { if dirty { confirmDiscard = true } else { dismiss() } }.foregroundStyle(Theme.accent).disabled(saving)
                 }
             }
-            .onAppear { if start.isEmpty { start = choices.first ?? "" } }
-            // A block made elsewhere (found by a conflict or a sync) is never
-            // replaced from here: setup closes and the Plan tab shows it.
-            .onChange(of: sync.plan?.program != nil) { _, exists in
-                if exists { dismiss() }
+            .onAppear {
+                guard reviewedPlan == nil else { return }
+                start = choices.first ?? ""
+                initialStart = start
+                reviewedPlan = sync.plan
+            }
+            .alert("Discard block draft?", isPresented: $confirmDiscard) {
+                Button("Keep editing", role: .cancel) { }
+                Button("Discard draft", role: .destructive) { dismiss() }
             }
         }
+        .interactiveDismissDisabled(saving || dirty)
+    }
+
+    private func weekDescription(_ plan: PlanTree, day: String) -> String {
+        let primary = plan.schedule?.week[day] ?? nil
+        let ids = (primary.map { [$0] } ?? []) + (plan.schedule?.extras?[day] ?? [])
+        let names = ids.map { id in plan.workouts.first(where: { $0.id == id })?.name ?? "Unavailable workout" }
+        return names.isEmpty ? "Rest" : names.joined(separator: " + ")
     }
 
     private func save() async {
-        guard let plan = sync.plan, plan.program == nil, !start.isEmpty else { dismiss(); return }
+        guard let plan = reviewedPlan, samePlan, !needsReview, !competingBlock, !start.isEmpty else { return }
         saving = true
         defer { saving = false }
         let program = ProgramEditing.newProgram(from: plan, start: start, weeks: weeks, repeats: repeats, name: name)
@@ -280,6 +321,7 @@ struct ProgramDaySheet: View {
     let target: ProgramDayTarget
     @Environment(\.dismiss) private var dismiss
     @State private var scope = ProgramEditing.Scope.thisWeek
+    @State private var targetEdit: ProgramTargetEditRequest?
 
     /// The block as it is now: a conflict reloads it, so the sheet shows
     /// what the next pick will change.
@@ -329,6 +371,8 @@ struct ProgramDaySheet: View {
                     Text("\(dayName), week \(target.week + 1)")
                 }
                 Section("Week-specific targets") {
+                    Button("Edit week targets") { targetEdit = ProgramTargetEditRequest(week: target.week, workoutID: current) }
+                        .accessibilityIdentifier("plan.blockDay.editTargets")
                     ProgramTargetsWebLink(week: target.week)
                 }
                 if let error = sync.loadError {
@@ -340,6 +384,7 @@ struct ProgramDaySheet: View {
             }
             .scrollContentBackground(.hidden)
             .background(Theme.background)
+            .sheet(item: $targetEdit) { request in ProgramTargetEditorSheet(sync: sync, request: request) }
             .navigationTitle(dayName)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
