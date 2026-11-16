@@ -114,9 +114,9 @@ final class PlanComposerTests: XCTestCase {
     // MARK: - P24: rides, swims, routines at home, a time while adding
 
     func testEveryKindHasOneTileAndRidesAndSwimsAreTheirOwn() {
-        XCTAssertEqual(PlanComposer.Kind.rows.flatMap { $0 }, [.run, .ride, .swim, .lift, .home, .sport, .saved])
-        XCTAssertEqual(Set(PlanComposer.Kind.rows.flatMap { $0 }), Set(PlanComposer.Kind.allCases),
-                       "Every kind has a tile")
+        let strip = PlanComposer.Kind.strip(PlanComposer.Kind.new, selected: .run)
+        XCTAssertEqual(strip, [.run, .ride, .swim, .lift, .home, .sport, .saved])
+        XCTAssertEqual(Set(strip), Set(PlanComposer.Kind.allCases), "Every kind has a tile")
         XCTAssertEqual(PlanComposer.Kind.new, [.run, .ride, .swim, .lift, .home, .sport])
         XCTAssertEqual(PlanComposer.Kind.ride.title, "Ride")
         XCTAssertEqual(PlanComposer.Kind.swim.title, "Swim")
@@ -195,6 +195,26 @@ final class PlanComposerTests: XCTestCase {
         XCTAssertFalse(PlannedActivity.isLogged("45 min ride", manual: [], synced: [synced(kind: "run", sport: "run")]))
     }
 
+    // MARK: - P27: one row of tiles, when first, a name of its own
+
+    func testASecondRoutineFromTheSameStarterGetsANumberedName() {
+        func workout(_ id: String, _ name: String) -> Workout {
+            Workout(id: id, name: name, day_label: nil, order_index: 0, exercises: [])
+        }
+        let none = PlanTree(id: "p", name: "L", version: 1, workouts: [], meta: nil)
+        XCTAssertEqual(PlanComposer.availableName("Core routine", in: none), "Core routine")
+        XCTAssertEqual(PlanComposer.availableName("Core routine", in: nil), "Core routine")
+        let one = PlanTree(id: "p", name: "L", version: 1, workouts: [workout("a", "Core routine")], meta: nil)
+        XCTAssertEqual(PlanComposer.availableName("Core routine", in: one), "Core routine 2")
+        let two = PlanTree(id: "p", name: "L", version: 1,
+                           workouts: [workout("a", "core routine"), workout("b", "Core routine 2")], meta: nil)
+        XCTAssertEqual(PlanComposer.availableName("Core routine", in: two), "Core routine 3", "Matched without case")
+        XCTAssertEqual(PlanComposer.HomeStart.own.title, "From scratch")
+        XCTAssertEqual(PlanComposer.restPhrase(120), "2 min")
+        XCTAssertEqual(PlanComposer.restPhrase(90), "90 sec")
+        XCTAssertEqual(PlanComposer.restPhrase(30), "30 sec")
+    }
+
     func testARoutineAtHomeStartsFromExercisesThePhoneHas() {
         func exercise(_ id: String, _ modality: String) -> ExerciseCatalog {
             ExerciseCatalog(id: id, name: id, primary_muscle: "core", modality: modality, unit: "lb",
@@ -264,8 +284,12 @@ final class PlanComposerTests: XCTestCase {
         XCTAssertEqual(PlanComposer.ranked([:]), PlanComposer.Kind.new, "Nothing yet keeps the default order")
         XCTAssertEqual(PlanComposer.ranked([.home: 3, .ride: 3, .lift: 1]), [.ride, .home, .lift, .run, .swim, .sport],
                        "Ties keep the default order")
-        XCTAssertEqual(PlanComposer.Kind.layout([.home, .lift, .run, .ride, .swim, .sport]),
-                       [[.home, .lift, .run, .ride], [.swim, .sport, .saved]], "Saved stays last")
+        XCTAssertEqual(PlanComposer.Kind.strip([.home, .lift, .run, .ride, .swim, .sport], selected: .home),
+                       [.home, .lift, .run, .ride, .swim, .sport, .saved], "One row, Saved last")
+        XCTAssertEqual(PlanComposer.Kind.strip([.home, .lift, .run, .ride, .swim, .sport], selected: .swim),
+                       [.swim, .home, .lift, .run, .ride, .sport, .saved], "The kind it opens on comes first")
+        XCTAssertEqual(PlanComposer.Kind.strip([.home, .lift, .run, .ride, .swim, .sport], selected: .saved),
+                       [.saved, .home, .lift, .run, .ride, .swim, .sport], "Saved first only when chosen")
 
         let kb = Workout(id: "kb", name: "Kettlebell A", day_label: nil, order_index: 0, exercises: [slot("1", "swing")])
         let core = Workout(id: "core", name: "Core routine", day_label: nil, order_index: 1, exercises: [

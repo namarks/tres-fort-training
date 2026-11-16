@@ -212,16 +212,19 @@ final class MixedWeekSetupJourneyTests: XCTestCase {
         XCTAssertTrue(app.scroll(toReveal: alongside))
         XCTAssertEqual(alongside.value as? String, "1", "A separate core routine keeps the run")
         if withReminder { enable("composer.time.toggle", in: app) }
-        let review = app.buttons["composer.save"]
-        XCTAssertEqual(review.label, "Review exercises")
-        review.tapWhenReady()
+        // A starter adds as it is; Edit opens its exercises and timers first.
+        XCTAssertEqual(app.buttons["composer.save"].label, alsoThursday ? "Add to Tue, Thu" : "Add to Tuesdays")
+        revealAndTap(app.buttons["composer.home.edit"], in: app)
         XCTAssertTrue(app.navigationBars["Review workout"].waitForExistence(timeout: UITestWait.screen))
-        XCTAssertEqual(app.textFields["createWorkout.name"].value as? String, "Core routine")
         enable("createWorkout.circuit", in: app)
         enable("createWorkout.timeEveryExercise", in: app)
         for (field, value) in [("sets", "2"), ("seconds", "40"), ("transition", "20"), ("roundRest", "60")] {
             replaceText(in: app.textFields["createWorkout.timing.\(field)"], with: value, app: app)
         }
+        // The optional name comes after the exercises and timing.
+        let name = app.textFields["createWorkout.name"]
+        XCTAssertTrue(app.scroll(toReveal: name))
+        XCTAssertEqual(name.value as? String, "Core routine")
         // The pinned submit stays reachable above the numeric keyboard.
         XCTAssertTrue(app.buttons["createWorkout.create"].isEnabled)
     }

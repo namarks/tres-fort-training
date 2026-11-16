@@ -138,11 +138,6 @@ struct CreateWorkoutView: View {
             if let scheduleSummary {
                 Section("Your week") { Text(scheduleSummary).foregroundStyle(Theme.text) }
             }
-            Section("Workout name · optional") {
-                TextField(suggestedName, text: $name)
-                    .accessibilityIdentifier("createWorkout.name")
-                    .disabled(creationLocked)
-            }
             if equipmentFree { homeTiming }
             Section {
                 ForEach(selectedExercises) { exercise in
@@ -186,6 +181,15 @@ struct CreateWorkoutView: View {
                 Text(equipmentFree
                      ? "These targets and rests are saved together. You can change individual exercises later from the workout."
                      : "Tap an exercise to review its sets, reps, weight and rest. Use its menu to change the order. Empty weights stay unset until you choose a load.")
+            }
+            // The name is optional and comes last: the workout is saved under
+            // a name of its own either way (app-design-pass P27).
+            Section {
+                TextField(suggestedName, text: $name)
+                    .accessibilityIdentifier("createWorkout.name")
+                    .disabled(creationLocked)
+            } header: { Text("Name · optional") } footer: {
+                Text("Rename it any time from Workouts.")
             }
             if !equipmentFree, let message = liftingDraft.validationMessage(for: selectedExercises) {
                 Text(message).font(.footnote).foregroundStyle(Theme.danger)
