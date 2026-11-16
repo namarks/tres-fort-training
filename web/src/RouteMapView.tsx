@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { fetchActivityRoute } from './api';
-import { accentColor, drawRoute, loadMapKit, onMapKitFailure } from './mapkit';
-import { drawableSegments, recoveryText, routeOutline, type LatLon } from './routeMap';
+import { accentColor, drawRoute, loadMapKit, onMapKitFailure, prefersReducedMotion, replayRoute } from './mapkit';
+import { drawableSegments, recoveryText, routeOutline, routeOutlineEnds, type LatLon } from './routeMap';
 import { lapRows, type LapRow } from './runLaps';
 
 /**
@@ -44,7 +44,7 @@ export function RouteMap({ activityId, label, miles }: { activityId: string; lab
   return (
     <>
       {recovery !== null ? <p className="route-recovery">Heart rate recovery: {recovery}</p> : null}
-      {segments.length > 0 ? <RouteView key={activityId} segments={segments} label={label} /> : null}
+      {segments.length > 0 ? <RouteView key={activityId} replayKey={activityId} segments={segments} label={label} /> : null}
       {laps.length > 0 ? <LapList laps={laps} /> : null}
     </>
   );
@@ -71,7 +71,11 @@ function LapList({ laps }: { laps: LapRow[] }) {
   );
 }
 
-function RouteView({ segments, label }: { segments: LatLon[][]; label: string }) {
+/** Activities whose route has replayed during this visit: each plays once,
+ * the first time it is opened. */
+const replayed = new Set<string>();
+
+function RouteView({ segments, label, replayKey }: { segments: LatLon[][]; label: string; replayKey: string }) {
   const element = useRef<HTMLDivElement>(null);
   const [lineOnly, setLineOnly] = useState(false);
 
@@ -80,6 +84,7 @@ function RouteView({ segments, label }: { segments: LatLon[][]; label: string })
     if (lineOnly || !parent) return;
     let cancelled = false;
     let drawn: ReturnType<typeof drawRoute> | null = null;
+    let stopReplay: (() => void) | null = null;
     const stopWatching = onMapKitFailure(() => setLineOnly(true));
     const media = window.matchMedia('(prefers-color-scheme: dark)');
     const recolor = () => {
@@ -88,7 +93,12 @@ function RouteView({ segments, label }: { segments: LatLon[][]; label: string })
     media.addEventListener('change', recolor);
     loadMapKit()
       .then((mapkit) => {
-        if (!cancelled) drawn = drawRoute(mapkit, parent, segments);
+        if (cancelled) return;
+        drawn = drawRoute(mapkit, parent, segments);
+        if (!replayed.has(replayKey) && !prefersReducedMotion()) {
+          replayed.add(replayKey);
+          stopReplay = replayRoute(mapkit, drawn, segments);
+        }
       })
       .catch(() => {
         if (!cancelled) setLineOnly(true);
@@ -97,9 +107,10 @@ function RouteView({ segments, label }: { segments: LatLon[][]; label: string })
       cancelled = true;
       stopWatching();
       media.removeEventListener('change', recolor);
+      stopReplay?.();
       drawn?.map.destroy();
     };
-  }, [segments, lineOnly]);
+  }, [segments, lineOnly, replayKey]);
 
   if (lineOnly) return <RouteOutline segments={segments} label={label} />;
   return <div ref={element} className="route-map" role="group" aria-label={label} />;
@@ -110,10 +121,13 @@ const OUTLINE_HEIGHT = 200;
 
 function RouteOutline({ segments, label }: { segments: LatLon[][]; label: string }) {
   const paths = routeOutline(segments, OUTLINE_WIDTH, OUTLINE_HEIGHT);
+  const ends = routeOutlineEnds(segments, OUTLINE_WIDTH, OUTLINE_HEIGHT);
   return (
     <div className="route-map outline">
       <svg viewBox={`0 0 ${OUTLINE_WIDTH} ${OUTLINE_HEIGHT}`} role="img" aria-label={label}>
         {paths.map((d, i) => <path key={i} d={d} className="route-line" />)}
+        {ends ? <circle className="route-end finish" cx={ends.end[0]} cy={ends.end[1]} r={6} /> : null}
+        {ends ? <circle className="route-end start" cx={ends.start[0]} cy={ends.start[1]} r={6} /> : null}
       </svg>
     </div>
   );

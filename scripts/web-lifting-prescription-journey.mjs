@@ -37,7 +37,7 @@ export async function liftingPrescriptionJourney({ page, origin, apiCall }) {
 
   await page.getByRole('button', { name: 'Edit Dumbbell Bench Press', exact: true }).click();
   await weight.fill('50');
-  await page.getByRole('link', { name: 'Block', exact: true }).click();
+  await page.getByRole('link', { name: 'Plan', exact: true }).click();
   await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Reviewed strength block');
   const weeklyLoad = page.getByRole('textbox', { name: 'Week 1 Load', exact: true });
   await weeklyLoad.fill('145.');
@@ -66,7 +66,7 @@ export async function liftingPrescriptionJourney({ page, origin, apiCall }) {
   await draft.waitFor({ state: 'hidden' });
   assert.equal((await apiCall('GET', '/api/state')).plan.workouts[0].exercises[0].target_weight, 50);
 
-  await page.getByRole('link', { name: 'Block', exact: true }).click();
+  await page.getByRole('link', { name: 'Plan', exact: true }).click();
   assert.equal(await page.getByRole('textbox', { name: 'Name', exact: true }).inputValue(), 'Reviewed strength block');
   assert(await page.getByRole('button', { name: 'Save changes', exact: true }).first().isDisabled());
   await page.getByRole('button', { name: 'Use draft with latest block', exact: true }).click();
@@ -106,7 +106,7 @@ export async function liftingPrescriptionJourney({ page, origin, apiCall }) {
   });
   await page.route('**/api/state', route => route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"synthetic_refresh_failure"}' }));
   await draft.getByRole('button', { name: 'Save targets', exact: true }).click();
-  await page.getByRole('link', { name: 'Block', exact: true }).click();
+  await page.getByRole('link', { name: 'Plan', exact: true }).click();
   await page.getByRole('link', { name: 'Workouts', exact: true }).click();
   await page.getByRole('button', { name: /Upper body/, exact: false }).first().click();
   assert.equal(await weight.inputValue(), '60', 'Remount before acknowledgement retains the pending draft.');

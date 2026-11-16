@@ -94,9 +94,27 @@ export function drawableSegments(route: unknown): LatLon[][] {
  * map can be shown.
  */
 export function routeOutline(segments: LatLon[][], width: number, height: number, margin = 12): string[] {
+  const place = outlineFit(segments, width, height, margin);
+  if (!place) return [];
+  const at = (p: LatLon) => place(p).map((v) => v.toFixed(1)).join(' ');
+  return segments
+    .filter((segment) => segment.length > 1)
+    .map((segment) => segment.map((p, i) => `${i === 0 ? 'M' : 'L'}${at(p)}`).join(''));
+}
+
+/** Where the start and finish fall on `routeOutline`'s drawing. */
+export function routeOutlineEnds(segments: LatLon[][], width: number, height: number, margin = 12):
+  { start: [number, number]; end: [number, number] } | null {
+  const place = outlineFit(segments, width, height, margin);
+  const ends = routeEnds(segments.filter((segment) => segment.length > 1));
+  return place && ends ? { start: place(ends.start), end: place(ends.end) } : null;
+}
+
+/** Maps a point into the outline's box, or null for a route with no points. */
+function outlineFit(segments: LatLon[][], width: number, height: number, margin: number): ((p: LatLon) => [number, number]) | null {
   const points = segments.flat();
   const first = points[0];
-  if (!first) return [];
+  if (!first) return null;
   let minLat = first.lat, maxLat = first.lat, minLon = first.lon, maxLon = first.lon;
   for (const p of points) {
     minLat = Math.min(minLat, p.lat);
@@ -112,8 +130,75 @@ export function routeOutline(segments: LatLon[][], width: number, height: number
   if (!Number.isFinite(scale)) scale = 0;
   const left = (width - spanX * scale) / 2;
   const top = (height - spanY * scale) / 2;
-  const at = (p: LatLon) => `${(left + (p.lon - minLon) * kx * scale).toFixed(1)} ${(top + (maxLat - p.lat) * scale).toFixed(1)}`;
-  return segments
-    .filter((segment) => segment.length > 1)
-    .map((segment) => segment.map((p, i) => `${i === 0 ? 'M' : 'L'}${at(p)}`).join(''));
+  return (p) => [left + (p.lon - minLon) * kx * scale, top + (maxLat - p.lat) * scale];
+}
+
+/** The route's first and last points: where the run started and finished.
+ * Null for a route with no points. */
+export function routeEnds(segments: LatLon[][]): { start: LatLon; end: LatLon } | null {
+  const first = segments.find((s) => s.length > 0);
+  const last = [...segments].reverse().find((s) => s.length > 0);
+  if (!first || !last) return null;
+  return { start: first[0]!, end: last[last.length - 1]! };
+}
+
+/** Meters between two points (haversine). */
+export function metersBetween(a: LatLon, b: LatLon): number {
+  const rad = Math.PI / 180;
+  const dLat = (b.lat - a.lat) * rad;
+  const dLon = (b.lon - a.lon) * rad;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(dLon / 2) ** 2;
+  return 2 * 6_371_000 * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+/** A route ready to replay: at most `maxPoints` points per segment (always
+ * keeping each segment's ends), with the distance covered at each point. */
+export interface RouteReplay {
+  segments: LatLon[][];
+  /** Meters covered at each point, by segment; gaps between segments add nothing. */
+  covered: number[][];
+  total: number;
+}
+
+export function routeReplay(segments: LatLon[][], maxPoints = 400): RouteReplay {
+  const count = segments.reduce((n, s) => n + s.length, 0);
+  const step = Math.max(1, Math.ceil(count / maxPoints));
+  const kept = segments.filter((s) => s.length > 0)
+    .map((s) => s.filter((_, i) => i % step === 0 || i === s.length - 1));
+  let total = 0;
+  const covered = kept.map((s) => s.map((p, i) => {
+    if (i > 0) total += metersBetween(s[i - 1]!, p);
+    return total;
+  }));
+  return { segments: kept, covered, total };
+}
+
+/**
+ * The part of the route covered once `fraction` (0 to 1) of its distance is
+ * run: the finished segments, the current one up to the runner, and where
+ * the runner is. A route with no distance is finished at once.
+ */
+export function replayAt(replay: RouteReplay, fraction: number): { done: LatLon[][]; at: LatLon | null } {
+  const ends = routeEnds(replay.segments);
+  if (!ends) return { done: [], at: null };
+  if (replay.total <= 0 || fraction >= 1) return { done: replay.segments, at: ends.end };
+  const target = Math.max(0, fraction) * replay.total;
+  const done: LatLon[][] = [];
+  for (let s = 0; s < replay.segments.length; s++) {
+    const points = replay.segments[s]!;
+    const meters = replay.covered[s]!;
+    if (meters[meters.length - 1]! < target) { done.push(points); continue; }
+    const i = meters.findIndex((m) => m >= target);
+    if (i <= 0) {
+      done.push([points[0]!]);
+      return { done, at: points[0]! };
+    }
+    const a = points[i - 1]!, b = points[i]!;
+    const span = meters[i]! - meters[i - 1]!;
+    const t = span > 0 ? (target - meters[i - 1]!) / span : 1;
+    const at = { lat: a.lat + (b.lat - a.lat) * t, lon: a.lon + (b.lon - a.lon) * t };
+    done.push([...points.slice(0, i), at]);
+    return { done, at };
+  }
+  return { done: replay.segments, at: ends.end };
 }

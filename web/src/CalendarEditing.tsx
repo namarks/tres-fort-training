@@ -36,6 +36,9 @@ type RoutineReview = { schedule: RoutineSchedule; at: Reviewed };
 export function RoutineEditor(props: {
   schedule: WeeklySchedule; workouts: Workout[]; reviewed: Reviewed; write: Write; busy: boolean;
   selectedWorkoutId?: string | null; onScheduled?: () => void; onCancelSelection?: () => void;
+  /** Opens one weekday's form, as when its Edit day button is chosen. */
+  openDayRequest?: { day: Weekday; key: number } | null;
+  hint?: string;
 }) {
   const { schedule, workouts, reviewed, write, busy } = props;
   const choosable = choosableWorkouts(workouts);
@@ -66,6 +69,11 @@ export function RoutineEditor(props: {
     setMessage('');
     setEditing({ day, review: review(), draft });
   };
+  const requestKey = props.openDayRequest?.key;
+  useEffect(() => {
+    if (props.openDayRequest) openDay(props.openDayRequest.day);
+    // Only a new request opens a day; a re-render with the same one doesn't.
+  }, [requestKey]);
   const drop = (day: Weekday) => (event: DragEvent) => {
     event.preventDefault();
     setOver(null);
@@ -82,8 +90,8 @@ export function RoutineEditor(props: {
 
   return (
     <section className="routine routine-editor" aria-labelledby="routine-title">
-      <h2 id="routine-title">Weekly routine</h2>
-      <p className="muted hint">Build your repeating week with a main workout and up to four separate workouts each day. Each can have its own time. Single dates on the calendar can still differ.</p>
+      <h2 id="routine-title">Your usual week</h2>
+      <p className="muted hint">{props.hint ? `${props.hint} ` : ''}Build your repeating week with a main workout and up to four separate workouts each day. Each can have its own time. Single dates on the calendar can still differ.</p>
       {selected && <AddWorkoutToWeek key={`${reviewKey}:${selected.id}`} workout={selected} workouts={choosable}
         review={review()} busy={busy} write={write} onDone={() => {
           setLocalSelection(null); setDismissedSelection(selected.id); props.onScheduled?.();
