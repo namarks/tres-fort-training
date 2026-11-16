@@ -151,6 +151,9 @@ designer into the unified Plan weeks page; rebuilding those is not next work.
 **Next (@owner):** On a separately authorized release, check the same selected
 week on the phone, web, Today and calendar. Reconcile deployment and device
 evidence before closing P5; an old release request is not new authority.
+Deploy the API's active-workout program guard before the new web/native controls:
+an older API accepts the same request shape without that protection. The phone's
+local check cannot protect a recorded session on another device by itself.
 
 ## Notes / open questions
 
