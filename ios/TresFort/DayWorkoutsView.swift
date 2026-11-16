@@ -104,6 +104,9 @@ struct AdditionalWorkoutPicker: View {
     @Environment(\.dismiss) private var dismiss
     @State private var freestyle = false
     @State private var building: PlanComposer.HomeStart?
+    /// A routine being saved or started from Build one now; the sheet
+    /// stays put until it lands.
+    @State private var routineBusy = false
     private let unit = RunDistanceUnit.preferred()
 
     var body: some View {
@@ -155,12 +158,12 @@ struct AdditionalWorkoutPicker: View {
             .navigationTitle("Add another workout").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(sync.isAddingWorkout) } }
             .navigationDestination(item: $building) { start in
-                TodayRoutineBuilderView(sync: sync, start: start) { dismiss() }
+                TodayRoutineBuilderView(sync: sync, start: start, isBusy: $routineBusy) { dismiss() }
             }
             .sheet(isPresented: $freestyle) {
                 FreestyleExercisePicker(sync: sync, starting: true, additional: true, onStarted: { dismiss() })
             }
-        }.interactiveDismissDisabled(sync.isAddingWorkout)
+        }.interactiveDismissDisabled(sync.isAddingWorkout || routineBusy)
     }
 }
 
@@ -169,6 +172,9 @@ struct AdditionalWorkoutPicker: View {
 /// new workout starts from a real saved workout and can be done again.
 struct TodayRoutineBuilderView: View {
     @ObservedObject var sync: SyncModel
+    /// Tells the sheet a save or start is in flight, so it can't be swiped
+    /// away while the request is still out.
+    @Binding var isBusy: Bool
     var onStarted: () -> Void
     @State private var home: HomeRoutineBuilder
     @State private var typedName = ""
@@ -182,8 +188,10 @@ struct TodayRoutineBuilderView: View {
     @State private var needsLibraryReview = false
     @FocusState private var nameFocused: Bool
 
-    init(sync: SyncModel, start: PlanComposer.HomeStart, onStarted: @escaping () -> Void) {
+    init(sync: SyncModel, start: PlanComposer.HomeStart, isBusy: Binding<Bool>,
+         onStarted: @escaping () -> Void) {
         _sync = ObservedObject(wrappedValue: sync)
+        _isBusy = isBusy
         _home = State(initialValue: HomeRoutineBuilder(start: start, catalog: sync.catalog))
         self.onStarted = onStarted
     }
@@ -223,6 +231,9 @@ struct TodayRoutineBuilderView: View {
         .scrollDismissesKeyboard(.interactively)
         .navigationTitle("Build a workout").navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(busy)
+        .interactiveDismissDisabled(busy)
+        .onChange(of: busy, initial: true) { _, now in isBusy = now }
+        .onDisappear { isBusy = false }
         .safeAreaInset(edge: .bottom, spacing: 0) { startBar }
         .homeRoutineSheets(sync: sync, builder: $home)
     }
