@@ -7,6 +7,7 @@ import {
   currentWeek,
   editableFields,
   FIELD_LABELS,
+  liveWorkouts,
   formatSeconds,
   formatValue,
   MAX_PROGRAM_WEEKS,
@@ -24,11 +25,12 @@ import {
   type TargetField,
 } from './blocks';
 import { planBlocks } from './event';
+import { ownForm, trimmedSchedule } from './blockLayers';
 import type { Slot, Workout } from './model';
 import type { Write } from './WorkoutEditor';
 import { useEditorDraft } from './useEditorDraft';
-import { isNewBlockDraft, NEW_BLOCK_DOCUMENT, newBlockDraft, newBlockRequest, type NewBlockDraft } from './programmingDrafts';
-import { WEEKDAYS } from '../../src/types';
+import { isNewBlockDraft, NEW_BLOCK_DOCUMENT, newBlockDraft, newBlockRequest, validBlockWeeks, type NewBlockDraft } from './programmingDrafts';
+import { WEEKDAYS, type Weekday } from '../../src/types';
 import { WEEKDAY_LABELS } from './model';
 import { blockComparison, blockDraftProblem, blockInputErrors, blockSlotIdentities, changingBlockInput, isBlockDraft, parsedTargetInput, reconcileBlockInputs, resettingBlockInputs, resolveBlockInputs, targetInputKey, type BlockDraft } from './blockDrafts';
 
@@ -57,15 +59,23 @@ export function useBlockEditor({ state, write, busy, today, accountId }: {
   const saved: TrainingProgram = program ?? { ...retained.record!.value.saved, id: retained.record!.value.programId };
   const currentProgramId = program?.id ?? null;
 
-  const storedDraft = retained.record?.value.draft ?? programBody(saved);
+  // The block is edited as only what it owns; the every-week row is the
+  // schedule's, and is laid back over it by the server on every save.
+  const savedBody = program ? ownForm(saved, plan.schedule) : programBody(saved);
+  const storedDraft = retained.record?.value.draft ?? savedBody;
   const inputs = retained.record?.value.inputs ?? {};
   const inputErrors = blockInputErrors(inputs, workouts);
-  const problem = retained.record ? blockDraftProblem(retained.record.value, currentProgramId, workouts) : null;
+  const problem = retained.record
+    ? blockDraftProblem(retained.record.value, currentProgramId, workouts)
+      ?? (Array.isArray(savedBody.workout_ids) && !Array.isArray(storedDraft.workout_ids)
+        ? 'This block now keeps its own workouts apart from your every-week row. Your draft was made before that and cannot be saved over it. Discard it to work with the block as it is.'
+        : null)
+    : null;
   const draft = problem ? storedDraft : resolveBlockInputs(storedDraft, inputs, workouts);
-  const initialDraft = (): BlockDraft => ({ programId: saved.id, saved: programBody(saved), draft, identities: blockSlotIdentities(workouts) });
+  const initialDraft = (): BlockDraft => ({ programId: saved.id, saved: savedBody, draft, identities: blockSlotIdentities(workouts) });
   const setDraft = (next: ProgramBody) => {
     const keptInputs = reconcileBlockInputs(inputs, draft, next, workouts);
-    if (!Object.keys(keptInputs).length && JSON.stringify(next) === JSON.stringify(programBody(saved))) { retained.clear(); return; }
+    if (!Object.keys(keptInputs).length && JSON.stringify(programBody(next)) === JSON.stringify(savedBody)) { retained.clear(); return; }
     retained.save({ ...(retained.record?.value ?? initialDraft()), draft: next, inputs: keptInputs }, retained.record?.version ?? version);
   };
   const editInput = (workout: Workout, slot: Slot, index: number, field: TargetField, text: string) => {
@@ -73,12 +83,12 @@ export function useBlockEditor({ state, write, busy, today, accountId }: {
   };
   const resetInputs = (workout: Workout, slot: Slot, index: number, fields: TargetField[]) => {
     const next = resettingBlockInputs({ ...(retained.record?.value ?? initialDraft()), draft }, workout, slot, index, fields);
-    if (!Object.keys(next.inputs ?? {}).length && JSON.stringify(next.draft) === JSON.stringify(programBody(saved))) retained.clear();
+    if (!Object.keys(next.inputs ?? {}).length && JSON.stringify(programBody(next.draft)) === JSON.stringify(savedBody)) retained.clear();
     else retained.save(next, retained.record?.version ?? version);
   };
   const needsReview = !!retained.record && retained.record.version !== version;
-  const comparisons = needsReview ? blockComparison(programBody(saved), draft, workouts) : [];
-  const dirty = Object.keys(inputs).length > 0 || JSON.stringify(programBody(draft)) !== JSON.stringify(programBody(saved));
+  const comparisons = needsReview ? blockComparison(savedBody, draft, workouts) : [];
+  const dirty = Object.keys(inputs).length > 0 || JSON.stringify(programBody(draft)) !== JSON.stringify(savedBody);
   const thisWeek = currentWeek({ ...draft, id: saved.id }, today);
   const canSave = dirty && !busy && !needsReview && !problem && inputErrors.length === 0;
 
@@ -87,23 +97,26 @@ export function useBlockEditor({ state, write, busy, today, accountId }: {
     if (!captured || captured.version !== version || problem || busy || inputErrors.length) return;
     const ok = await write(at => {
       if (at.planId !== planId || at.accountId !== accountId || at.version !== captured.version) throw new Error('draft_version_changed');
-      return planWrites.setProgram(programBody(resolveBlockInputs(captured.value.draft, captured.value.inputs ?? {}, workouts)), at);
+      const body = programBody(resolveBlockInputs(captured.value.draft, captured.value.inputs ?? {}, workouts));
+      // A workout the block owns leaves the every-week row in the same change.
+      return planWrites.setProgram(body, at, trimmedSchedule(plan.schedule, body.workout_ids));
     });
     if (ok) retained.clear(captured);
   };
   const discard = () => {
     if (window.confirm('Discard your unfinished block changes?')) retained.clear();
   };
-  const end = () => {
-    if (!window.confirm('End this block? Your usual week takes over again. Past workouts stay in your history.')) return;
-    void write((at) => planWrites.clearProgram(at)).then(ok => { if (ok) retained.clear(); });
-  };
-  const useLatest = () => retained.save({ ...retained.record!.value, draft, saved: programBody(saved), identities: blockSlotIdentities(workouts) }, version);
+  /** Ends the block, with one of its weeks carried on every week or not. */
+  const end = (keepWeek: number | null) =>
+    write((at) => keepWeek == null ? planWrites.clearProgram(at) : planWrites.endProgramKeeping(keepWeek, at))
+      .then(ok => { if (ok) retained.clear(); return ok; });
+  const useLatest = () => retained.save({ ...retained.record!.value, draft, saved: savedBody, identities: blockSlotIdentities(workouts) }, version);
 
   return {
     kind: 'block' as const,
     programId: saved.id,
-    saved, draft, setDraft, inputs, inputErrors, problem, needsReview, comparisons, dirty, canSave, thisWeek,
+    saved, savedBody, draft, setDraft, inputs, inputErrors, problem, needsReview, comparisons, dirty, canSave, thisWeek,
+    layered: Array.isArray(draft.workout_ids),
     editInput, resetInputs, save, discard, end, useLatest,
   };
 }
@@ -127,7 +140,7 @@ export function BlockReview({ block, busy }: { block: ActiveBlock; busy: boolean
   </>;
 }
 
-/** The block's name, first Monday and whether it starts over. */
+/** The block's name and first Monday. */
 export function BlockSettings({ block, today }: { block: ActiveBlock; today: string }) {
   const { draft, setDraft } = block;
   const starts = useMemo(() => {
@@ -147,23 +160,13 @@ export function BlockSettings({ block, today }: { block: ActiveBlock; today: str
           {starts.map((monday) => <option key={monday} value={monday}>{shortDate(monday)}</option>)}
         </select>
       </div>
-      <label className="check">
-        <input type="checkbox" checked={draft.repeat} onChange={(e) => setDraft({ ...draft, repeat: e.target.checked })} />
-        Start over when it ends
-      </label>
     </div>
   );
 }
 
-/** One line about the block: where today is in it and when it ends. */
-export function blockSummary(draft: ProgramBody, thisWeek: number | null): string {
-  const lastDay = addDays(draft.start, draft.weeks.length * 7 - 1);
-  const count = `${draft.weeks.length} ${draft.weeks.length === 1 ? 'week' : 'weeks'}`;
-  const where = thisWeek != null ? `Week ${thisWeek + 1} of ${draft.weeks.length} · ` : `${count} · `;
-  return `${where}${shortDate(draft.start)} to ${shortDate(lastDay)}${draft.repeat ? ', then starts over' : ', then your usual week'}`;
-}
-
-/** Start a block of weeks from the usual week. */
+/** Start a block: name it, give it a length, and tick what it trains. The
+ * ticked workouts become the block's own and leave the every-week row;
+ * everything else carries on beside the block. */
 export function NewBlock({ state, workouts, write, busy, today, accountId, onCancel }: {
   accountId: string;
   onCancel?: () => void;
@@ -177,12 +180,24 @@ export function NewBlock({ state, workouts, write, busy, today, accountId, onCan
   const planId = state.plan?.id ?? 'none';
   const version = state.plan?.version ?? 0;
   const retained = useEditorDraft<NewBlockDraft>({ accountId, planId, documentId: NEW_BLOCK_DOCUMENT }, isNewBlockDraft);
+  const live = useMemo(() => [...liveWorkouts(workouts).values()], [workouts]);
   const fresh = newBlockDraft(state.plan?.schedule, workouts, choices[0]!);
   const draft = retained.record?.value ?? fresh;
   const starts = choices.includes(draft.start) ? choices : [draft.start, ...choices];
   const exists = !!planBlocks(state).program;
   const needsReview = !!retained.record && retained.record.version !== version;
-  const body = newBlockRequest(draft);
+  const body = newBlockRequest(draft, live);
+  const picked = draft.picked ?? [];
+  const added = draft.added ?? [];
+  const week = draft.source.weeks[0]!;
+  // What the usual week holds, each once, with the weekdays it is on.
+  const inWeek = live.flatMap(workout => {
+    const days = WEEKDAYS.filter(day => week.week[day] === workout.id || (week.extras?.[day] ?? []).includes(workout.id));
+    return days.length ? [{ workout, days }] : [];
+  });
+  const addable = live.filter(workout => !inWeek.some(entry => entry.workout.id === workout.id));
+  const [addId, setAddId] = useState('');
+  const [addDay, setAddDay] = useState<Weekday>('mon');
   const change = (patch: Partial<NewBlockDraft>) => retained.save({ ...draft, ...patch }, retained.record?.version ?? version);
   const cancel = () => {
     if (retained.record && !window.confirm('Discard your unfinished new block?')) return;
@@ -191,19 +206,21 @@ export function NewBlock({ state, workouts, write, busy, today, accountId, onCan
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (!body || busy || needsReview || exists || !state.plan || retained.unreadable) return;
+    const schedule = state.plan.schedule;
     const captured = retained.record ?? retained.save(draft, version);
     await write(async at => {
       if (at.planId !== planId || at.accountId !== accountId || at.version !== captured.version) throw new Error('draft_version_changed');
-      await planWrites.setProgram(body, at);
+      await planWrites.setProgram(body, at, trimmedSchedule(schedule, body.workout_ids));
       // Acknowledgement retires only this revision, even if the refresh fails.
       if (retained.clear(captured)) onCancel?.();
     });
   };
   const dayDescription = (value: NewBlockDraft, day: typeof WEEKDAYS[number]) => {
-    const week = value.source.weeks[0]!;
-    const ids = [week.week[day], ...(week.extras?.[day] ?? [])].filter((id): id is string => !!id);
+    const source = value.source.weeks[0]!;
+    const ids = [source.week[day], ...(source.extras?.[day] ?? [])].filter((id): id is string => !!id);
     return ids.map(id => value.workoutNames[id] ?? 'Unavailable workout').join(' + ') || 'Rest';
   };
+  const dayNames = (days: readonly Weekday[]) => days.length === 7 ? 'Every day' : days.map(day => WEEKDAY_LABELS[day].slice(0, 3)).join(', ');
   if (retained.unreadable) return <section className="panel" role="alert">
     <p>This browser’s new-block draft could not be read. No change has been sent.</p>
     <button type="button" onClick={() => retained.clear()}>Discard unreadable new-block draft</button>
@@ -211,42 +228,79 @@ export function NewBlock({ state, workouts, write, busy, today, accountId, onCan
   return (
     <section className="block-intro panel" aria-labelledby="block-new-title">
       <h2 id="block-new-title">Start a training block</h2>
-      <p>A block is a set number of weeks that can differ from each other: add load for three weeks, then take an easier one. It starts as copies of your usual week, and nothing changes until you start it.</p>
+      <p>A block is your main training for a set number of weeks, with targets that can change from week to week. What you do every week carries on beside it. Nothing changes until you start it.</p>
       {retained.record && <p className="muted">Your unfinished block is kept in this browser when you leave this page.</p>}
       {exists && <p role="alert" className="problem">A block has been saved since you started. Your new-block draft is kept below, but cannot replace that block. Discard this draft to work with the saved block.</p>}
       {needsReview && !exists && <section className="panel" aria-label="Review new-block draft">
-        <h3>Review your usual week</h3>
-        <p>Your plan changed. Your choices are kept. Review the week the new block will copy before continuing.</p>
-        <div className="block-grid-wrap"><table><thead><tr><th>Day</th><th>Previously reviewed</th><th>Current usual week</th></tr></thead>
+        <h3>Review your week</h3>
+        <p>Your plan changed. Your choices are kept. Review the week the new block starts from before continuing.</p>
+        <div className="block-grid-wrap"><table><thead><tr><th>Day</th><th>Previously reviewed</th><th>Current week</th></tr></thead>
           <tbody>{WEEKDAYS.map(day => <tr key={day}><th scope="row">{WEEKDAY_LABELS[day]}</th><td>{dayDescription(draft, day)}</td><td>{dayDescription(fresh, day)}</td></tr>)}</tbody></table></div>
-        <button type="button" className="ghost" disabled={busy} onClick={() => retained.save({ ...draft, source: fresh.source, workoutNames: fresh.workoutNames }, version)}>Use current week with my choices</button>
+        <button type="button" className="ghost" disabled={busy} onClick={() => retained.save({ ...draft, source: fresh.source, workoutNames: fresh.workoutNames,
+          picked: picked.filter(id => WEEKDAYS.some(day => fresh.source.weeks[0]!.week[day] === id || (fresh.source.weeks[0]!.extras?.[day] ?? []).includes(id))) }, version)}>Use current week with my choices</button>
       </section>}
       <form className="block-new" onSubmit={submit}>
-        <div className="field"><label htmlFor="block-new-name">Name (optional)</label>
-          <input id="block-new-name" value={draft.name} maxLength={60} onChange={e => change({ name: e.target.value })} placeholder="Spring build" /></div>
         <div className="field-row">
+          <div className="field"><label htmlFor="block-new-name">Name (optional)</label>
+            <input id="block-new-name" value={draft.name} maxLength={60} onChange={e => change({ name: e.target.value })} placeholder="Spring build" /></div>
+          <div className="field"><label htmlFor="block-new-weeks">Weeks</label>
+            <input id="block-new-weeks" className="short" type="number" min={1} max={MAX_PROGRAM_WEEKS} value={draft.weeks} onChange={e => change({ weeks: e.target.value })} /></div>
           <div className="field"><label htmlFor="block-new-start">Starts</label>
             <select id="block-new-start" value={draft.start} onChange={e => change({ start: e.target.value })}>
               {starts.map(monday => <option key={monday} value={monday}>{monday === choices[0] ? `This week (${shortDate(monday)})` : monday === choices[1] ? `Next week (${shortDate(monday)})` : shortDate(monday)}</option>)}
             </select></div>
-          <div className="field"><label htmlFor="block-new-weeks">Weeks</label>
-            <input id="block-new-weeks" className="short" type="number" min={1} max={MAX_PROGRAM_WEEKS} value={draft.weeks} onChange={e => change({ weeks: e.target.value })} /></div>
         </div>
-        <label className="check"><input type="checkbox" checked={draft.repeat} onChange={e => change({ repeat: e.target.checked })} />Start over when it ends</label>
-        {!body && <p role="alert" className="problem">Choose a valid start and between 1 and {MAX_PROGRAM_WEEKS} whole weeks.</p>}
+        <fieldset className="block-picks">
+          <legend>What does this block train?</legend>
+          <p className="muted fine">Ticked workouts move out of your every-week row and into the block, on the same days. The rest stay every week and carry on beside it.</p>
+          {inWeek.map(({ workout, days }) => {
+            const ticked = picked.includes(workout.id);
+            return <label key={workout.id} className={ticked ? 'block-pick ticked' : 'block-pick'}>
+              <input type="checkbox" checked={ticked}
+                onChange={e => change({ picked: e.target.checked ? [...picked, workout.id] : picked.filter(id => id !== workout.id) })} />
+              <span><strong>{workout.name}</strong>
+                <small className="muted">{dayNames(days)}{ticked ? '' : ' · stays every week'}</small></span>
+            </label>;
+          })}
+          {added.map(entry => <div key={`${entry.id}:${entry.day}`} className="block-pick ticked added">
+            <span><strong>{draft.workoutNames[entry.id] ?? live.find(w => w.id === entry.id)?.name ?? 'Workout'}</strong>
+              <small className="muted">{WEEKDAY_LABELS[entry.day].slice(0, 3)} · added for this block</small></span>
+            <button type="button" className="ghost small" aria-label={`Remove ${draft.workoutNames[entry.id] ?? 'workout'} from the new block`}
+              onClick={() => change({ added: added.filter(other => other !== entry) })}>Remove</button>
+          </div>)}
+          {inWeek.length === 0 && added.length === 0 && <p className="muted">Your every-week row is empty. Add the workouts this block trains below.</p>}
+          {addable.length > 0 && <div className="block-pick-add">
+            <label className="visually-hidden" htmlFor="block-new-add">Add another workout</label>
+            <select id="block-new-add" value={addId} onChange={e => setAddId(e.target.value)}>
+              <option value="">+ Add another workout</option>
+              {addable.map(workout => <option key={workout.id} value={workout.id}>{workout.name}</option>)}
+            </select>
+            {addId && <>
+              <label className="visually-hidden" htmlFor="block-new-add-day">Day</label>
+              <select id="block-new-add-day" value={addDay} onChange={e => setAddDay(e.target.value as Weekday)}>
+                {WEEKDAYS.map(day => <option key={day} value={day}>{WEEKDAY_LABELS[day]}</option>)}
+              </select>
+              <button type="button" className="ghost small" disabled={added.some(entry => entry.id === addId && entry.day === addDay)}
+                onClick={() => { change({ added: [...added, { id: addId, day: addDay }] }); setAddId(''); }}>Add</button>
+            </>}
+          </div>}
+        </fieldset>
+        {!validBlockWeeks(draft.weeks) && <p role="alert" className="problem">Choose a valid start and between 1 and {MAX_PROGRAM_WEEKS} whole weeks.</p>}
+        {validBlockWeeks(draft.weeks) && !body && <p role="alert" className="problem">Tick or add at least one workout for this block to train.</p>}
         <div className="form-actions">
-          <button type="submit" disabled={busy || !body || needsReview || exists}>Start from my week</button>
+          <button type="submit" disabled={busy || !body || needsReview || exists}>Start block</button>
           <button type="button" className="ghost" disabled={busy} onClick={cancel}>{retained.record ? 'Discard new-block draft' : 'Cancel'}</button>
         </div>
-        <p className="muted fine">Then change any day on the calendar, give weeks their own targets, or ramp a target up week by week. Training for an event? <a href="#analysis/event">Set its date</a> to follow your progress toward it.</p>
+        <p className="muted fine">Then give each week its own targets, ramp a target up week by week, or make a week lighter. Training for an event? <a href="#analysis/event">Set its date</a> to follow your progress toward it.</p>
       </form>
-      <p className="muted fine">In the iPhone app, Plan a block can also lay out your runs to an event or keep building your long run. Those blocks show here too.</p>
     </section>
   );
 }
 
 
-export function TargetsByWeek({ draft, workouts, onChange, inputs, onInput, onReset }: {
+export function TargetsByWeek({ draft, workouts, onChange, inputs, onInput, onReset, initialWorkoutId }: {
+  /** The workout shown first; remount (a new key) to show another. */
+  initialWorkoutId?: string;
   onReset: (workout: Workout, slot: Slot, index: number, fields: TargetField[]) => void;
   inputs: Record<string, string>;
   onInput: (workout: Workout, slot: Slot, index: number, field: TargetField, text: string) => void;
@@ -254,7 +308,7 @@ export function TargetsByWeek({ draft, workouts, onChange, inputs, onInput, onRe
   workouts: Workout[];
   onChange: (next: ProgramBody) => void;
 }) {
-  const [workoutId, setWorkoutId] = useState<string>(workouts[0]?.id ?? '');
+  const [workoutId, setWorkoutId] = useState<string>(initialWorkoutId ?? workouts[0]?.id ?? '');
   const workout = workouts.find((w) => w.id === workoutId) ?? workouts[0];
   const slots = (workout?.exercises ?? []) as Slot[];
   const [slotId, setSlotId] = useState<string>('');
@@ -283,7 +337,7 @@ export function TargetsByWeek({ draft, workouts, onChange, inputs, onInput, onRe
               <select id="targets-slot" value={slot?.id ?? ''} onChange={(e) => setSlotId(e.target.value)}>
                 {slots.map((s) => (
                   <option key={s.id} value={s.id} disabled={editableFields(s).length === 0}>
-                    {s.exercise_name}{editableFields(s).length === 0 ? ' (steps change in the iPhone app)' : ''}
+                    {s.exercise_name}{editableFields(s).length === 0 ? ' (choose its week in the table)' : ''}
                   </option>
                 ))}
               </select>
@@ -335,7 +389,7 @@ export function TargetsByWeek({ draft, workouts, onChange, inputs, onInput, onRe
               </div>
             </>
           ) : (
-            <p className="muted">This workout has nothing to change by week here. A planned run’s distance and pace change in the iPhone app.</p>
+            <p className="muted">This workout has nothing to change by week here. To change a planned run, choose its week in the table above.</p>
           )}
         </>
       )}

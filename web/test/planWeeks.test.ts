@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ProgramWeek, ScheduleWeek } from '../../src/types';
 import type { ProgramBody } from '../src/blocks';
-import { addingExtraIn, blockEndMonday, planRows, removingExtraIn, scopeDiffers, scopedWeeks, settingDayIn } from '../src/planWeeks';
+import { blockEndMonday, planRows } from '../src/planWeeks';
 
 const REST: ScheduleWeek = { mon: null, tue: null, wed: null, thu: null, fri: null, sat: null, sun: null };
 
@@ -51,36 +51,5 @@ describe('Plan page week rows', () => {
     expect(blockEndMonday(repeating, today)).toBe('2026-11-23');
     expect(blockEndMonday(repeating, '2026-10-01')).toBe('2026-11-09');
     expect(planRows(repeating, today).map((row) => row.week)).toEqual([0, 1, 0, 1, 0, 1]);
-  });
-});
-
-describe('changing a block weekday in scope', () => {
-  const body = block('2026-11-02', [week('a'), week('b', ['core']), week('a'), week('a')]);
-
-  it('names the weeks each scope touches', () => {
-    expect(scopedWeeks(body, 1, 'week')).toEqual([1]);
-    expect(scopedWeeks(body, 1, 'block')).toEqual([0, 1, 2, 3]);
-    expect(scopedWeeks(body, 2, 'later')).toEqual([2, 3]);
-    expect(scopedWeeks(body, 9, 'week')).toEqual([]);
-  });
-
-  it('tells when the weeks in scope disagree on that day', () => {
-    expect(scopeDiffers(body, [0, 2, 3], 'tue')).toBe(false);
-    expect(scopeDiffers(body, [0, 1], 'tue')).toBe(true);
-    expect(scopeDiffers(body, [0, 1], 'mon')).toBe(false);
-  });
-
-  it('sets the main workout in every week in scope and only there', () => {
-    const next = settingDayIn(body, [2, 3], 'tue', 'run');
-    expect(next.weeks.map((w) => w.week.tue)).toEqual(['a', 'b', 'run', 'run']);
-    expect(body.weeks[2]!.week.tue).toBe('a');
-  });
-
-  it('adds an extra where it fits and removes it from every week in scope', () => {
-    const added = addingExtraIn(body, [0, 1, 2, 3], 'tue', 'core')!;
-    expect(added.weeks.map((w) => w.extras?.tue ?? [])).toEqual([['core'], ['core'], ['core'], ['core']]);
-    expect(addingExtraIn(body, [1], 'tue', 'core')).toBeNull();
-    const removed = removingExtraIn(added, [0, 1], 'tue', 'core');
-    expect(removed.weeks.map((w) => w.extras?.tue ?? [])).toEqual([[], [], ['core'], ['core']]);
   });
 });

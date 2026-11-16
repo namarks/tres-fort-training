@@ -161,6 +161,11 @@ local check cannot protect a recorded session on another device by itself.
   by the app) were built and then set aside on the owner's word
   (2026-11-08). The patch is kept in the project files at
   `plan-progression/lift-suggestions-p0.patch` if it is wanted later.
+- A block can list its own workouts (`program.workout_ids`, web-app P2,
+  2026-11-16): the repeating week then carries on beside it. Stored weeks
+  still hold the whole day, so the app's `PlanTree.schedule(on:)` and the
+  parity fixture are unchanged; the app does not yet write the list, and a
+  block edited there keeps a list it was given.
 - Older clients that predate block support show the repeating week. Current
   source supports blocks, but source inspection does not identify the build
   installed on a member's device. P5 verifies the chosen release candidate.

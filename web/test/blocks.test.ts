@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { WeeklySchedule } from '../../src/types';
 import {
-  addingExtra,
   addingWeek,
   applyingRamp,
   copyingDown,
@@ -11,10 +10,8 @@ import {
   programBody,
   rampValues,
   relabeling,
-  removingExtra,
   removingLastWeek,
   roundFor,
-  settingDay,
   settingTarget,
   shortDate,
   startChoices,
@@ -90,29 +87,9 @@ describe('a new block', () => {
 });
 
 describe('changing days and weeks', () => {
-  it('changes one week only, and an extra that becomes the main workout leaves the extras', () => {
-    const program = settingDay(block(), 1, 'wed', 'sw');
-    expect(program.weeks[1]!.week.wed).toBe('sw');
-    expect(program.weeks[1]!.extras?.wed).toBeUndefined();
-    expect(program.weeks[0]!.week.wed).toBe('run');
-    expect(settingDay(block(), 0, 'mon', null).weeks[0]!.week.mon).toBeNull();
-  });
-
-  it('adds up to four extras, never the main workout or a repeat, and removes them', () => {
-    let program = block();
-    expect(addingExtra(program, 0, 'mon', 'lift')).toBeNull();
-    expect(addingExtra(program, 0, 'mon', 'yoga')).toBeNull();
-    program = addingExtra(program, 0, 'fri', 'yoga')!;
-    expect(program.weeks[0]!.extras?.fri).toEqual(['yoga']);
-    program = removingExtra(program, 0, 'fri', 'yoga');
-    expect(program.weeks[0]!.extras?.fri).toBeUndefined();
-    const full = { ...block(), weeks: [{ week: block().weeks[0]!.week, extras: { mon: ['a', 'b', 'c', 'd'] } }] };
-    expect(addingExtra(full, 0, 'mon', 'sw')).toBeNull();
-  });
-
   it('copies a week down to the next or every later week, keeping their labels', () => {
     let program = relabeling(block(), 2, 'Easy');
-    program = settingDay(program, 0, 'sun', 'yoga');
+    program = { ...program, weeks: program.weeks.map((w, i) => i === 0 ? { ...w, week: { ...w.week, sun: 'yoga' } } : w) };
     const next = copyingDown(program, 0, 'next');
     expect(next.weeks[1]!.week.sun).toBe('yoga');
     expect(next.weeks[2]!.week.sun).toBeNull();

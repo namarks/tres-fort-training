@@ -49,7 +49,7 @@ export async function signedOutJourney({ page, origin, width }) {
     await signIn.waitFor();
     assert.equal(await signIn.getAttribute('href'), '/auth/apple/start?return=%2F%23block');
     await signIn.click({ trial: true });
-    assert.match(await page.locator('.signin-card').innerText(), /The block editor will open after sign-in\. Start a block if you do not have one yet\./);
+    assert.match(await page.locator('.signin-card').innerText(), /Your training block will open after sign-in\. You can start one there if you do not have one yet\./);
     assert.match(await page.locator('.signin-card').innerText(), /same Apple account/);
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), `${width}px block handoff sign-in stays within the viewport.`);
   }
@@ -448,14 +448,19 @@ export async function mixedWeekJourney({ page, origin, width, apiCall }) {
   assert.equal(await page.getByRole('heading', { name: 'Take your week to iPhone' }).count(), 0);
   assert.equal(await page.getByRole('region', { name: 'Build on your week', exact: true }).count(), 0);
   const beforeGuidance = (await apiCall('GET', '/api/state')).plan.version;
-  await click(page.getByRole('button', { name: 'Training block', exact: true }));
+  const sections = page.getByRole('navigation', { name: 'Plan sections', exact: true });
+  // Blocks have their own tab: the Schedule tab only links there.
+  await click(page.getByRole('link', { name: 'Training block', exact: true }));
+  await page.getByRole('heading', { name: 'No training block', exact: true }).waitFor();
+  assert.equal(await sections.getByRole('link', { name: 'Block', exact: true }).getAttribute('aria-current'), 'page');
+  await click(page.getByRole('button', { name: 'Start a block', exact: true }));
   await page.getByRole('heading', { name: 'Start a training block', exact: true }).waitFor();
   await screenshot(page.locator('.block-intro'), `web-training-block-${width}.png`);
-  await page.getByRole('button', { name: 'Start from my week', exact: true }).waitFor();
+  await page.getByRole('button', { name: 'Start block', exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1), false, 'The block form fits the viewport.');
   assert.equal((await apiCall('GET', '/api/state')).plan.version, beforeGuidance,
     'Opening the block form must not create one or alter the established week.');
   await page.goto(`${origin}/#calendar`);
-  const sections = page.getByRole('navigation', { name: 'Plan sections', exact: true });
   assert.equal(await sections.getByRole('link', { name: 'Schedule', exact: true }).getAttribute('aria-current'), 'page');
   await click(sections.getByRole('link', { name: 'Workouts', exact: true }));
   await page.getByRole('heading', { name: 'Workouts', exact: true }).waitFor();

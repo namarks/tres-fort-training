@@ -82,8 +82,10 @@ export function EveryWeekdayPanel(props: {
   scope: string;
   /** Told whenever the day holds changes that are not saved, so leaving it can ask first. */
   onDirty?: (dirty: boolean) => void;
+  /** A running block's own workouts: placed in the Block tab, not here. */
+  blockIds?: ReadonlySet<string>;
 }) {
-  const { day, write, busy, onClose, onDirty } = props;
+  const { day, write, busy, onClose, onDirty, blockIds } = props;
   const workouts = useMemo(() => choosableWorkouts(props.workouts), [props.workouts]);
   // The week as reviewed when this weekday was opened.
   const [review] = useState<RoutineReview>(() => ({ schedule: structuredClone(props.schedule), at: { ...props.reviewed } }));
@@ -97,7 +99,7 @@ export function EveryWeekdayPanel(props: {
   const dirty = JSON.stringify(routineDay(review.schedule, day)) !== JSON.stringify(draft);
   const full = routineDayFull(draft);
   useEffect(() => { onDirty?.(dirty); return () => onDirty?.(false); }, [dirty, onDirty]);
-  const available = workouts.filter((workout) => !entries.includes(workout.id)
+  const available = workouts.filter((workout) => !entries.includes(workout.id) && !blockIds?.has(workout.id)
     && workout.name.toLowerCase().includes(search.trim().toLowerCase()));
   const groups: Array<[string, Workout[]]> = [
     ['Runs', available.filter(isRunOnlyWorkout)],
@@ -171,6 +173,7 @@ export function EveryWeekdayPanel(props: {
             </div>
           ))}
           {available.length === 0 && <p className="muted">{search.trim() ? 'No workout matches that search.' : 'Every saved workout is already on this day.'}</p>}
+          {blockIds && blockIds.size > 0 && <p className="fine muted">Your block’s own workouts are placed in the <a href="#block">Block tab</a>.</p>}
           <div className="head-actions">
             <button type="button" className="ghost small" onClick={props.onNewWorkout}>New workout</button>
             <button type="button" className="ghost small" onClick={() => { setAdding(false); setSearch(''); }}>Close list</button>

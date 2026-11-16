@@ -234,7 +234,13 @@ optional block of weeks (a start Monday, 1 to 52 weekday patterns with
 extras, one-off or repeating) written by `setProgram` (`PUT/DELETE
 /api/plan/program`, MCP `set_program`); `weekPatternOn` picks the pattern a
 date uses, mirrored by `PlanTree.schedule(on:)` in Swift with
-`ios/TresFortTests/Fixtures/ProgramWeeks.json` as the contract. A week's
+`ios/TresFortTests/Fixtures/ProgramWeeks.json` as the contract. A block that
+lists its own workouts (`program.workout_ids`) sits beside the repeating
+week: its stored weeks still hold the whole day, and `layerProgram`
+(`src/programLayers.ts`, pure) rewrites them at `serializePlanMeta` on every
+meta write, so never write `plans.meta` around it. `PUT /api/plan/program`
+may carry the `schedule` to save in the same version, and `DELETE
+…?keep_week=` ends a block with one week carried on. A week's
 `targets` (slot id → sets, reps, load, duration or run steps) override the
 slot on dates it covers (`src/programTargets.ts`, `PlanTree.workout(_:on:)`,
 `ProgramTargets.json`): the runner, Today and the starting-targets snapshot
