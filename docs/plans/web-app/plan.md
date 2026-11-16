@@ -201,6 +201,19 @@ partner training are not web features.
     the mouse wheel, under fixed weekday names; reaching its top or bottom
     adds four weeks there without moving the weeks in view, and "This week"
     goes back to the starting weeks with last week at the top.
+  - Then (owner, 2026-11-16: the Plan page is busy and unclear, its bottom
+    sections are text heavy, the iPhone handoff does not belong on it, and
+    Workouts should be a tab of planning): Plan in the top bar holds two
+    tabs, Schedule (`#plan`) and Workouts (`#workouts`,
+    `web/src/PlanTabs.tsx`); the top bar no longer lists Workouts. "Plan
+    week by week" and "Build up to an event" become one Training block
+    button, whose form says what a block is before anything is saved. The
+    "Take your week to iPhone" and "Build on your week" sections and the
+    "Create another workout" button are removed, which retires the
+    2026-11-12 handoff and the 2026-11-13 block guidance above. No API
+    change. How the repeating week is laid out on the Schedule tab is the
+    owner's open choice among three mocked options (the week pinned as the
+    calendar's first row is recommended).
 - [ ] **P3 — Trends and progress**
   - Equal in importance to plan editing; it can run alongside P2 once P1 is
     in.
@@ -348,6 +361,12 @@ PR #4 are merged. The source also includes mixed-week creation, connection
 discovery, signed-out entry, primary date-only editing, Event analysis, Strength
 charts and exact workout correction. Earlier private PR numbers are historical
 source-delivery references, not pending public-repository work.
+
+Plan page simplification (owner, 2026-11-16): the tabs, the Training block
+button and the removed sections are built. Build the repeating week's layout
+on the Schedule tab once the owner picks among the mocked options; it should
+replace the "Your usual week" cards and workout chips rather than add a
+second editor.
 
 **Later (@agent):** Date-only replacement of scheduled extras still needs a
 shared replacement/lineage contract, as described in member activation P7.

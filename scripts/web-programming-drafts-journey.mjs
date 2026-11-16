@@ -50,7 +50,7 @@ export async function programmingDraftJourney({ page, origin, apiCall, width = 1
   state = await apiCall('GET', '/api/state');
   await apiCall('DELETE', `/api/plan/program?expected_version=${state.plan.version}`);
   await page.reload();
-  await page.getByRole('button', { name: 'Plan week by week', exact: true }).first().click();
+  await page.getByRole('button', { name: 'Training block', exact: true }).first().click();
   await name.fill('Acknowledged block'); await weeks.fill('2');
   let programWrites = 0;
   page.on('request', request => { if (request.method() === 'PUT' && new URL(request.url()).pathname === '/api/plan/program') programWrites++; });

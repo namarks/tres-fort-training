@@ -50,8 +50,6 @@ import {
 } from './blocks';
 import { BlockReview, BlockSettings, blockSummary, NewBlock, TargetsByWeek, useBlockEditor, type ActiveBlock } from './BlockEditor';
 import { addingExtraIn, blockEndMonday, MAX_PLAN_ROWS, planRows, removingExtraIn, scopeDiffers, scopedWeeks, settingDayIn, type DayScope, type PlanRow } from './planWeeks';
-import { PhoneHandoff } from './PhoneHandoff';
-import { PlanNextSteps } from './PlanNextSteps';
 import { DateWorkoutEdit } from './DateWorkoutEdit';
 import type { DateWorkoutSelection } from './dateEditState';
 import type { Write } from './WorkoutEditor';
@@ -270,7 +268,7 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
             <h1 id="plan-title">{active ? (active.draft.name?.trim() || 'Your block') : 'Your plan'}</h1>
             <p className="muted">
               {active ? blockSummary(active.draft, active.thisWeek)
-                : 'Your usual week repeats. Plan week by week when weeks should differ.'}
+                : 'Your usual week repeats every week. Choose any day to change it.'}
             </p>
           </div>
           <div className="block-actions">
@@ -282,10 +280,7 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
                 <button type="button" className="ghost danger" disabled={busy || !!active.problem} onClick={active.end}>End block</button>
               </>
             ) : (
-              <>
-                {hasWorkouts && !starting && <button type="button" className="ghost" onClick={() => setStarting(true)}>Plan week by week</button>}
-                <a className="ghost" href="#analysis/event">Build up to an event</a>
-              </>
+              hasWorkouts && !starting && <button type="button" className="ghost" onClick={() => setStarting(true)}>Training block</button>
             )}
           </div>
         </div>
@@ -380,9 +375,6 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
           reviewed={{ planId: plan.id, version: plan.version }} selectedWorkoutId={scheduleWorkoutId}
           onScheduled={onScheduled} onCancelSelection={onScheduled} openDayRequest={routineRequest}
           hint={active ? 'Your usual week fills every week outside your block.' : undefined} />
-        <button type="button" className="ghost" disabled={busy} onClick={() => onEditWorkout(null)}>Create another workout</button>
-        <PhoneHandoff state={state} today={today} />
-        <PlanNextSteps state={state} />
         <AwayDates trips={plan.trips ?? []} today={today} version={plan.version} write={write} busy={busy} />
         {active?.dirty && (
           <div className="block-savebar" role="status">
@@ -464,7 +456,7 @@ function PlanStart({ hasWorkouts, onUsualWeek, onBlock, onCreate }: {
         </article>
         <article className="panel">
           <p className="kicker">Want full control</p>
-          <h3>Plan week by week</h3>
+          <h3>A training block</h3>
           <p className="muted">Start from your usual week and change any week: more volume, an easier week, a different mix. Good for custom swim, run and lift blocks.</p>
           {hasWorkouts
             ? <button type="button" className="ghost" onClick={onBlock}>Start my block</button>

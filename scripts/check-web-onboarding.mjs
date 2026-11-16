@@ -212,7 +212,7 @@ try {
         console.log('PASS: a refused creation and failed refresh keep the reviewed targets until explicit refresh and review.');
       } else {
         await mixedWeekJourney({ page, origin: webOrigin, width, apiCall });
-        console.log(`PASS: ${width}px new web member creates and schedules a run plus separate timed core, recovers safely, refreshes and reaches iPhone handoff.`);
+        console.log(`PASS: ${width}px new web member creates and schedules a run plus separate timed core, recovers safely, refreshes and opens the block form and the Workouts tab without changing the plan.`);
       }
     } catch (error) {
       console.error(`Failed synthetic journey ${width}: ${failures.join(', ')}`);

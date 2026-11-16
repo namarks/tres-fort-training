@@ -17,6 +17,7 @@ import { describeWriteError } from './editing';
 import { WorkoutsPage, type Catalog, type Write } from './WorkoutEditor';
 import { ActivityPage } from './ActivityPage';
 import { PlanPage } from './PlanPage';
+import { PlanTabs } from './PlanTabs';
 import { DiagnosticsPage } from './DiagnosticsPage';
 import { MembersPage } from './MembersPage';
 import { AnalysisPage, type AnalysisPageKey } from './AnalysisPage';
@@ -122,7 +123,7 @@ type View =
 /** `#plan` (and the older `#calendar`) opens the Plan page,
  * `#plan/schedule/<id>` with a workout to add to the usual week, `#block`
  * with the form that starts a block, `#workouts` and `#workouts/<id>` the
- * workout editor, `#activity` and
+ * workout editor (a tab of Plan), `#activity` and
  * `#activity/<entry key>` the Activity page, `#analysis` the Analysis
  * overview, `#analysis/event` its Event page and
  * `#analysis/methodology[/<section>]` its Methodology page, `#diagnostics`
@@ -291,8 +292,7 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
       <header className="topbar">
         <div className="brand"><img src="/assets/app-icon.png" alt="" width={32} height={32} /><span className="wordmark">Très Fort</span></div>
         <nav className="views" aria-label="Views">
-          <a href="#plan" aria-current={view.kind === 'plan' ? 'page' : undefined}>Plan</a>
-          <a href="#workouts" aria-current={view.kind === 'workouts' ? 'page' : undefined}>Workouts</a>
+          <a href="#plan" aria-current={view.kind === 'plan' || view.kind === 'workouts' ? 'page' : undefined}>Plan</a>
           <a href="#activity" aria-current={view.kind === 'activity' ? 'page' : undefined}>Activity</a>
           <a href="#analysis" aria-current={view.kind === 'analysis' ? 'page' : undefined}>Analysis</a>
           {isOwner && <a href="#members" aria-current={view.kind === 'members' ? 'page' : undefined}>Members</a>}
@@ -326,7 +326,7 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
       ) : view.kind === 'members' && isOwner ? (
         <MembersPage onSignedOut={onSignedOut} />
       ) : view.kind === 'workouts' ? (
-        <WorkoutsPage
+        <><PlanTabs current="workouts" /><WorkoutsPage
           workouts={state.plan?.workouts ?? []}
           version={state.plan?.version ?? 0}
           selectedId={view.workoutId}
@@ -340,7 +340,7 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
           busy={busy}
           catalog={catalog ?? { kind: 'loading' }}
           miles={prefersMiles()}
-        />
+        /></>
       ) : view.kind === 'activity' ? (
         <ActivityPage key={view.entryKey ?? ''} state={state} catalog={catalog?.kind === 'ready' ? catalog.exercises : null} initialKey={view.entryKey}
           accountId={me.id} reload={reload} onSignedOut={onSignedOut} onFeedbackSaved={onFeedbackSaved} />
@@ -348,12 +348,12 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
         <AnalysisPage state={state} page={view.page} section={view.section} write={write} busy={busy}
           catalog={catalog ?? { kind: 'loading' }} retryCatalog={() => setCatalog(null)} />
       ) : (
-        <PlanPage key={`${me.id}:${state.plan?.id ?? 'none'}`} state={state} write={write} busy={busy} accountId={me.id}
+        <><PlanTabs current="schedule" /><PlanPage key={`${me.id}:${state.plan?.id ?? 'none'}`} state={state} write={write} busy={busy} accountId={me.id}
           reload={reload} onSignedOut={onSignedOut}
           scheduleWorkoutId={view.kind === 'plan' ? view.scheduleWorkoutId : null}
           startBlock={view.kind === 'plan' && view.startBlock}
           onScheduled={() => go({ kind: 'plan' })}
-          onEditWorkout={(workoutId) => go({ kind: 'workouts', workoutId })} />
+          onEditWorkout={(workoutId) => go({ kind: 'workouts', workoutId })} /></>
       )}
     </div>
   );

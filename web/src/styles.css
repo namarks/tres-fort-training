@@ -269,6 +269,16 @@ p { margin: 0 0 0.75rem; }
 .group-head strong { color: var(--accent); font-weight: 650; }
 .group-block > .slots { border-left: 2px solid color-mix(in srgb, var(--accent) 50%, transparent); padding-left: 0.75rem; }
 
+/* ---- Plan's own tabs -------------------------------------------------- */
+.plan-tabs { display: flex; gap: 1.5rem; padding: 0 max(24px, calc((100% - 1392px) / 2)); border-bottom: 1px solid var(--line); }
+.plan-tabs a {
+  padding: 0.7rem 0.15rem 0.55rem; color: var(--muted); font-weight: 600; text-decoration: none;
+  border-bottom: 3px solid transparent; margin-bottom: -1px;
+}
+.plan-tabs a:hover { color: var(--text); }
+/* Orange marks where you are (DESIGN-SYSTEM.md), as the app's tab bar does. */
+.plan-tabs a[aria-current='page'] { color: var(--text); border-bottom-color: var(--signal-fill); }
+
 /* ---- views and notices ------------------------------------------------ */
 .views { display: flex; gap: 0.25rem; }
 .views a {
@@ -603,6 +613,7 @@ input.short { width: 5.5rem; }
 }
 @media (max-width: 640px) {
   .topbar { padding: 0.75rem 16px; flex-wrap: wrap; }
+  .plan-tabs { padding: 0 16px; }
   /* Wrap additional views instead of widening the phone's whole page. */
   .views { order: 3; flex: 1 0 100%; flex-wrap: wrap; justify-content: space-between; }
   .views a { padding: 0.4rem 0.5rem; letter-spacing: 0.02em; }
