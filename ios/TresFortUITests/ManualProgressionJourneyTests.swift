@@ -23,7 +23,8 @@ final class ManualProgressionJourneyTests: XCTestCase {
         app.navigationBars["Week targets"].buttons["Cancel"].tap()
         openWeek(3, app: app); openTargets(app)
         XCTAssertTrue(app.scroll(toReveal: value)); XCTAssertEqual(value.value as? String, "5")
-        XCTAssertEqual(app.staticTexts["fixture.plan-writes"].value as? String, "1")
+        app.navigationBars["Week targets"].buttons["Cancel"].tapWhenReady()
+        assertPlanWrites("1", app: app)
     }
 
     func testUnfinishedTargetRequiresDiscardBeforeSwitchOrClose() {
@@ -41,7 +42,7 @@ final class ManualProgressionJourneyTests: XCTestCase {
         XCTAssertEqual(value.value as? String, "4")
         app.navigationBars["Week targets"].buttons["Cancel"].tap()
         app.buttons["Discard changes"].tapWhenReady()
-        XCTAssertEqual(app.staticTexts["fixture.plan-writes"].value as? String, "0")
+        assertPlanWrites("0", app: app)
     }
 
     func testLighterWeekConflictRequiresReviewThenSaves() {
@@ -65,12 +66,14 @@ final class ManualProgressionJourneyTests: XCTestCase {
         openTargets(app)
         let value = app.textFields["plan.targets.value"]
         XCTAssertTrue(app.scroll(toReveal: value)); XCTAssertEqual(value.value as? String, "2")
-        XCTAssertEqual(app.staticTexts["fixture.plan-writes"].value as? String, "2")
+        app.navigationBars["Week targets"].buttons["Cancel"].tapWhenReady()
+        assertPlanWrites("2", app: app)
     }
 
     private func launch(conflict: Bool = false) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment["TRESFORT_UI_FIXTURE"] = "app-store"
+        app.launchEnvironment["TRESFORT_UI_CAPTURE_LINKS"] = "1"
         app.launchEnvironment["TRESFORT_UI_BLOCK_HANDOFF"] = "1"
         if conflict { app.launchEnvironment["TRESFORT_UI_PROGRAM_CONFLICT"] = "1" }
         app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
@@ -88,6 +91,11 @@ final class ManualProgressionJourneyTests: XCTestCase {
         XCTAssertTrue(app.scroll(toReveal: menu)); menu.tap()
         app.buttons["plan.block.editTargets"].tapWhenReady()
         XCTAssertTrue(app.buttons["plan.targets.save"].waitForExistence(timeout: UITestWait.screen))
+    }
+    private func assertPlanWrites(_ expected: String, app: XCUIApplication) {
+        let counter = app.staticTexts["fixture.plan-writes"]
+        XCTAssertTrue(counter.waitForExistence(timeout: UITestWait.screen))
+        XCTAssertEqual(counter.value as? String, expected)
     }
     private func replace(_ field: XCUIElement, with value: String) {
         let old = field.value as? String ?? ""

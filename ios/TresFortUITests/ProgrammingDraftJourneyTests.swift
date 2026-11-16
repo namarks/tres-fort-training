@@ -6,6 +6,7 @@ final class ProgrammingDraftJourneyTests: XCTestCase {
     func testNewBlockCancelKeepsChoicesUntilExplicitDiscard() {
         let app = XCUIApplication()
         app.launchEnvironment["TRESFORT_UI_FIXTURE"] = "app-store"
+        app.launchEnvironment["TRESFORT_UI_CAPTURE_LINKS"] = "1"
         app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         app.launch()
         app.tabBars.buttons["Plan"].tapWhenReady()
@@ -21,7 +22,9 @@ final class ProgrammingDraftJourneyTests: XCTestCase {
         app.navigationBars["Plan a block"].buttons["Cancel"].tap()
         alert.buttons["Discard draft"].tapWhenReady()
         XCTAssertFalse(app.buttons["plan.blockSetup.save"].exists)
-        XCTAssertEqual(app.staticTexts["fixture.plan-writes"].value as? String, "0")
+        let writes = app.staticTexts["fixture.plan-writes"]
+        XCTAssertTrue(writes.waitForExistence(timeout: UITestWait.screen))
+        XCTAssertEqual(writes.value as? String, "0")
     }
 
     func testTagsCancelKeepsTextUntilExplicitDiscard() {
@@ -33,6 +36,8 @@ final class ProgrammingDraftJourneyTests: XCTestCase {
         app.buttons["Edit tags"].tapWhenReady()
         let textView = app.textViews["workoutTags.input"]
         let field = textView.waitForExistence(timeout: 3) ? textView : app.textFields["workoutTags.input"]
+        XCTAssertTrue(field.waitForExistence(timeout: UITestWait.screen))
+        let originalValue = field.value as? String
         field.tapWhenReady(); field.typeText("quick, travel")
         app.navigationBars["Workout tags"].buttons["Cancel"].tap()
         let alert = app.alerts["Discard tag changes?"]
@@ -43,7 +48,9 @@ final class ProgrammingDraftJourneyTests: XCTestCase {
         XCTAssertFalse(app.buttons["workoutTags.save"].exists)
         app.buttons["Actions for Gym"].tapWhenReady()
         app.buttons["Edit tags"].tapWhenReady()
-        let reopened = app.textViews["workoutTags.input"].exists ? app.textViews["workoutTags.input"] : app.textFields["workoutTags.input"]
-        XCTAssertNotEqual(reopened.value as? String, "quick, travel")
+        let reopenedTextView = app.textViews["workoutTags.input"]
+        let reopened = reopenedTextView.waitForExistence(timeout: 3) ? reopenedTextView : app.textFields["workoutTags.input"]
+        XCTAssertTrue(reopened.waitForExistence(timeout: UITestWait.screen))
+        XCTAssertEqual(reopened.value as? String, originalValue)
     }
 }
