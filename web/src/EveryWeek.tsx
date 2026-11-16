@@ -5,8 +5,10 @@ import { formatScheduleTime, isRunOnlyWorkout, WEEKDAY_LABELS, type Workout } fr
 import {
   choosableWorkouts,
   routineAddProblem,
+  routineAdded,
   routineAddingWorkout,
   routineDay,
+  routineDayFull,
   routineDayProblem,
   routineExtra,
   routinePrimary,
@@ -91,7 +93,7 @@ export function EveryWeekdayPanel(props: {
   const entries = [...(draft.primary ? [draft.primary] : []), ...draft.extras];
   const problem = routineDayProblem(draft, workouts);
   const dirty = JSON.stringify(routineDay(review.schedule, day)) !== JSON.stringify(draft);
-  const full = !!draft.primary && draft.extras.length >= MAX_SCHEDULE_EXTRAS;
+  const full = routineDayFull(draft);
   const available = workouts.filter((workout) => !entries.includes(workout.id)
     && workout.name.toLowerCase().includes(search.trim().toLowerCase()));
   const groups: Array<[string, Workout[]]> = [
@@ -101,8 +103,7 @@ export function EveryWeekdayPanel(props: {
   ];
   const nameOf = (id: string) => workouts.find((workout) => workout.id === id)?.name ?? 'Unavailable workout';
   const add = (id: string) => {
-    // The first workout on a day is its main one; the rest go alongside.
-    setDraft(draft.primary || draft.extras.length ? { ...draft, extras: [...draft.extras, id] } : { ...draft, primary: id });
+    setDraft(routineAdded(draft, id));
     setAdding(false); setSearch('');
   };
   const remove = (id: string) => setDraft(id === draft.primary ? routinePrimary(draft, null) : routineExtra(draft, draft.extras.indexOf(id), null));
@@ -136,7 +137,7 @@ export function EveryWeekdayPanel(props: {
                 <button type="button" className="ghost small" disabled={busy} aria-label={`Remove ${nameOf(id)} from ${name}`} onClick={() => remove(id)}>Remove</button>
               </div>
               <RoutineTime id={`${ids}-time-${id}`} name={nameOf(id)} value={draft.times[id] ?? ''} onChange={(time) => setTime(id, time)} />
-              {!main && draft.primary && <button type="button" className="ghost small" disabled={busy}
+              {!main && <button type="button" className="ghost small" disabled={busy}
                 aria-label={`Make ${nameOf(id)} the main workout`} onClick={() => makeMain(id)}>Make main</button>}
             </li>
           );

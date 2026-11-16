@@ -5,8 +5,8 @@ import type { WeeklySchedule } from '../../src/types';
 import { AddWorkoutToWeek, EveryWeekRow, EveryWeekdayPanel } from '../src/EveryWeek';
 import type { Slot, Workout } from '../src/model';
 import {
-  choosableWorkouts, routineAddProblem, routineAddingWorkout, routineDay, routineDayProblem,
-  routineExtra, routinePrimary, routineWithDay,
+  choosableWorkouts, routineAddProblem, routineAdded, routineAddingWorkout, routineDay, routineDayFull,
+  routineDayProblem, routineExtra, routinePrimary, routineWithDay,
 } from '../src/scheduling';
 
 function workout(id: string, name = id): Workout {
@@ -114,6 +114,27 @@ describe('reviewed weekly routine editing', () => {
     const result = routineAddingWorkout(before, ['mon'], 'lift', '', workouts);
     expect(result.ok && result.schedule.week.mon).toBe('lift');
     expect(result.ok && result.schedule.extras?.mon).toEqual(draft.extras);
+  });
+
+  it('adds a replacement into an empty main position, even beside four separate workouts', () => {
+    // The main workout was removed and four separate ones remain: the day is not full.
+    const draft = routinePrimary({ primary: 'run', extras: ['core', 'stretch', 'ride', 'swim'], times: {} }, null);
+    expect(routineDayFull(draft)).toBe(false);
+    const added = routineAdded(draft, 'lift');
+    expect(added).toMatchObject({ primary: 'lift', extras: ['core', 'stretch', 'ride', 'swim'] });
+    expect(routineDayProblem(added, workouts)).toBeNull();
+    expect(routineDayFull(added)).toBe(true);
+    // With a main workout in place, the next one goes alongside.
+    expect(routineAdded({ primary: 'run', extras: ['core'], times: {} }, 'lift').extras).toEqual(['core', 'lift']);
+  });
+
+  it('offers Make main for a separate workout on a day with no main workout', () => {
+    const noMain: WeeklySchedule = { ...schedule(), week: { ...schedule().week, tue: null } };
+    const html = renderToStaticMarkup(createElement(EveryWeekdayPanel, {
+      day: 'tue', schedule: noMain, workouts, reviewed: { planId: 'plan', version: 1 }, write: vi.fn(), busy: false,
+      onClose: vi.fn(), onNewWorkout: vi.fn(), scope: 'Fills each Tuesday.',
+    }));
+    expect(html).toContain('Make Timed core the main workout');
   });
 
   it('accepts only optional strict local HH:MM times', () => {

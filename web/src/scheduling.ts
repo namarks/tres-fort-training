@@ -57,6 +57,16 @@ export function routineExtra(draft: RoutineDayDraft, index: number, workoutId: s
   return { ...changed, times: keptDayTimes(changed) };
 }
 
+/** A workout added to a day fills the main position when it is empty, and goes alongside otherwise. */
+export function routineAdded(draft: RoutineDayDraft, workoutId: string): RoutineDayDraft {
+  return draft.primary ? { ...draft, extras: [...draft.extras, workoutId] } : { ...draft, primary: workoutId };
+}
+
+/** Whether a day can take one more workout: an empty main position, or room alongside. */
+export function routineDayFull(draft: RoutineDayDraft): boolean {
+  return !!draft.primary && draft.extras.length >= MAX_SCHEDULE_EXTRAS;
+}
+
 export function routineDayProblem(draft: RoutineDayDraft, workouts: readonly Workout[]): string | null {
   if (draft.extras.length > MAX_SCHEDULE_EXTRAS) return `Choose up to ${MAX_SCHEDULE_EXTRAS} separate workouts.`;
   const ids = [...(draft.primary ? [draft.primary] : []), ...draft.extras];
