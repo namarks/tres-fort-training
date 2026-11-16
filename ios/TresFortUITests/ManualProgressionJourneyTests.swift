@@ -10,20 +10,21 @@ final class ManualProgressionJourneyTests: XCTestCase {
         let value = app.textFields["plan.targets.value"]
         XCTAssertTrue(app.scroll(toReveal: value))
         XCTAssertEqual(value.value as? String, "3")
-        replace(value, with: "5")
+        replace(value, with: "5", in: app)
         let later = app.switches["plan.targets.later"]
-        XCTAssertTrue(app.scroll(toReveal: later)); later.tap()
+        XCTAssertTrue(app.scroll(toReveal: later, searchingUp: true)); later.tap()
         app.buttons["plan.targets.save"].tapWhenReady()
+        assertEditorClosed(app)
         XCTAssertTrue(app.buttons["plan.block.menu"].waitForExistence(timeout: UITestWait.screen))
         openTargets(app)
         XCTAssertTrue(app.scroll(toReveal: value)); XCTAssertEqual(value.value as? String, "5")
-        app.navigationBars["Week targets"].buttons["Cancel"].tap()
+        closeTargets(app)
         openWeek(1, app: app); openTargets(app)
         XCTAssertTrue(app.scroll(toReveal: value)); XCTAssertEqual(value.value as? String, "3")
-        app.navigationBars["Week targets"].buttons["Cancel"].tap()
+        closeTargets(app)
         openWeek(3, app: app); openTargets(app)
         XCTAssertTrue(app.scroll(toReveal: value)); XCTAssertEqual(value.value as? String, "5")
-        app.navigationBars["Week targets"].buttons["Cancel"].tapWhenReady()
+        closeTargets(app)
         assertPlanWrites("1", app: app)
     }
 
@@ -31,17 +32,26 @@ final class ManualProgressionJourneyTests: XCTestCase {
         let app = launch()
         openTargets(app)
         let value = app.textFields["plan.targets.value"]
-        XCTAssertTrue(app.scroll(toReveal: value)); replace(value, with: "4")
+        XCTAssertTrue(app.scroll(toReveal: value)); replace(value, with: "4", in: app)
         let field = app.buttons["plan.targets.field"]
-        XCTAssertTrue(app.scroll(toReveal: field)); field.tap()
+        XCTAssertTrue(app.scroll(toReveal: field, searchingUp: true))
+        let originalField = field.label
+        field.tap()
         app.buttons["Reps"].tapWhenReady()
-        app.buttons["Keep editing"].tapWhenReady()
+        let switching = app.alerts["Discard the unfinished target before switching?"]
+        XCTAssertTrue(switching.waitForExistence(timeout: UITestWait.screen))
+        switching.buttons["Keep editing"].tapWhenReady()
+        XCTAssertEqual(field.label, originalField)
         XCTAssertTrue(app.scroll(toReveal: value)); XCTAssertEqual(value.value as? String, "4")
-        app.navigationBars["Week targets"].buttons["Cancel"].tap()
-        app.buttons["Keep editing"].tapWhenReady()
+        app.navigationBars["Week targets"].buttons["Cancel"].tapWhenReady()
+        let closing = app.alerts["Discard unfinished week changes?"]
+        XCTAssertTrue(closing.waitForExistence(timeout: UITestWait.screen))
+        closing.buttons["Keep editing"].tapWhenReady()
+        XCTAssertEqual(field.label, originalField)
         XCTAssertEqual(value.value as? String, "4")
-        app.navigationBars["Week targets"].buttons["Cancel"].tap()
-        app.buttons["Discard changes"].tapWhenReady()
+        app.navigationBars["Week targets"].buttons["Cancel"].tapWhenReady()
+        closing.buttons["Discard changes"].tapWhenReady()
+        assertEditorClosed(app)
         assertPlanWrites("0", app: app)
     }
 
@@ -52,8 +62,11 @@ final class ManualProgressionJourneyTests: XCTestCase {
         app.buttons["plan.block.lighten"].tapWhenReady()
         let save = app.buttons["plan.targets.save"]
         XCTAssertTrue(save.waitForExistence(timeout: UITestWait.screen))
-        let preview = app.otherElements["plan.targets.preview"]
-        _ = app.scroll(toReveal: preview)
+        let preview = app.staticTexts.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label BEGINSWITH %@",
+            "plan.targets.preview.", "Week 1 · Strength A, Barbell Squat, Sets / rounds:")).firstMatch
+        XCTAssertTrue(app.scroll(toReveal: preview))
+        XCTAssertEqual(preview.label, "Week 1 · Strength A, Barbell Squat, Sets / rounds: 3 → 2")
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = "review-lighter-week-targets"; screenshot.lifetime = .keepAlways; add(screenshot)
         save.tapWhenReady()
@@ -62,11 +75,12 @@ final class ManualProgressionJourneyTests: XCTestCase {
         XCTAssertFalse(save.isEnabled)
         XCTAssertTrue(app.scroll(toReveal: review)); review.tap()
         save.tapWhenReady()
+        assertEditorClosed(app)
         XCTAssertTrue(menu.waitForExistence(timeout: UITestWait.screen))
         openTargets(app)
         let value = app.textFields["plan.targets.value"]
         XCTAssertTrue(app.scroll(toReveal: value)); XCTAssertEqual(value.value as? String, "2")
-        app.navigationBars["Week targets"].buttons["Cancel"].tapWhenReady()
+        closeTargets(app)
         assertPlanWrites("2", app: app)
     }
 
@@ -84,7 +98,7 @@ final class ManualProgressionJourneyTests: XCTestCase {
     }
     private func openWeek(_ week: Int, app: XCUIApplication) {
         let choice = app.buttons["plan.block.week.\(week)"]
-        XCTAssertTrue(app.scroll(toReveal: choice)); choice.tap()
+        XCTAssertTrue(app.scroll(toReveal: choice, searchingUp: true)); choice.tap()
     }
     private func openTargets(_ app: XCUIApplication) {
         let menu = app.buttons["plan.block.menu"]
@@ -92,14 +106,28 @@ final class ManualProgressionJourneyTests: XCTestCase {
         app.buttons["plan.block.editTargets"].tapWhenReady()
         XCTAssertTrue(app.buttons["plan.targets.save"].waitForExistence(timeout: UITestWait.screen))
     }
+    private func closeTargets(_ app: XCUIApplication) {
+        app.navigationBars["Week targets"].buttons["Cancel"].tapWhenReady()
+        assertEditorClosed(app)
+    }
+    private func assertEditorClosed(_ app: XCUIApplication) {
+        let closed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            !app.navigationBars["Week targets"].exists && !app.navigationBars["Make week lighter"].exists
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [closed], timeout: UITestWait.screen), .completed)
+    }
     private func assertPlanWrites(_ expected: String, app: XCUIApplication) {
         let counter = app.staticTexts["fixture.plan-writes"]
         XCTAssertTrue(counter.waitForExistence(timeout: UITestWait.screen))
         XCTAssertEqual(counter.value as? String, expected)
     }
-    private func replace(_ field: XCUIElement, with value: String) {
+    private func replace(_ field: XCUIElement, with value: String, in app: XCUIApplication) {
         let old = field.value as? String ?? ""
         field.tap(); field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: old.count) + value)
         XCTAssertEqual(field.value as? String, value)
+        app.buttons["plan.targets.keyboardDone"].tapWhenReady()
+        let keyboardGone = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: app.keyboards.firstMatch)
+        XCTAssertEqual(XCTWaiter.wait(for: [keyboardGone], timeout: UITestWait.screen), .completed)
     }
 }

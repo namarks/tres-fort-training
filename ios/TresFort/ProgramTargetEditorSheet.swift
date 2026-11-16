@@ -28,6 +28,8 @@ struct ProgramTargetEditorSheet: View {
     @State private var targetEdited = false
     @State private var confirmSelection = false
     @State private var pendingSelection: (() -> Void)?
+    private enum InputField: Hashable { case value, setsPercent, loadPercent }
+    @FocusState private var focusedInput: InputField?
 
     private var program: PlanProgram? { source?.program }
     private var workouts: [Workout] {
@@ -83,64 +85,88 @@ struct ProgramTargetEditorSheet: View {
     }
     var body: some View {
         NavigationStack {
-            Form {
-                scopeSection
-                if unavailable {
-                    Text("This account, plan or block is no longer available. Your unfinished values have not been applied.")
-                        .foregroundStyle(Theme.danger)
-                } else if selectionChanged {
-                    Text("This movement or group changed elsewhere. Your typed values are kept, but cannot be applied to the changed movement. Cancel and reopen its latest targets.")
-                        .foregroundStyle(Theme.danger)
-                } else if stale {
-                    Section("Plan changed") {
-                        Text("Your values are kept. Review them against the latest saved week before saving.")
-                        Button("Review latest week with my values") { source = sync.plan }
-                            .disabled(saving)
-                            .accessibilityIdentifier("plan.targets.reviewLatest")
+            ScrollViewReader { proxy in
+                editorForm
+                    .task(id: stale) {
+                        guard stale, source != nil else { return }
+                        focusedInput = nil
+                        // Let the conditional review row enter the Form before
+                        // scrolling from a preview farther down the sheet.
+                        await Task.yield()
+                        guard !Task.isCancelled, stale else { return }
+                        proxy.scrollTo("plan.targets.reviewLatest", anchor: .center)
                     }
-                }
-                if !workouts.isEmpty {
-                    choices
-                    if request.lighter { lighterControls } else { targetControls }
-                    previewSection
-                } else {
-                    Text("Schedule a lifting workout in this block week first. Warm-ups and cardio are not changed here.")
-                }
-                if let error = sync.loadError { Text(error).foregroundStyle(Theme.danger) }
-            }
-            .disabled(saving)
-            .scrollContentBackground(.hidden).background(Theme.background)
-            .navigationTitle(request.lighter ? "Make week lighter" : "Week targets")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { if changed { discard = true } else { dismiss() } }.disabled(saving)
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") { save() }
-                        .disabled(unavailable || selectionChanged || stale || !valid || preview?.changes.isEmpty != false || saving || sync.isRoutineMutationInFlight)
-                        .accessibilityIdentifier("plan.targets.save")
-                }
-            }
-            .confirmationDialog("Discard unfinished week changes?", isPresented: $discard, titleVisibility: .visible) {
-                Button("Discard changes", role: .destructive) { dismiss() }
-                Button("Keep editing", role: .cancel) {}
-            }
-            .confirmationDialog("Discard the unfinished target before switching?", isPresented: $confirmSelection, titleVisibility: .visible) {
-                Button("Discard target and switch", role: .destructive) {
-                    let action = pendingSelection; pendingSelection = nil; action?()
-                }
-                Button("Keep editing", role: .cancel) { pendingSelection = nil }
-            }
-            .onAppear {
-                guard source == nil else { return }
-                source = sync.plan
-                workoutID = request.lighter ? (request.workoutID ?? "") : (request.workoutID ?? workouts.first?.id ?? "")
-                slotID = slots.first?.id ?? ""
-                seedValue()
             }
         }
         .interactiveDismissDisabled(changed || saving)
+    }
+    private var editorForm: some View {
+        Form {
+            scopeSection
+            if unavailable {
+                Text("This account, plan or block is no longer available. Your unfinished values have not been applied.")
+                    .foregroundStyle(Theme.danger)
+            } else if selectionChanged {
+                Text("This movement or group changed elsewhere. Your typed values are kept, but cannot be applied to the changed movement. Cancel and reopen its latest targets.")
+                    .foregroundStyle(Theme.danger)
+            } else if stale {
+                Section("Plan changed") {
+                    Text("Your values are kept. Review them against the latest saved week before saving.")
+                    Button("Review latest week with my values") { source = sync.plan }
+                        .disabled(saving)
+                        .accessibilityIdentifier("plan.targets.reviewLatest")
+                        .id("plan.targets.reviewLatest")
+                }
+            }
+            if !workouts.isEmpty {
+                choices
+                if request.lighter { lighterControls } else { targetControls }
+                previewSection
+            } else {
+                Text("Schedule a lifting workout in this block week first. Warm-ups and cardio are not changed here.")
+            }
+            if let error = sync.loadError { Text(error).foregroundStyle(Theme.danger) }
+        }
+        .disabled(saving)
+        .scrollDismissesKeyboard(.interactively)
+        .scrollContentBackground(.hidden).background(Theme.background)
+        .navigationTitle(request.lighter ? "Make week lighter" : "Week targets")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Done") { focusedInput = nil }
+                    .accessibilityIdentifier("plan.targets.keyboardDone")
+            }
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Cancel") {
+                    focusedInput = nil
+                    if changed { discard = true } else { dismiss() }
+                }.disabled(saving)
+            }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Save") { save() }
+                    .disabled(unavailable || selectionChanged || stale || !valid || preview?.changes.isEmpty != false || saving || sync.isRoutineMutationInFlight)
+                    .accessibilityIdentifier("plan.targets.save")
+            }
+        }
+        .alert("Discard unfinished week changes?", isPresented: $discard) {
+            Button("Discard changes", role: .destructive) { dismiss() }
+            Button("Keep editing", role: .cancel) {}
+        }
+        .alert("Discard the unfinished target before switching?", isPresented: $confirmSelection) {
+            Button("Discard target and switch", role: .destructive) {
+                let action = pendingSelection; pendingSelection = nil; action?()
+            }
+            Button("Keep editing", role: .cancel) { pendingSelection = nil }
+        }
+        .onAppear {
+            guard source == nil else { return }
+            source = sync.plan
+            workoutID = request.lighter ? (request.workoutID ?? "") : (request.workoutID ?? workouts.first?.id ?? "")
+            slotID = slots.first?.id ?? ""
+            seedValue()
+        }
     }
     private var scopeSection: some View {
         Section {
@@ -187,6 +213,7 @@ struct ProgramTargetEditorSheet: View {
                               text: Binding(get: { value }, set: { value = $0; changed = true; targetEdited = true }))
                         .keyboardType(field == .load && slot.allowsAssistance ? .numbersAndPunctuation : .decimalPad)
                         .accessibilityIdentifier("plan.targets.value")
+                        .focused($focusedInput, equals: .value)
                 }
                 if !valid { Text("Enter a valid target, or use the saved workout target.").foregroundStyle(Theme.danger) }
                 if field == .sets && slot.group_id != nil { Text("Rounds change for every movement in this group.") }
@@ -198,8 +225,10 @@ struct ProgramTargetEditorSheet: View {
         Section {
             TextField("Fewer sets or rounds (%)", text: Binding(get: { setsPercent }, set: { setsPercent = $0; changed = true }))
                 .keyboardType(.decimalPad).accessibilityIdentifier("plan.targets.lighterSets")
+                .focused($focusedInput, equals: .setsPercent)
             TextField("Lighter load (%)", text: Binding(get: { loadPercent }, set: { loadPercent = $0; changed = true }))
                 .keyboardType(.decimalPad).accessibilityIdentifier("plan.targets.lighterLoad")
+                .focused($focusedInput, equals: .loadPercent)
             if !valid { Text("Use percentages from 0 to 90.").foregroundStyle(Theme.danger) }
         } footer: {
             Text("Use 0 to keep a target. Sets round down, with at least one. Assistance increases; unknown and zero loads stay unchanged. Warm-ups and cardio stay unchanged; mixed cardio groups keep their rounds.")
@@ -213,12 +242,15 @@ struct ProgramTargetEditorSheet: View {
                         Text(row.workout).font(.caption).foregroundStyle(Theme.muted)
                         Text(row.exercise)
                         Text("\(row.field): \(row.before) → \(row.after)").font(.subheadline)
-                    }.accessibilityElement(children: .combine)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("plan.targets.preview.\(row.id)")
                 }
             } else { Text("No targets would change.").foregroundStyle(Theme.muted) }
-        }.accessibilityIdentifier("plan.targets.preview")
+        }
     }
     private func changeSelection(_ action: @escaping () -> Void) {
+        focusedInput = nil
         if targetEdited && !request.lighter { pendingSelection = action; confirmSelection = true }
         else { action() }
     }
@@ -234,6 +266,7 @@ struct ProgramTargetEditorSheet: View {
     }
     private func save() {
         guard !unavailable, !selectionChanged, !stale, let source, let preview, !preview.changes.isEmpty else { return }
+        focusedInput = nil
         saving = true
         Task {
             let accepted = await sync.saveProgram(preview.program, expectedVersion: source.version)

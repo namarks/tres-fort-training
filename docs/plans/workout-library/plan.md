@@ -927,10 +927,16 @@ applies to this work, with all required checks tied to the exact head.
 ## Notes / open questions
 
 - Exact-record handoff previously showed an intermittent “Couldn’t load this
-  workout record” failure during qualification. The final earlier run passed,
-  but the proposed concurrent-refresh explanation was not established. Keep
-  account/session/attempt/set checks fail-closed; reproduce and diagnose any
-  recurrence before claiming a fix.
+  workout record” failure during qualification. It recurred on the first
+  attempt in [public PR #9's native run](https://github.com/namarks/tres-fort-training/actions/runs/43808203847/job/133104242782)
+  at `92314e5`: a stale-attempt link showed load/retry feedback instead of the
+  unavailable-record state, then passed on retry. The affected handoff and
+  refresh paths are unchanged by this core UX pass. Source inspection points
+  to overlapping launch-recovery and handoff refreshes, but the observed
+  generation ordering is not instrumented. Follow up with a deterministic
+  overlapping-refresh regression before changing the coalescer or claiming a
+  fix. Keep account/session/attempt/set checks fail-closed and retain the
+  unavailable-record assertion; a retry pass is not first-attempt evidence.
 
 - The September 18 follow-up selects P0.5(a)/(b) as the first SensAI-inspired
   implementation candidates, followed by P0.5(c). The owner subsequently
