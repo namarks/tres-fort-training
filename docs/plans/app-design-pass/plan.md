@@ -605,7 +605,9 @@ The owner chose to keep importing all Health history. P26 addresses that.
     the sheet hard to read: the suggested core routine looked fixed and
     "My own" was easy to miss, the second row of type tiles was wider than
     the first, the day and time sat below the fold, and the optional name
-    came first.
+    came first. After picking this layout, the owner asked that suggested
+    routines read as suggestions, that building one's own be easy, and
+    that exercises can be dragged into order.
   - The type tiles are one row of one size that scrolls sideways: the kind
     the sheet opened on first, then the member's most frequent, and Saved
     last. The next tile peeks in at the edge.
@@ -613,17 +615,23 @@ The owner chose to keep importing all Health history. P26 addresses that.
     with its time, and "Keep what's on those days". Then what (a run's
     distance or time, a ride, a routine), and the optional name last,
     saying it's saved to the workouts to add again from Saved or rename
-    later. The review screen puts its name last too.
-  - A starter routine at home (Core, Stretching or Bodyweight) is added as
-    it is, with the timing the review opens on, and "Edit exercises and
-    timers" under its exercises opens that review first. "My own" is now
-    "From scratch" and still picks exercises first. A retry after a lost
-    reply sends the same request, so it never makes a second routine.
+    later.
+  - A routine at home is built right in its list. "+ Your own" is the
+    first chip and opens the no-equipment catalog; Core, Stretching and
+    Bodyweight are suggestions, headed "Suggested core routine · yours to
+    change". Drag to reorder, swipe to remove, Add exercise for more, and
+    tap one exercise for its own sets and reps or hold (a circuit's rounds
+    stay shared). Sets and rests opens the routine's shared timing, circuit
+    choice and timer preview, which follows each exercise's own values.
+    Add saves the list as shown through the same prescribed-workout save;
+    a retry after a lost reply sends the same request, so it never makes a
+    second routine. The review screen stays for lifts.
   - A second routine from the same starter is named "Core routine 2"
     instead of being refused until the member types a new name.
   - No backend change and no migration. Unit tests cover the tile order,
-    the numbered name and the rest wording; the mixed-week journey opens
-    the review through Edit. The mock kit's Add to your week screens show
+    the numbered name, the chip order and an exercise's own sets, reps and
+    hold in the saved request and timer preview; the mixed-week journey
+    sets the routine's timing from its list. The mock kit's Add to your week screens show
     the new layout. Needs the owner's look on a TestFlight build like P5.
 
 ## Execution frontier

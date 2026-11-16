@@ -48,6 +48,49 @@ final class HomeRoutineDraftTests: XCTestCase {
         XCTAssertTrue(request.slots.allSatisfy { $0.group_id == nil && $0.group_rest_seconds == nil })
     }
 
+    func testAnExerciseSetOnItsOwnKeepsItsSetsAndAmount() throws {
+        let exercises = [exercise("ex_dead_bug"), exercise("ex_plank", modality: "timed"), exercise("ex_bird_dog")]
+        var draft = HomeRoutineDraft()
+        draft.overrides["ex_dead_bug"] = .init(sets: 4, reps: 12)
+        draft.overrides["ex_plank"] = .init(seconds: 60)
+        let request = try XCTUnwrap(draft.request(name: "Core", exercises: exercises, planID: "plan", version: 1))
+        XCTAssertEqual(request.slots.map(\.target_sets), [4, 3, 3], "The others keep the routine's sets")
+        XCTAssertEqual(request.slots.map(\.target_reps), [12, 60, 8])
+        XCTAssertEqual(request.slots.map(\.target_duration_s), [nil, 60, nil])
+        XCTAssertEqual(draft.targetLabel(for: exercises[0]), "4 × 12 reps")
+        XCTAssertEqual(draft.targetLabel(for: exercises[1]), "3 × 60s")
+        XCTAssertEqual(draft.targetLabel(for: exercises[2]), "3 × 8 reps")
+
+        // A circuit's rounds are shared; an exercise's own reps still count.
+        draft.circuit = true
+        let circuit = try XCTUnwrap(draft.request(name: "Core", exercises: exercises, planID: "plan", version: 1))
+        XCTAssertEqual(circuit.slots.map(\.target_sets), [3, 3, 3])
+        XCTAssertEqual(circuit.slots.map(\.target_reps), [12, 60, 8])
+
+        // Timing every exercise uses its own hold, not its reps.
+        draft.circuit = false
+        draft.timeEveryExercise = true
+        let timed = try XCTUnwrap(draft.request(name: "Core", exercises: exercises, planID: "plan", version: 1))
+        XCTAssertEqual(timed.slots.map(\.target_duration_s), [45, 60, 45])
+
+        // The timer preview follows each exercise's own sets and hold.
+        var previewed = HomeRoutineDraft()
+        previewed.rest = "0"
+        previewed.overrides["ex_plank"] = .init(sets: 1, seconds: 60)
+        let preview = try XCTUnwrap(previewed.timerPreview(for: [exercises[1], exercises[0]]))
+        XCTAssertEqual(preview.steps.filter { $0.kind == .work }.map(\.exerciseID),
+                       ["ex_plank", "ex_dead_bug", "ex_dead_bug", "ex_dead_bug"])
+        XCTAssertEqual(preview.timedWorkSeconds, 60)
+        XCTAssertEqual(preview.untimedSets, 3)
+
+        // A shared value every exercise overrides doesn't block saving.
+        var own = HomeRoutineDraft()
+        own.reps = ""
+        own.overrides["ex_dead_bug"] = .init(reps: 10)
+        XCTAssertNil(own.validationMessage(for: [exercises[0]]))
+        XCTAssertNotNil(own.validationMessage(for: [exercises[0], exercises[2]]))
+    }
+
     func testInvalidInputCannotSilentlySaveDefaultTargets() {
         let exercises = [exercise("ex_plank", modality: "timed")]
         for value in ["", "0", "-1", "1.5", "abc", "7201", "999999999999999999999999"] {

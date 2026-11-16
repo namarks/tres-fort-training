@@ -209,7 +209,10 @@ final class PlanComposerTests: XCTestCase {
         let two = PlanTree(id: "p", name: "L", version: 1,
                            workouts: [workout("a", "core routine"), workout("b", "Core routine 2")], meta: nil)
         XCTAssertEqual(PlanComposer.availableName("Core routine", in: two), "Core routine 3", "Matched without case")
-        XCTAssertEqual(PlanComposer.HomeStart.own.title, "From scratch")
+        XCTAssertEqual(PlanComposer.HomeStart.own.title, "Your own")
+        XCTAssertEqual(PlanComposer.HomeStart.chipOrder, [.own, .core, .stretching, .bodyweight],
+                       "The member's own comes before the suggestions")
+        XCTAssertEqual(Set(PlanComposer.HomeStart.chipOrder), Set(PlanComposer.HomeStart.allCases))
         XCTAssertEqual(PlanComposer.restPhrase(120), "2 min")
         XCTAssertEqual(PlanComposer.restPhrase(90), "90 sec")
         XCTAssertEqual(PlanComposer.restPhrase(30), "30 sec")

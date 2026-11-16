@@ -17,8 +17,9 @@ final class MixedWeekSetupJourneyTests: XCTestCase {
         beginSetup(in: app)
         addRun(in: app, withReminder: true)
         reviewCore(in: app, alsoThursday: true, withReminder: true)
+        closeTiming(in: app)
 
-        let save = app.buttons["createWorkout.create"]
+        let save = app.buttons["composer.save"]
         XCTAssertEqual(save.label, "Add to Tue, Thu")
         save.tapWhenReady()
         assertWeek(in: app, coreOnThursday: true)
@@ -55,8 +56,9 @@ final class MixedWeekSetupJourneyTests: XCTestCase {
         beginSetup(in: app)
         addRun(in: app, withReminder: false)
         reviewCore(in: app, alsoThursday: false, withReminder: false)
+        closeTiming(in: app)
 
-        let save = app.buttons["createWorkout.create"]
+        let save = app.buttons["composer.save"]
         XCTAssertEqual(save.label, "Add to Tuesdays")
         save.tapWhenReady()
         XCTAssertTrue(app.staticTexts["composer.error"].waitForExistence(timeout: UITestWait.screen))
@@ -114,7 +116,7 @@ final class MixedWeekSetupJourneyTests: XCTestCase {
         // The long preview has scrolled this earlier Form row out of the
         // accessibility tree. Materialize it upward before the field helper
         // checks its position against the pinned action and keyboard.
-        let seconds = app.textFields["createWorkout.timing.seconds"]
+        let seconds = app.textFields["composer.home.timing.seconds"]
         XCTAssertTrue(app.scroll(toReveal: seconds, searchingUp: true))
         replaceText(in: seconds, with: "30", app: app)
         revealFormControl(duration, in: app)
@@ -212,21 +214,27 @@ final class MixedWeekSetupJourneyTests: XCTestCase {
         XCTAssertTrue(app.scroll(toReveal: alongside))
         XCTAssertEqual(alongside.value as? String, "1", "A separate core routine keeps the run")
         if withReminder { enable("composer.time.toggle", in: app) }
-        // A starter adds as it is; Edit opens its exercises and timers first.
+        // The suggestion is the member's to change right in its list; the
+        // shared sets and rests open in their own sheet.
         XCTAssertEqual(app.buttons["composer.save"].label, alsoThursday ? "Add to Tue, Thu" : "Add to Tuesdays")
-        revealAndTap(app.buttons["composer.home.edit"], in: app)
-        XCTAssertTrue(app.navigationBars["Review workout"].waitForExistence(timeout: UITestWait.screen))
-        enable("createWorkout.circuit", in: app)
-        enable("createWorkout.timeEveryExercise", in: app)
+        XCTAssertTrue(app.buttons["composer.home.add"].exists || app.scroll(toReveal: app.buttons["composer.home.add"]))
+        revealAndTap(app.buttons["composer.home.timing"], in: app)
+        XCTAssertTrue(app.navigationBars[timingSheet].waitForExistence(timeout: UITestWait.screen))
+        enable("composer.home.circuit", in: app)
+        enable("composer.home.timeEveryExercise", in: app)
         for (field, value) in [("sets", "2"), ("seconds", "40"), ("transition", "20"), ("roundRest", "60")] {
-            replaceText(in: app.textFields["createWorkout.timing.\(field)"], with: value, app: app)
+            replaceText(in: app.textFields["composer.home.timing.\(field)"], with: value, app: app)
         }
-        // The optional name comes after the exercises and timing.
-        let name = app.textFields["createWorkout.name"]
+    }
+
+    /// Closes the timing sheet and checks the routine's optional name,
+    /// which comes last and is filled in for the member.
+    private func closeTiming(in app: XCUIApplication) {
+        app.buttons["composer.home.timingDone"].tapWhenReady()
+        let name = app.textFields["composer.name"]
         XCTAssertTrue(app.scroll(toReveal: name))
-        XCTAssertEqual(name.value as? String, "Core routine")
-        // The pinned submit stays reachable above the numeric keyboard.
-        XCTAssertTrue(app.buttons["createWorkout.create"].isEnabled)
+        XCTAssertEqual(name.placeholderValue, "Core routine")
+        XCTAssertTrue(app.buttons["composer.save"].isEnabled)
     }
 
     private func assertWeek(in app: XCUIApplication, coreOnThursday: Bool) {
@@ -308,8 +316,6 @@ final class MixedWeekSetupJourneyTests: XCTestCase {
                         file: StaticString = #filePath, line: UInt = #line) {
         let toggle = app.switches[identifier]
         revealFormControl(toggle, in: app, file: file, line: line)
-        let actionID = app.navigationBars["Review workout"].exists ? "createWorkout.create" : "composer.save"
-        let action = app.buttons[actionID]
         var previousFrame: CGRect?
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             guard toggle.exists, toggle.isEnabled, toggle.isHittable,
@@ -320,8 +326,7 @@ final class MixedWeekSetupJourneyTests: XCTestCase {
             let frame = toggle.frame
             let bars = app.navigationBars.allElementsBoundByIndex.filter { $0.exists && $0.isHittable }
             let top = (bars.map { $0.frame.maxY }.max() ?? app.frame.minY + 60) + 12
-            var bottom = action.frame.minY - 16
-            if app.keyboards.firstMatch.exists { bottom = min(bottom, app.keyboards.firstMatch.frame.minY - 16) }
+            let bottom = formBottom(in: app)
             guard frame.minY >= top, frame.maxY <= bottom else {
                 previousFrame = nil
                 return false
@@ -402,19 +407,31 @@ final class MixedWeekSetupJourneyTests: XCTestCase {
         XCTAssertEqual(field.value as? String, text, file: file, line: line)
     }
 
+    /// The routine's Sets and rests sheet, opened from its list on Add to
+    /// your week (app-design-pass P27).
+    private let timingSheet = "Sets and rests"
+
+    /// Where a form's visible rows end: above the pinned add button, or
+    /// near the screen's bottom in the timing sheet, and above a keyboard.
+    private func formBottom(in app: XCUIApplication) -> CGFloat {
+        var bottom = app.navigationBars[timingSheet].exists
+            ? app.frame.maxY - 40 : app.buttons["composer.save"].frame.minY - 16
+        if app.keyboards.firstMatch.exists { bottom = min(bottom, app.keyboards.firstMatch.frame.minY - 16) }
+        return bottom
+    }
+
     /// XCTest can call a Form row hittable while the pinned bottom button
     /// covers its tap point. Scroll inside the form until the whole control
     /// sits between its navigation bar and its current action/keyboard.
     private func revealFormControl(_ element: XCUIElement, in app: XCUIApplication,
                                    file: StaticString = #filePath, line: UInt = #line) {
-        let actionID = app.navigationBars["Review workout"].exists ? "createWorkout.create" : "composer.save"
-        let action = app.buttons[actionID]
-        XCTAssertTrue(action.waitForExistence(timeout: UITestWait.screen), file: file, line: line)
+        if !app.navigationBars[timingSheet].exists {
+            XCTAssertTrue(app.buttons["composer.save"].waitForExistence(timeout: UITestWait.screen), file: file, line: line)
+        }
         for _ in 0..<16 {
             let bars = app.navigationBars.allElementsBoundByIndex.filter { $0.exists && $0.isHittable }
             let top = (bars.map { $0.frame.maxY }.max() ?? app.frame.minY + 60) + 12
-            var bottom = action.frame.minY - 16
-            if app.keyboards.firstMatch.exists { bottom = min(bottom, app.keyboards.firstMatch.frame.minY - 16) }
+            let bottom = formBottom(in: app)
             if element.exists, element.isHittable, element.frame.minY >= top, element.frame.maxY <= bottom { return }
             guard bottom - top > 80 else { break }
             let above = element.exists && element.frame.midY < top
