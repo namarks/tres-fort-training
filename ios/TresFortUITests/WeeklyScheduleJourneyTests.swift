@@ -250,7 +250,7 @@ final class WeeklyScheduleJourneyTests: XCTestCase {
         XCTAssertTrue(addExtra.waitForExistence(timeout: UITestWait.screen))
         addExtra.tap()
         XCTAssertTrue(app.buttons["composer.kind.home"].isSelected)
-        app.buttons["composer.kind.sport"].tap()
+        app.revealComposerKind("sport").tapWhenReady()
         let idea = app.buttons["composer.idea.Stretching"]
         XCTAssertTrue(idea.waitForExistence(timeout: UITestWait.screen))
         XCTAssertTrue(app.buttons["composer.kind.sport"].isSelected)

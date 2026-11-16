@@ -722,7 +722,7 @@ final class TodayNavigationJourneyTests: XCTestCase {
 
             // Home routines are built in the composer only after this public
             // entry has recovered the plan; lifting creates its plan atomically.
-            tap(app.buttons["composer.kind.home"], in: app)
+            tap(app.revealComposerKind("home"), in: app)
             XCTAssertTrue(app.scroll(toReveal: app.buttons["composer.day.tue"]))
             tap(app.buttons["composer.day.tue"], in: app)
             XCTAssertTrue(app.scroll(toReveal: app.buttons["composer.home.add"]))
