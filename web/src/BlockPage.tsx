@@ -10,6 +10,7 @@ import {
   blockDays,
   blockWorkouts,
   dayFull,
+  fullDays,
   daysIn,
   daysLabel,
   hasWeekTargets,
@@ -266,6 +267,8 @@ function BlockRow({ block, workout, miles, busy, onTargets }: {
   const editable = hasWeekTargets(workout);
   const [daysOpen, setDaysOpen] = useState(false);
   const daysText = varies ? 'Varies' : daysLabel(days);
+  // Days it is on in some weeks that are full in others.
+  const crowded = fullDays(draft, workout.id, days);
   return (
     <>
       <tr>
@@ -309,11 +312,13 @@ function BlockRow({ block, workout, miles, busy, onTargets }: {
               <div className="block-day-toggles">
                 {WEEKDAYS.map((day) => {
                   const on = days.includes(day);
+                  // A change puts the workout on the same days in every week, so each of them needs room in each week.
+                  const next = on ? days.filter((d) => d !== day) : [...days, day];
                   return (
                     <label key={day} className={on ? 'day-toggle on' : 'day-toggle'}>
                       <input type="checkbox" checked={on} aria-label={WEEKDAY_LABELS[day]}
-                        disabled={on ? days.length === 1 : dayFull(draft, day, workout.id)}
-                        onChange={(e) => block.setDraft(placingOn(draft, workout.id, e.target.checked ? [...days, day] : days.filter((d) => d !== day)))} />
+                        disabled={next.length === 0 || fullDays(draft, workout.id, next).length > 0}
+                        onChange={() => block.setDraft(placingOn(draft, workout.id, next))} />
                       <span aria-hidden="true">{WEEKDAY_LABELS[day].slice(0, 3)}</span>
                     </label>
                   );
@@ -321,6 +326,7 @@ function BlockRow({ block, workout, miles, busy, onTargets }: {
                 <button type="button" className="ghost small" onClick={() => setDaysOpen(false)}>Done</button>
               </div>
               {varies && <p className="fine muted">The weeks differ now. A change here puts it on the same days in all of them.</p>}
+              {crowded.length > 0 && <p role="status" className="fine muted">{crowded.map((day) => WEEKDAY_LABELS[day]).join(', ')} already {crowded.length === 1 ? 'has' : 'have'} five workouts in some weeks, so this can’t go there in every week. Untick {crowded.length === 1 ? 'it' : 'them'} to change the other days.</p>}
               {days.length === 1 && <p className="fine muted">To take it out of the block, choose Remove.</p>}
             </fieldset>
           </td>
@@ -440,7 +446,7 @@ function SortBlock({ block, state, busy }: { block: ActiveBlock; state: StateRes
         })}
       </fieldset>
       <button type="button" disabled={busy || picked.length === 0 || !!block.problem || block.needsReview}
-        onClick={() => block.setDraft(sortingBlock(block.draft, plan.schedule, picked, plan.workouts))}>Keep these as the block’s own</button>
+        onClick={() => block.setDraft(sortingBlock(block.draft, picked, plan.workouts))}>Keep these as the block’s own</button>
       {inBlock.some((workout) => !picked.includes(workout.id)
         && block.draft.weeks.some((week) => workout.exercises.some((slot) => week.targets?.[slot.id] !== undefined))) && (
         <p role="status" className="muted fine">An unticked workout goes back to its own targets every week; the week-by-week targets this block gave it are removed.</p>

@@ -7,6 +7,7 @@ import {
   blockDays,
   blockWorkouts,
   dayFull,
+  fullDays,
   daysLabel,
   hasWeekTargets,
   headlineName,
@@ -146,19 +147,27 @@ describe('a block beside the repeating week', () => {
     expect(dayFull(crowded, 'mon', 'lift')).toBe(true);
     expect(dayFull(crowded, 'mon', 'a')).toBe(false);
     expect(dayFull(crowded, 'tue', 'lift')).toBe(false);
+    // Lift's days differ by week; one change puts it on all of them in every week, and week 1's Monday is full.
+    const uneven: ProgramBody = { ...crowded, workout_ids: [...crowded.workout_ids!, 'lift'],
+      weeks: [{ ...crowded.weeks[0]!, week: { ...crowded.weeks[0]!.week, tue: 'lift' } }, { week: { ...none, mon: 'lift' } }] };
+    expect(fullDays(uneven, 'lift', ['mon', 'tue', 'wed'])).toEqual(['mon']);
+    expect(fullDays(uneven, 'lift', ['tue', 'wed'])).toEqual([]);
   });
 
   it('sorts a block that listed nothing into its own workouts and what stays every week', () => {
     const legacy: ProgramBody = { start: '2026-11-16', repeat: false,
       weeks: [{ week: { ...none, mon: 'soccer', tue: 'lift', fri: 'tempo' }, extras: { mon: ['core'], tue: ['core'] }, targets: { squat: { target_reps: 8 } } }] };
     expect(suggestedSorting(legacy, usual, all)).toEqual(['lift']);
-    const sorted = sortingBlock(legacy, usual, ['lift', 'tempo'], all);
+    const sorted = sortingBlock(legacy, ['lift', 'tempo'], all);
     expect(sorted.workout_ids).toEqual(['lift', 'tempo']);
     expect(sorted.weeks[0]).toEqual({ week: { ...none, tue: 'lift', fri: 'tempo' }, targets: { squat: { target_reps: 8 } } });
     // A workout left every week keeps none of the block's targets, which would still apply unseen.
     const withCore: ProgramBody = { ...legacy, weeks: legacy.weeks.map(week => ({ ...week, targets: { ...week.targets, 'core-slot': { target_sets: 5 } } })) };
-    expect(sortingBlock(withCore, usual, ['lift', 'tempo'], all).weeks[0]!.targets).toEqual({ squat: { target_reps: 8 } });
-    expect(sortingBlock(withCore, usual, ['tempo'], all).weeks[0]!.targets).toBeUndefined();
+    expect(sortingBlock(withCore, ['lift', 'tempo'], all).weeks[0]!.targets).toEqual({ squat: { target_reps: 8 } });
+    expect(sortingBlock(withCore, ['tempo'], all).weeks[0]!.targets).toBeUndefined();
+    // Nor a placement the old block gave it on a day the repeating week doesn't: it follows the repeating week.
+    const apart: ProgramBody = { start: '2026-11-16', repeat: false, weeks: [{ week: { ...none, tue: 'lift', wed: 'soccer' }, extras: { thu: ['tempo', 'core'] } }] };
+    expect(sortingBlock(apart, ['lift', 'tempo'], all).weeks[0]).toEqual({ week: { ...none, tue: 'lift', thu: 'tempo' } });
   });
 
   it('says what a workout asks for in each week', () => {

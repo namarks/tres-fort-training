@@ -106,6 +106,12 @@ export function dayFull(program: ProgramBody, day: Weekday, workoutId: string): 
   });
 }
 
+/** The weekdays among `days` where some week has no room for the workout:
+ * putting it on all of `days` in every week would drop it there. */
+export function fullDays(program: ProgramBody, workoutId: string, days: readonly Weekday[]): Weekday[] {
+  return WEEKDAYS.filter((day) => days.includes(day) && dayFull(program, day, workoutId));
+}
+
 /** A workout put on exactly these weekdays in every week (own form). The
  * rest of each day stays; a day's first workout is its main one. */
 export function placingOn<P extends ProgramBody>(program: P, workoutId: string, days: readonly Weekday[]): P {
@@ -211,25 +217,22 @@ export function suggestedSorting(program: ProgramBody, schedule: WeekPattern, wo
   return ids.length > 0 ? ids : suggestedBlockWorkouts(schedule, workouts).filter((id) => placedIds(program).includes(id));
 }
 
-/** A block that lists `picked` as its own, from one that listed none: own
- * form against the repeating week once those workouts leave it. A workout
- * left out keeps none of the targets the weeks gave it, as when it is
- * removed from a block: they would still apply, with nowhere to change them. */
-export function sortingBlock(
-  program: ProgramBody, schedule: WeeklySchedule, picked: readonly string[], workouts: readonly Workout[],
-): ProgramBody {
-  const trimmed = trimmedSchedule(schedule, picked) ?? schedule;
+/** A block that lists `picked` as its own, from one that listed none: each
+ * week keeps only those workouts, where it had them. A workout left out
+ * follows the repeating week from then on, wherever the old block put it,
+ * and keeps none of the targets the weeks gave it, as when it is removed
+ * from a block: they would still apply, with nowhere to change them. */
+export function sortingBlock(program: ProgramBody, picked: readonly string[], workouts: readonly Workout[]): ProgramBody {
   const left = new Set(workouts.filter((workout) => !picked.includes(workout.id)).flatMap((workout) => workout.exercises.map((slot) => slot.id)));
   const weeks = program.weeks.map((week) => {
-    if (!week.targets) return week;
-    const targets = Object.fromEntries(Object.entries(week.targets).filter(([id]) => !left.has(id)));
-    const next = { ...week };
+    const next = WEEKDAYS.reduce((kept, day) => withDay(kept, day, dayEntries(week, day).filter((id) => picked.includes(id))), week);
+    if (!next.targets) return next;
+    const targets = Object.fromEntries(Object.entries(next.targets).filter(([id]) => !left.has(id)));
     if (Object.keys(targets).length > 0) next.targets = targets;
     else delete next.targets;
     return next;
   });
-  // Whatever the repeating week still holds on a day is its own there.
-  return ownForm({ ...program, weeks, workout_ids: [...picked] }, trimmed);
+  return programBody({ ...program, weeks, workout_ids: [...picked] });
 }
 
 /** Most workouts one day holds: its main one and the ones beside it. */
