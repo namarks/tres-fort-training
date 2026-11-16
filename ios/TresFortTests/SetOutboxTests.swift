@@ -122,7 +122,9 @@ extension SetOutboxTests {
         let replacement = exercise(exerciseID: "replacement", groupID: "group-a")
         let second = exercise(id: "slot-b", exerciseID: "exercise-b", groupID: "group-a")
         let active = try swappedSession(session(attempt: 0), original: original, replacement: replacement)
-        let old = setLog()
+        let old = setLog(body: SetRequestBody(id: "old", exercise_id: original.exercise_id,
+            template_exercise_id: original.id, set_index: 1, weight: 100, reps: 5,
+            is_warmup: false, logged_at: 100, duration_s: nil, is_timed: false))
         let model = SyncModel(auth: retainedAuth(defaults: defaults), defaults: defaults, now: { self.fixedDate })
         model.replaceState(with: state(session: active, sets: [old], exercises: [original, second]))
         model.startWorkout()
