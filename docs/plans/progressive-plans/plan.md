@@ -1,6 +1,6 @@
 # Plan over blocks and cycles, not just one week
 
-Slug: progressive-plans · Status: active · Updated: 2026-11-10 · Theme: gym-floor
+Slug: progressive-plans · Status: active · Updated: 2026-11-15 · Theme: gym-floor
 
 ## Goal
 
@@ -64,7 +64,7 @@ spec.md holds the data format, the date rule and the limits.
   - Only one schedule is marked "In use now"; while the block covers today,
     Your week folds into one row saying when it comes back (the owner,
     2026-11-10: with both shown it wasn't clear which one applied).
-- [ ] **P3 — Weeks laid out by rules**
+- [x] **P3 — Weeks laid out by rules**
   - "Train for an event": the member names an event (date and distance),
     the long run day and the longest run lately (filled in from the last
     four weeks of runs). Fixed rules lay out every week to race day: the
@@ -84,7 +84,7 @@ spec.md holds the data format, the date rule and the limits.
     three harder weeks and one easier week step up to a ceiling the member
     sets, then hold there until the block (8 to 24 weeks in the app) ends
     (the owner's pick, 2026-11-10). Third PR.
-- [ ] **P4 — The web planner and the coach**
+- [x] **P4 — The web planner and the coach**
   - The web planner shows and edits the block like the app
     ([plan on the web](../web-app/plan.md)); the coach brief describes the
     current week of the block.
@@ -102,6 +102,31 @@ spec.md holds the data format, the date rule and the limits.
 - [ ] **P5 — Release and owner check**
   - Worker deploy and a TestFlight build on the owner's go-ahead, then the
     owner sets up a block on the iPhone and checks Today and the calendar.
+- [ ] **P6 — Manual week targets from the phone**
+  - Edit a selected workout's sets/rounds, reps or duration and load for one
+    block week or that week through the end. Show the reusable target beside
+    the effective week target and allow removing an override.
+  - Group round edits update every member together. Preserve unrelated slot
+    targets, unknown and assisted loads, units, other weeks and completed history.
+  - Refuse changes to effective targets of recorded in-progress workouts in
+    the shared program writer, with an atomic session-roster guard against a
+    concurrent start/swap. The phone also refuses changes to its mounted
+    pre-first-set runner. Another device's offline/unlogged start is not
+    observable by the server; it retains the existing live-plan behavior.
+    Do not promise that all remote unlogged runners have frozen targets.
+  - Label repeating-cycle scope explicitly: the selected indexed week changes
+    each time the block repeats. Session-only runner changes and reusable
+    workout editing keep their separate entry points and descriptions.
+  - Preserve dirty input and bind saves to the reviewed account, plan,
+    program and version. A changed plan requires review, not silent rebasing.
+  - Reuse the existing whole-program writer and web target/ramp editor. Share
+    the reviewed lighter-week path with coach-free planning P2; do not add
+    automatic post-workout weight suggestions.
+
+## Execution frontier
+
+- P6
+- P5
 
 ## Dependencies
 
@@ -110,14 +135,22 @@ spec.md holds the data format, the date rule and the limits.
 | P2 | coordinates_with | plan:app-design-pass#P13 | Both change the Plan tab's Schedule side. |
 | P3 | coordinates_with | plan:coach-free-planning#P1 | The goal date for a taper is the race goal the member will set in the app. |
 | P4 | coordinates_with | plan:web-app | The web planner edits the same plan document. |
+| P5 | gated_by | external:owner-progressive-plan-release-and-device-check | Repository implementation does not establish deployment or physical acceptance. |
 
 ## Next step
 
-**Now (@agent):** One "Plan a block" entry on the Plan tab (P4), then the
-web Block page (spec).
+**Now (@agent):** Qualify and deliver P6 on `codex/lifting-core-ux` in the public
+repository, together with coach-free planning P2. Implementation includes native
+target/lighter-week sheets, explicit scope and active-session guards; this phase
+stays open until exact-head qualification and owner merge. The source already
+includes the rule-based event/open
+builders (`EventBuildSheet`, `programBuilder`, `build_program`), the native
+block chooser and the web target/ramp designer. Public PR #4 integrated that
+designer into the unified Plan weeks page; rebuilding those is not next work.
 
-**Next (@owner):** Release #422 and P3 with a Worker deploy and a
-TestFlight build, then check a block on the iPhone (P5).
+**Next (@owner):** On a separately authorized release, check the same selected
+week on the phone, web, Today and calendar. Reconcile deployment and device
+evidence before closing P5; an old release request is not new authority.
 
 ## Notes / open questions
 
@@ -125,7 +158,6 @@ TestFlight build, then check a block on the iPhone (P5).
   by the app) were built and then set aside on the owner's word
   (2026-11-08). The patch is kept in the project files at
   `plan-progression/lift-suggestions-p0.patch` if it is wanted later.
-- The App Store build 55 does not read `program`, so it keeps showing the
-  repeating week. Until P2 ships, only the coach (`set_program`) can make a
-  block, so a member on an older build could see the coach's block in chat
-  but not in the app; P5 releases P0 to P2 together.
+- Older clients that predate block support show the repeating week. Current
+  source supports blocks, but source inspection does not identify the build
+  installed on a member's device. P5 verifies the chosen release candidate.

@@ -1,6 +1,6 @@
 # Member Activation and Adherence
 
-Slug: member-activation-and-adherence · Status: paused · Updated: 2026-11-13 · Theme: gym-floor
+Slug: member-activation-and-adherence · Status: paused · Updated: 2026-11-15 · Theme: gym-floor
 
 ## Goal
 
@@ -279,25 +279,20 @@ how to populate an empty progress view without needing another setup flow.
 
 ## Next step
 
-**Now (@owner):** Merge the final native timer-instruction wrapping follow-up
-on `codex/onboarding-timer-preview-wrap` after its visual verification and
-exact-head review/CI pass. The final screenshot check caught clipped text
-with the keyboard open; the fix lets the instruction use its full height.
-PR #453 delivered P7 and records
-the completed behavioral verification and required delivery gates.
-PR #444,
-PR #445,
-PR #446 and
-PR #452 are merged.
-This bounded audit follow-up does not activate paused P4.
-On the next authorized TestFlight build,
-try setup as a new member from Profile > Account: Get started, plan a week,
-connect an app and land on Today, then come back with "Back to my account". P1 reminders and the Today widget are implemented; their
-implementation PR carries exact-head review and CI evidence for repository
-delivery. On the next authorized TestFlight build, add the widget and turn on a
-reminder to confirm both on a real device, then choose whether to activate the
-P4 empty-state follow-up. P2(a) and P3 are delivered. Migration, production
-deployment and iOS distribution remain separately authorized.
+**Now (@owner):** On the next separately authorized TestFlight candidate,
+try new-member setup from Profile > Account: Get started; plan a mixed week,
+connect an optional app, reach Today and return with “Back to my account”.
+Verify reminder permissions and the Today widget on a real device. The bounded
+onboarding implementations P0–P3 and P5–P7 are in the public source; no old
+private-branch merge request remains. Source and synthetic checks are not
+new-user observation or physical acceptance.
+
+P4 actionable progress empty states remains paused pending owner activation.
+The selected core lifting work is tracked in
+[Gym-Floor Experience](../../initiatives/gym-floor-experience.md), rather than
+reactivating this entire workstream. Replacing a scheduled extra for only one
+date remains the explicit P7 follow-up requiring a shared lineage contract.
+Migration, production deployment and client distribution need separate authority.
 
 ## Notes / open questions
 

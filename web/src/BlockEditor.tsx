@@ -10,7 +10,6 @@ import {
   formatSeconds,
   formatValue,
   MAX_PROGRAM_WEEKS,
-  newBlock,
   parseSeconds,
   programBody,
   rampValues,
@@ -28,6 +27,9 @@ import { planBlocks } from './event';
 import type { Slot, Workout } from './model';
 import type { Write } from './WorkoutEditor';
 import { useEditorDraft } from './useEditorDraft';
+import { isNewBlockDraft, NEW_BLOCK_DOCUMENT, newBlockDraft, newBlockRequest, type NewBlockDraft } from './programmingDrafts';
+import { WEEKDAYS } from '../../src/types';
+import { WEEKDAY_LABELS } from './model';
 import { blockComparison, blockDraftProblem, blockInputErrors, blockSlotIdentities, changingBlockInput, isBlockDraft, parsedTargetInput, reconcileBlockInputs, resettingBlockInputs, resolveBlockInputs, targetInputKey, type BlockDraft } from './blockDrafts';
 
 export type BlockEditor = ReturnType<typeof useBlockEditor>;
@@ -162,7 +164,8 @@ export function blockSummary(draft: ProgramBody, thisWeek: number | null): strin
 }
 
 /** Start a block of weeks from the usual week. */
-export function NewBlock({ state, workouts, write, busy, today, onCancel }: {
+export function NewBlock({ state, workouts, write, busy, today, accountId, onCancel }: {
+  accountId: string;
   onCancel?: () => void;
   state: StateResponse;
   workouts: Workout[];
@@ -171,62 +174,74 @@ export function NewBlock({ state, workouts, write, busy, today, onCancel }: {
   today: string;
 }) {
   const choices = useMemo(() => startChoices(today), [today]);
-  const [name, setName] = useState('');
-  const [start, setStart] = useState(choices[0]!);
-  const [weeks, setWeeks] = useState(8);
-  const [repeat, setRepeat] = useState(false);
-
-  const submit = (event: FormEvent) => {
-    event.preventDefault();
-    const body = newBlock(state.plan?.schedule, workouts, { start, weeks, repeat, name });
-    void write((at) => planWrites.setProgram(body, at));
+  const planId = state.plan?.id ?? 'none';
+  const version = state.plan?.version ?? 0;
+  const retained = useEditorDraft<NewBlockDraft>({ accountId, planId, documentId: NEW_BLOCK_DOCUMENT }, isNewBlockDraft);
+  const fresh = newBlockDraft(state.plan?.schedule, workouts, choices[0]!);
+  const draft = retained.record?.value ?? fresh;
+  const starts = choices.includes(draft.start) ? choices : [draft.start, ...choices];
+  const exists = !!planBlocks(state).program;
+  const needsReview = !!retained.record && retained.record.version !== version;
+  const body = newBlockRequest(draft);
+  const change = (patch: Partial<NewBlockDraft>) => retained.save({ ...draft, ...patch }, retained.record?.version ?? version);
+  const cancel = () => {
+    if (retained.record && !window.confirm('Discard your unfinished new block?')) return;
+    retained.clear(); onCancel?.();
   };
-
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!body || busy || needsReview || exists || !state.plan || retained.unreadable) return;
+    const captured = retained.record ?? retained.save(draft, version);
+    await write(async at => {
+      if (at.planId !== planId || at.accountId !== accountId || at.version !== captured.version) throw new Error('draft_version_changed');
+      await planWrites.setProgram(body, at);
+      // Acknowledgement retires only this revision, even if the refresh fails.
+      if (retained.clear(captured)) onCancel?.();
+    });
+  };
+  const dayDescription = (value: NewBlockDraft, day: typeof WEEKDAYS[number]) => {
+    const week = value.source.weeks[0]!;
+    const ids = [week.week[day], ...(week.extras?.[day] ?? [])].filter((id): id is string => !!id);
+    return ids.map(id => value.workoutNames[id] ?? 'Unavailable workout').join(' + ') || 'Rest';
+  };
+  if (retained.unreadable) return <section className="panel" role="alert">
+    <p>This browser’s new-block draft could not be read. No change has been sent.</p>
+    <button type="button" onClick={() => retained.clear()}>Discard unreadable new-block draft</button>
+  </section>;
   return (
-      <section className="block-intro panel" aria-labelledby="block-new-title">
-        <h2 id="block-new-title">Plan a block</h2>
-        <p>
-          A block is a run of weeks that can differ from each other: a base month, a build, an easier week every so often.
-          It holds any mix of workouts (lifting, runs, swims, rides and sports), and each week can change its days and its targets.
-        </p>
-        <form className="block-new" onSubmit={submit}>
-          <div className="field">
-            <label htmlFor="block-name">Name (optional)</label>
-            <input id="block-name" value={name} maxLength={60} onChange={(e) => setName(e.target.value)} placeholder="Spring build" />
-          </div>
-          <div className="field-row">
-            <div className="field">
-              <label htmlFor="block-start">Starts</label>
-              <select id="block-start" value={start} onChange={(e) => setStart(e.target.value)}>
-                {choices.map((monday, index) => (
-                  <option key={monday} value={monday}>
-                    {index === 0 ? `This week (${shortDate(monday)})` : index === 1 ? `Next week (${shortDate(monday)})` : shortDate(monday)}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="field">
-              <label htmlFor="block-weeks">Weeks</label>
-              <input id="block-weeks" className="short" type="number" min={1} max={MAX_PROGRAM_WEEKS} value={weeks}
-                onChange={(e) => setWeeks(Math.min(MAX_PROGRAM_WEEKS, Math.max(1, Number(e.target.value) || 1)))} />
-            </div>
-          </div>
-          <label className="check">
-            <input type="checkbox" checked={repeat} onChange={(e) => setRepeat(e.target.checked)} />
-            Start over when it ends
-          </label>
-          <div className="form-actions">
-            <button type="submit" disabled={busy}>Start from my week</button>
-            {onCancel && <button type="button" className="ghost" disabled={busy} onClick={onCancel}>Cancel</button>}
-          </div>
-          <p className="muted fine">
-            Every week starts as a copy of your usual week. Then change any day right on the calendar, give weeks their own targets, or ramp a target up week by week.
-          </p>
-        </form>
-        <p className="muted fine">
-          In the iPhone app, Plan a block can also lay out your runs to an event or keep building your long run. Those blocks show here too, to change week by week.
-        </p>
-      </section>
+    <section className="block-intro panel" aria-labelledby="block-new-title">
+      <h2 id="block-new-title">Plan a block</h2>
+      <p>A block is a run of weeks that can differ from each other. It holds any mix of workouts, and each week can change its days and targets.</p>
+      {retained.record && <p className="muted">Your unfinished block is kept in this browser when you leave this page.</p>}
+      {exists && <p role="alert" className="problem">A block has been saved since you started. Your new-block draft is kept below, but cannot replace that block. Discard this draft to work with the saved block.</p>}
+      {needsReview && !exists && <section className="panel" aria-label="Review new-block draft">
+        <h3>Review your usual week</h3>
+        <p>Your plan changed. Your choices are kept. Review the week the new block will copy before continuing.</p>
+        <div className="block-grid-wrap"><table><thead><tr><th>Day</th><th>Previously reviewed</th><th>Current usual week</th></tr></thead>
+          <tbody>{WEEKDAYS.map(day => <tr key={day}><th scope="row">{WEEKDAY_LABELS[day]}</th><td>{dayDescription(draft, day)}</td><td>{dayDescription(fresh, day)}</td></tr>)}</tbody></table></div>
+        <button type="button" className="ghost" disabled={busy} onClick={() => retained.save({ ...draft, source: fresh.source, workoutNames: fresh.workoutNames }, version)}>Use current week with my choices</button>
+      </section>}
+      <form className="block-new" onSubmit={submit}>
+        <div className="field"><label htmlFor="block-new-name">Name (optional)</label>
+          <input id="block-new-name" value={draft.name} maxLength={60} onChange={e => change({ name: e.target.value })} placeholder="Spring build" /></div>
+        <div className="field-row">
+          <div className="field"><label htmlFor="block-new-start">Starts</label>
+            <select id="block-new-start" value={draft.start} onChange={e => change({ start: e.target.value })}>
+              {starts.map(monday => <option key={monday} value={monday}>{monday === choices[0] ? `This week (${shortDate(monday)})` : monday === choices[1] ? `Next week (${shortDate(monday)})` : shortDate(monday)}</option>)}
+            </select></div>
+          <div className="field"><label htmlFor="block-new-weeks">Weeks</label>
+            <input id="block-new-weeks" className="short" type="number" min={1} max={MAX_PROGRAM_WEEKS} value={draft.weeks} onChange={e => change({ weeks: e.target.value })} /></div>
+        </div>
+        <label className="check"><input type="checkbox" checked={draft.repeat} onChange={e => change({ repeat: e.target.checked })} />Start over when it ends</label>
+        {!body && <p role="alert" className="problem">Choose a valid start and between 1 and {MAX_PROGRAM_WEEKS} whole weeks.</p>}
+        <div className="form-actions">
+          <button type="submit" disabled={busy || !body || needsReview || exists}>Start from my week</button>
+          <button type="button" className="ghost" disabled={busy} onClick={cancel}>{retained.record ? 'Discard new-block draft' : 'Cancel'}</button>
+        </div>
+        <p className="muted fine">Every week starts as a copy of your reviewed usual week. Then change any day on the calendar, give weeks their own targets, or ramp a target up week by week.</p>
+      </form>
+      <p className="muted fine">In the iPhone app, Plan a block can also lay out your runs to an event or keep building your long run. Those blocks show here too.</p>
+    </section>
   );
 }
 

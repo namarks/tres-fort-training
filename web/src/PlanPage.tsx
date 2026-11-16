@@ -56,6 +56,9 @@ import { DateWorkoutEdit } from './DateWorkoutEdit';
 import type { DateWorkoutSelection } from './dateEditState';
 import type { Write } from './WorkoutEditor';
 import { prefersReducedMotion } from './mapkit';
+import { WeekAdjustment } from './WeekAdjustmentPanel';
+import { useEditorDraft } from './useEditorDraft';
+import { NEW_BLOCK_DOCUMENT, isNewBlockDraft } from './programmingDrafts';
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -190,12 +193,14 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
   const [earlier, setEarlier] = useState(0);
   const [later, setLater] = useState(0);
   const [starting, setStarting] = useState(!!startBlock);
+  const [lighterWeek, setLighterWeek] = useState<number | null>(null);
   const [routineRequest, setRoutineRequest] = useState<{ day: Weekday; key: number } | null>(null);
   const [editSelection, setEditSelection] = useState<DateWorkoutSelection | null>(null);
   const [editBlocked, setEditBlocked] = useState(false);
   useEffect(() => { if (startBlock) setStarting(true); }, [startBlock]);
   const miles = useMemo(() => prefersMiles(), []);
   const plan = state.plan;
+  const newBlockDraft = useEditorDraft({ accountId: accountId ?? 'none', planId: plan?.id ?? 'none', documentId: NEW_BLOCK_DOCUMENT }, isNewBlockDraft);
   const block = useBlockEditor({ state, write, busy, today, accountId: accountId ?? 'none' });
   const active = block.kind === 'block' ? block : null;
   // The calendar shows the block as it is being edited, saved or not.
@@ -293,12 +298,13 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
         )}
         {showStart && <PlanStart hasWorkouts={hasWorkouts} onUsualWeek={() => scrollToId('routine-title')}
           onBlock={() => setStarting(true)} onCreate={() => onEditWorkout(null)} />}
-        {starting && !active && (hasWorkouts
-          ? <NewBlock state={state} workouts={plan.workouts} write={write} busy={busy} today={today} onCancel={() => setStarting(false)} />
+        {(starting || !!newBlockDraft.record || newBlockDraft.unreadable) && (!active || !!newBlockDraft.record || newBlockDraft.unreadable) && (hasWorkouts
+          ? <NewBlock accountId={accountId ?? 'none'} state={state} workouts={plan.workouts} write={write} busy={busy} today={today} onCancel={() => setStarting(false)} />
           : <div className="panel"><p>A block is made of your workouts. Create one first.</p>
             <button type="button" onClick={() => onEditWorkout(null)}>Create a workout</button></div>)}
         {active && <BlockReview block={active} busy={busy} />}
         {active && <BlockSettings block={active} today={today} />}
+        {active && lighterWeek != null && active.draft.weeks[lighterWeek] && <WeekAdjustment key={`${active.programId}:${lighterWeek}`} block={active} index={lighterWeek} workouts={plan.workouts} onClose={() => setLighterWeek(null)} />}
 
         <div className="plan-more">
           <p className="muted fine">Scroll the weeks to see earlier and later ones.</p>
@@ -318,7 +324,7 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
             <Fragment key={row.monday}>
               <div role="row" data-monday={row.monday} className={['grid-row', 'week-row', row.week != null ? 'in-block' : '',
                 row.monday === thisMonday ? 'current' : ''].filter(Boolean).join(' ')}>
-                <WeekHeader row={row} block={active} thisMonday={thisMonday} today={today} />
+                <WeekHeader row={row} block={active} thisMonday={thisMonday} today={today} onLighten={setLighterWeek} />
                 {WEEKDAYS.map((day, d) => {
                   const date = addDays(row.monday, d);
                   return (
@@ -471,7 +477,7 @@ function PlanStart({ hasWorkouts, onUsualWeek, onBlock, onCreate }: {
 
 /** A week row's heading: the block week with its label and copy tools, or
  * the usual week. */
-function WeekHeader({ row, block, thisMonday, today }: { row: PlanRow; block: ActiveBlock | null; thisMonday: string; today: string }) {
+function WeekHeader({ row, block, thisMonday, today, onLighten }: { row: PlanRow; block: ActiveBlock | null; thisMonday: string; today: string; onLighten: (index: number) => void }) {
   if (block && row.week != null) {
     const index = row.week;
     const draft = block.draft;
@@ -484,6 +490,7 @@ function WeekHeader({ row, block, thisMonday, today }: { row: PlanRow; block: Ac
         <details className="week-menu">
           <summary>Edit week</summary>
           <div className="week-menu-body">
+            <button type="button" className="ghost small" onClick={() => onLighten(index)}>Make week lighter</button>
             <input aria-label={`Week ${index + 1} label`} className="block-label" maxLength={40}
               value={week.label ?? ''} placeholder="Label, like Base or Easy"
               onChange={(e) => block.setDraft(relabeling(draft, index, e.target.value))} />

@@ -298,9 +298,11 @@ partner training are not web features.
     and, the first time an activity is opened in a visit, a dot runs the
     route (skipped for reduced motion); at 1500 px and wider the Activity
     page shows summary, history and record in three columns. No API change.
-  - Still to do in P3: the Analysis section's Strength (exercise charts:
-    top set, estimated max, volume, best weight at each rep count, weekly
-    sets per muscle), Running and rides (weekly distance, pace at a heart
+  - Strength is implemented: searchable exercise history, comparable reps
+    and holds, estimated maximum, and source-set links into exact workout
+    correction. Broader volume/muscle summaries remain extensions, not a
+    missing Strength page.
+  - Still to do in P3: broader strength summaries, Running and rides (weekly distance, pace at a heart
     rate, best efforts, two runs side by side), Recovery and Records pages,
     a custom date range, planned against done (needs the plan as it stood on
     each past date, since the calendar keeps no past schedule), the app's
@@ -335,31 +337,27 @@ partner training are not web features.
 
 ## Next step
 
-**Now (@agent):** The web mixed-week onboarding follow-up is merged in
-PR #445, after
-PR #444. Neither merge is evidence of a production release; the updated API
-must precede the web bundle when deployment is authorized. Date-only
-primary-workout editing, timer previews and contextual block guidance merged
-in PR #453,
-completing member activation P7. Its PR records passing behavioral tests,
-independent review and exact-head CI. Connection discovery
-and signed-out entry merged in PR #452.
-Mobile setup reachability, reminder permission feedback and exact
-rest editing merged in PR #446. The signed-out web card now
-explains that members can create a plan on web, schedule a run and separate
-timed core, and use the iPhone app for timers and recording. This does not
-activate the broader P4 Profile and connections work. Earlier P2
-editing (workouts, slots, groups, run steps, the routine, single dates and away
-dates) was released on `app.tresfort.app`; the
-goal event is set on P3's Event page, and training phases and deloads
-follow coach-free planning's REST. The rest of P1 (week view, delete-account link,
-invite codes) follows before the site is linked
-publicly in P5. P3's Activity page and the Analysis section's
-Overview are built; the Event page (a goal event set without AI, with a
-finish estimate and the weeks heading in) is in review, then the Strength
-page (exercise charts), Running and rides, Recovery and Records. The owner
-also wanted one fuller planning page: the Plan page of weeks (P2) and the
-Activity page's maps and wide layout (P3) are in review in PR #4. Each later deploy needs the owner's written go-ahead.
+**Now (@agent):** Deliver the web portions of the selected core lifting pass:
+[workout-library P0.15](../workout-library/plan.md) preserves new-block and
+workout-details drafts, and [coach-free planning P2](../coach-free-planning/plan.md)
+adds a reviewed lighter week using the existing retained block editor. Detailed
+week targets and ramps already exist; do not create a competing block editor.
+
+The unified Plan weeks page and Activity map/wide-layout changes from public
+PR #4 are merged. The source also includes mixed-week creation, connection
+discovery, signed-out entry, primary date-only editing, Event analysis, Strength
+charts and exact workout correction. Earlier private PR numbers are historical
+source-delivery references, not pending public-repository work.
+
+**Later (@agent):** Date-only replacement of scheduled extras still needs a
+shared replacement/lineage contract, as described in member activation P7.
+The remaining P3 analysis extensions and broader P4 profile/connection work
+retain their own scope; this lifting pass does not activate all of them.
+
+**Next (@owner):** Authorize and verify a release separately when ready.
+Repository completion does not prove the production web bundle or API version.
+Deploy a compatible API before clients that require its changed request shapes;
+no deployment is authorized by this plan cleanup.
 
 ## Notes / open questions
 

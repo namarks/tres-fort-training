@@ -8516,6 +8516,66 @@ type PlanMetaWrite =
   | { error: string }
   | { ok: true; version: number; meta: PlanMeta };
 
+/** Keep a running workout's effective prescription fixed when replacing a
+ * block. The roster is checked again inside the plan-version claim: a workout
+ * starting or swapping after these reads must be reviewed before this write.
+ * Finishing a workout meanwhile is harmless and does not block the write. */
+async function activeProgramTargetsGuard(
+  db: D1Database, plan: PlanRow, program: TrainingProgram | null | undefined,
+): Promise<{ guard: { sql: string; json: string } }
+  | { conflict: true; current_version: number }
+  | { error: 'active_workout_targets_changed' }> {
+  const active = await db.prepare(`SELECT s.* FROM sessions s
+    WHERE s.user_id=?1 AND s.status='in_progress' AND ${sessionReferencesPlanSQL('s', '?2')}`)
+    .bind(plan.user_id, plan.id).all<SessionRow>();
+  if (active.results.length > 0) {
+    const tree = await getPlanTree(db, plan.user_id);
+    if (!tree || tree.id !== plan.id || tree.version !== plan.version) {
+      return { conflict: true, current_version: tree?.version ?? plan.version };
+    }
+    const oldProgram = parsePlanMeta(plan.meta).program;
+    const signature = (workout: PlanTree['workouts'][number], block: TrainingProgram | null | undefined, date: string) =>
+      JSON.stringify(applyWeekTargets(workout, block, date).exercises.map(slot => [
+        slot.id, slot.target_sets, slot.target_reps, slot.target_reps_max ?? null,
+        slot.target_rpe ?? null, slot.target_weight ?? null, slot.target_weight_unit ?? 'lb',
+        slot.target_duration_s ?? null, slot.run_steps ?? null,
+      ]));
+    for (const session of active.results) {
+      if (session.kind === 'freestyle') continue;
+      // Modern sessions pin their workout, including additional date slots.
+      // A legacy unpinned runner cannot prove which library workout it mounted;
+      // protect all possible prescriptions on that exact date in that case.
+      const workouts = session.workout_id == null ? tree.workouts
+        : tree.workouts.filter(workout => workout.id === session.workout_id);
+      for (const workout of workouts) {
+        const swapped = { ...workout, exercises: workout.exercises.map(slot =>
+          applicableSessionSwap(session.exercise_swaps, slot, session.attempt)?.replacement ?? slot) };
+        if (signature(swapped, oldProgram, session.date) !== signature(swapped, program, session.date)) {
+          return { error: 'active_workout_targets_changed' };
+        }
+      }
+    }
+  }
+  return { guard: {
+    json: JSON.stringify(active.results.map(session => ({
+      id: session.id, date: session.date, slot: session.slot, attempt: session.attempt,
+      plan_id: session.plan_id, workout_id: session.workout_id, kind: session.kind,
+      exercise_swaps: session.exercise_swaps ?? null,
+    }))),
+    sql: `NOT EXISTS (SELECT 1 FROM sessions s
+      WHERE s.user_id=?2 AND s.status='in_progress' AND ${sessionReferencesPlanSQL('s', '?1')}
+        AND NOT EXISTS (SELECT 1 FROM json_each(?7) reviewed
+          WHERE s.id=json_extract(reviewed.value,'$.id')
+            AND s.date=json_extract(reviewed.value,'$.date')
+            AND s.slot=json_extract(reviewed.value,'$.slot')
+            AND s.attempt=json_extract(reviewed.value,'$.attempt')
+            AND s.plan_id IS json_extract(reviewed.value,'$.plan_id')
+            AND s.workout_id IS json_extract(reviewed.value,'$.workout_id')
+            AND s.kind IS json_extract(reviewed.value,'$.kind')
+            AND s.exercise_swaps IS json_extract(reviewed.value,'$.exercise_swaps')))`,
+  } };
+}
+
 /**
  * Shared optimistic-concurrency writer for the authored-intent fields in
  * plans.meta. Mirrors setPlanSchedule exactly. `mutate` edits the parsed meta
@@ -8535,8 +8595,12 @@ async function writePlanMeta(
     return { conflict: true, current_version: plan.version };
   }
   const meta = parsePlanMeta(plan.meta);
+  const oldProgram = JSON.stringify(meta.program ?? null);
   const err = mutate(meta);
   if (typeof err === 'string') return { error: err };
+  const protection = oldProgram === JSON.stringify(meta.program ?? null) ? null
+    : await activeProgramTargetsGuard(db, plan, meta.program);
+  if (protection && !('guard' in protection)) return protection;
   const ts = now();
   // Enforce optimistic concurrency at WRITE time, not just the pre-check: gate
   // the UPDATE on the version we read, so two concurrent meta writes off the
@@ -8544,7 +8608,7 @@ async function writePlanMeta(
   // the later one serialize a stale copy, silently dropping the other's
   // changes. No row updated → another writer won → 409 (caller refetches).
   const nonce = uuid();
-  const statements = preparePlanWriteStart(db, plan, attribution, ts, nonce);
+  const statements = preparePlanWriteStart(db, plan, attribution, ts, nonce, false, [], protection?.guard);
   statements.push(db.prepare(
     `UPDATE plans SET meta=?2,updated_at=?3
       WHERE id=?1 AND version=-?4 AND user_id=?5 AND plan_write_nonce=?6`,
@@ -8555,6 +8619,9 @@ async function writePlanMeta(
   const row = results[versionResultIndex]?.results[0];
   if ((results[0]?.meta.changes ?? 0) !== 1 || (results[2]?.meta.changes ?? 0) !== 1 || !row) {
     const cur = await getActivePlan(db, userId);
+    if (protection && cur?.id === plan.id && cur.version === plan.version) {
+      return { error: 'active_workout_targets_changed' };
+    }
     return { conflict: true, current_version: cur?.version ?? plan.version };
   }
   return { ok: true, version: row.version, meta };
@@ -8703,7 +8770,7 @@ function resolveWeekTargets(raw: unknown, slots: Map<string, ProgramSlotRow>, we
 
 export type SetProgramResult =
   | { conflict: true; current_version: number }
-  | { error: 'no_active_plan' | 'invalid_start' | 'invalid_weeks' | 'invalid_label' | 'invalid_name' }
+  | { error: 'no_active_plan' | 'invalid_start' | 'invalid_weeks' | 'invalid_label' | 'invalid_name' | 'active_workout_targets_changed' }
   | { error: 'unknown_day_ref'; ref: string; week: number }
   | { error: 'too_many_extras'; weekday: Weekday; max: number; week: number }
   | { error: 'invalid_weekday'; weekday: string; week: number }
@@ -8831,7 +8898,7 @@ export async function setProgram(
     else delete meta.program;
   }, attribution);
   return 'ok' in res ? { ok: true, version: res.version, program: res.meta.program ?? null }
-    : res as { conflict: true; current_version: number } | { error: 'no_active_plan' };
+    : res as { conflict: true; current_version: number } | { error: 'no_active_plan' | 'active_workout_targets_changed' };
 }
 
 /** "Train for an event" (docs/plans/progressive-plans P3): the event and
@@ -9001,7 +9068,8 @@ export async function buildEventBlock(
     if (race) next.race = race;
     next.program = program;
   }, save.attribution);
-  if (!('ok' in res)) return res as { conflict: true; current_version: number } | { error: 'no_active_plan' };
+  if (!('ok' in res)) return res as { conflict: true; current_version: number }
+    | { error: 'no_active_plan' | 'active_workout_targets_changed' };
   return { ok: true, preview, version: res.version, program: res.meta.program!, race: res.meta.race ?? null };
 }
 

@@ -1,6 +1,6 @@
 # Workout Library
 
-Slug: workout-library · Status: active · Updated: 2026-11-14 · Theme: gym-floor
+Slug: workout-library · Status: active · Updated: 2026-11-15 · Theme: gym-floor
 
 ## Goal
 
@@ -645,6 +645,37 @@ No second editor, no per-session template copies, no weeks table.
     conflict journeys passed. Largest-text evidence remains partial; release
     and physical-device acceptance are separate.
 
+- [ ] **P0.14 — Adapt grouped work during a solo session**
+  - Add an extra superset or circuit round from the active group or finish
+    review. Increase every member together; explain that the added round
+    includes every movement. Preserve original starting targets and the saved
+    workout. Shared/partner structural changes remain separate work.
+  - Edit the current countdown or the remaining round rests / transitions,
+    with those two group durations kept independent. Accept exact seconds,
+    including zero, with no change to reusable group rests.
+  - Persist under the existing account/session/attempt checkpoint authority.
+    Reject stale actions and invalidate group adjustments when membership,
+    order or the source prescription changes. Old checkpoints still decode.
+  - Verify queued-set and cold recovery, skipped members, completed groups,
+    additional-session isolation, failed persistence rollback and timer/partner
+    guards. Qualify native code and the actual runner controls before delivery.
+
+- [ ] **P0.15 — Preserve unfinished block setup and workout details**
+  - Retain web new-block name, start, week count and repetition, plus the
+    reviewed source week/version, across navigation and reload. A conflicting
+    new block is not permission to overwrite it.
+  - Retain workout name, tags and notes per account/plan/workout. Plan refresh
+    or a failed save keeps the proposed values; a stale version requires an
+    explicit current-versus-proposed review. Clear only the acknowledged draft
+    revision, preserving edits made while a request was in flight.
+  - Native block setup and tag editing protect dirty dismissal and preserve
+    proposed input through conflict. A newly arrived block must not silently
+    dismiss an unfinished setup sheet.
+  - Verify navigation/reload, conflict review, account isolation, cancel,
+    competing block creation and acknowledged saves with failed refresh.
+    Other forms (event/away dates, new group and run-step authoring) are not
+    covered by this bounded slice and must not be described as draft-safe.
+
 - [x] **P1 — Library metadata: tags and archive**
   - Reuse prescription-integrity's validated atomic writer contract for every
     new metadata mutation, including conflicts and audit. P0 presentation work
@@ -819,9 +850,20 @@ No second editor, no per-session template copies, no weeks table.
       (79) was uploaded on 2026-11-11 on the owner's written
       go-ahead. That build adds only iOS changes to the released backend.
 
+## Core lifting follow-through
+
+The November 15 owner direction activates the remaining ordinary lifting UX
+work. The original audit's numbered findings and the boundaries of earlier PRs
+are not a declaration that the whole experience is complete. Manual week-target
+editing belongs to [progressive plans P6](../progressive-plans/plan.md), and a
+reviewed lighter week belongs to [coach-free planning P2](../coach-free-planning/plan.md).
+
 ## Execution frontier
 
 - P0.2(b)
+- P0.7(b)
+- P0.14
+- P0.15
 
 ## Dependencies
 
@@ -838,6 +880,9 @@ P1 metadata and P2 save-as-workout reuse the completed validated atomic writer, 
 | P0.3(a) | coordinates_with | plan:member-activation-and-adherence#P0 | Both use first-workout entry and the shared exercise catalog. |
 | P0.5 | coordinates_with | plan:member-activation-and-adherence#P3 | Preview and upcoming-session entry share Today and workout detail routes. |
 | P0.8 | coordinates_with | plan:progressive-plans#P4 | Native guidance hands detailed week-target authoring to the existing web Block editor. |
+| P0.14 | coordinates_with | plan:progressive-plans#P6 | Active-session changes and future week targets must explain their different scopes and preserve the starting prescription. |
+| P0.15 | coordinates_with | plan:progressive-plans#P6 | Block setup, week editing and retained web drafts share the same versioned plan. |
+| P0.7(b) | gated_by | external:owner-lifting-release-and-device-acceptance | Repository and simulator evidence do not establish distribution or physical accessibility acceptance. |
 | P0.2(b) | gated_by | external:owner-live-workout-verification | Authenticated session-swap and workout behavior still need a connected client/device; the build-44 internal-release exception does not claim these checks passed. |
 | P1 | coordinates_with | plan:workouts-and-multi-session#P0 | Both touch `workouts` columns and serializers; whichever lands second rebases onto the other's migration. |
 | P3 | coordinates_with | plan:progressive-plans#P4 | Both change the coach's planning tools; a one-time copy takes its date's block-week targets. |
@@ -847,142 +892,45 @@ completed coaching context.
 
 ## Next step
 
-**Now (@owner):** Complete P0.2(b)'s connected-client/device acceptance when
-the matching client is available. P0.12 landed in PRs #466–#467 and P0.13
-group maintenance (L12) landed in PR #468.
-**Then (@agent):** The owner selected accurate shared exercise instructions
-(L18), tracked in [partner-training P0.1](../partner-training/plan.md).
-Shared ending and invitation recovery (L19–L20) remain later work.
-P0.7(b)'s release and physical acceptance remain open; new-block creation and
-other metadata forms remain outside the retained-draft scope. P0.13 adds
-retained drafts specifically for the group editor.
+**Now (@agent):** Qualify `codex/lifting-core-ux` in the public repository and
+hand its PR to the owner for merge. It implements P0.14 (extra grouped rounds
+and scoped rest changes) and P0.15 (unfinished block setup and workout details).
+These phases remain open until exact-head qualification and repository delivery.
+Coordinate
+with [progressive plans P6](../progressive-plans/plan.md) and
+[coach-free planning P2](../coach-free-planning/plan.md). These are the owner's
+selected core UX priorities, ahead of shared ending/invitation recovery.
 
-**Owner follow-up:** Try "Change for today only" on TestFlight 79: change
-today's workout, then check that the same workout next week is unchanged.
-P3 is released (server, web and build 79, 2026-11-11); anything the device
-check turns up becomes a new phase.
+P0.7(a) and P0.8–P0.13 are delivered in the source inherited by the public
+repository. Accurate shared exercise instructions are also delivered; their
+remaining physical trial belongs to [partner training](../partner-training/plan.md).
+Earlier exclusions for grouped rounds, new-block drafts and native week targets
+now have explicit phases; they are no longer an untracked “later” bucket.
 
-**Also (@owner):** Complete P0.2(b)'s authenticated live verification on the
-matching build-49 client and Worker. All planned repository slices are
-implemented and the preview-thumbnails PR is merged. The live-verification
-gate remains open and prevents closing this plan.
-P0.5(d) replaces photos with reviewed line drawings for 169 exercises in a
-later client build; build 50 still shows photos.
+**Next (@owner):** P0.2(b), P0.7(b) and the one-date P3 device check remain
+acceptance work on a matching, separately authorized release. Repository tests,
+synthetic screenshots and beta availability do not establish physical or
+VoiceOver acceptance. Historical live-verification exceptions permitted the
+recorded distributions; they neither claim those checks passed nor create a new
+release gate or release authorization. Reconcile the actual candidate with the
+[App Store plan](../app-store-submission/plan.md) and
+[multi-session rollout](../workouts-and-multi-session/plan.md).
 
-**Release evidence:** The owner authorized the latest backend and internal
-TestFlight on October 7. Build 49's receipt
-records source, production deployment at 100% traffic, and TestFlight
-1.0 (49) VALID / IN_BETA_TESTING in internal Testers for iPhone and iPad.
-Build 47 retains the
-earlier Focus runner release evidence.
-
-**Deferred owner verification:** Use TestFlight build 49 to test authenticated workout paths
-on a device, including slot edits/reordering, metadata, freestyle recovery/save
-and session swaps, plus the focused runner at ordinary and accessibility sizes.
-P1/P2 backend and internal client delivery were completed under the explicit
-build-44 verification exception; those live checks remain unperformed, not passed.
-P0.2(b) live verification and physical/VoiceOver acceptance remain open. Preview
-thumbnails P0.5(c) have simulator verification; the new internal beta does not
-establish those physical-device checks. Ordered multi-session work proceeds
-in the workouts-and-multi-session plan; wider onboarding and RPE semantics remain separate.
-
-**P1 repository evidence (September 19):** Migration 0053, atomic REST/MCP
-metadata writes, snapshot/rebuild preservation and archive assignment fences
-are implemented. The iOS library supports tag editing/filtering, Active and
-Archived views, confirmed archive and explicit restore; trip choices prioritize
-travel labels. Archived workouts remain available to history. Regression checks
-cover version conflicts, transaction rollback, archive/start races, legacy
-aliases, calendar parity, restoration after UUID rebuilds and saved runner
-invalidation. All three backend test shards passed; the local same-Worker
-rename/rollback compatibility rehearsal passed. The focused library UI journey
-covers tag filtering, cancel, archive and restore.
-
-**P1 production release (September 19):** Migration 0053 is applied after 0045,
-and the compatible canonical Worker is live alongside the P2 backend. Do not
-repeat those completed stages. The build 44 receipt
-records production and internal-client delivery evidence, with the approved
-live-verification deferral stated above. A pre-metadata Worker is unsafe to restore after
-metadata writes because its rebuild/snapshots omit the fields.
-
-**Earlier Focus client distribution:** TestFlight 1.0 (47)
-includes the Focus workflow and the earlier library/canonical-workout changes.
-Apple confirmed VALID / IN_BETA_TESTING and internal Testers assignment on
-October 3. The receipt records App Review build 40 as REJECTED, with MANUAL
-release; replacing it is a separate App Review action. It does not establish a public release.
-
-**Previous client distribution:** TestFlight 1.0 (43)
-contains the usability and accessibility fixes in PRs #209/#210 plus the shared
-exercise information and discovery in PRs #213/#214. Apple confirmed VALID processing and internal Testers
-assignment on September 18 Pacific. App Review still selects build 40. Device
-installation, physical acceptance and VoiceOver behavior are not established by
-beta availability.
-
-**Exercise-first release:** P0.3(b) shipped in the owner-authorized build 42
-release. The September 18 production readback and source ancestry confirm its
-compatible Worker and internal client distribution. No Worker, migration,
-runtime configuration or backend dependency differs between that release and
-that build-43 client slice, so that combined beta needed no production deployment.
-App Review changes remain separate.
-
-P0.3(a) implementation and local verification are complete. All 1,101 backend
-tests passed across the repository's three CI shards (78 files); the focused
-D1 creation suite covers nine cases. Four focused iOS unit tests and twelve
-distinct UI journeys passed, including unnamed multi-selection and onboarding
-through first-workout completion. Final picker/review screenshots were visually
-checked on iPhone 17 / iOS 26.2. Local independent review found no remaining
-actionable regressions. PR #198
-merged on 2026-09-13 after exact-head review and required CI.
-
-The combined local backend process timed out in a multi-case validation test
-and later in an unchanged swap test. The new independent validation cases were
-split without changing timeouts. The unchanged swap suite passed in isolation,
-and complete coverage passed using the existing CI shards with fresh runtimes;
-no checks or assertions were removed.
-
-**Release coordination:** P0.2(b)/(c) remains owned by the
-[App Store release record](../app-store-submission/plan.md#next-step). Its live
-Worker, Apple processing, signing and submission evidence must be reconciled
-there rather than inferred from repository completion here. The release task's
-build 40 handoff is separate from P0.3 and must not silently change source.
-P1 metadata repository delivery and P2 freestyle remain separate from that release.
-
-The navigation design was approved in a design task. PR #178
-passed final independent review and all required CI. The last documented internal
-navigation release is TestFlight 1.0 (38), released after the browsing and action fixes in
-PRs #182 and #183. Apple confirmed VALID processing and internal Testers
-membership. The compatible calendar-move Worker was deployed for the preceding
-build 37 release; build 38's backend
-source is unchanged and required no backend deployment. The current release
-record retains the signed-package evidence and remaining physical-device limits.
-
-**Client verification (@owner):** Legacy-route REST checks and the live workout
-canary remain explicitly owner-deferred, not passed. The existing exception
-permits the completed internal distribution; do not reintroduce those checks
-as a pending upload gate. Library P0 is merged and verified in
-PR #161. The Workouts surface
-includes schedule badges, separate Unschedule and Delete workout actions,
-and a today-or-future date picker using the shared
-assignment guard and attempt-CAS writer. The first build kept released outgoing
-request shapes and shipped during the rename's compatibility window.
-The compatibility Worker and migration 0045 are now released. The
-[canonical rollout status](../workouts-and-multi-session/plan.md#next-step) records
-the production evidence and the owner-approved deferral of live REST authoring,
-date-assignment and session-write checks to the client rollout. The later build-44
-internal distribution used the explicit live-verification deferral documented
-above; it did not establish passing canonical-route checks.
-Follow the staged rollout.
-
-Local/CI validation: PR #161 CI
-passed 404 iOS unit tests and 23 UI journeys; the full backend
-suite passed 897 tests, including both physical schemas and old/new wire
-contracts.
-Those tests verified that Unschedule retains the workout and dated session while clearing its recurring
-entries. The library-date assignment appears in Today and the coach's current
-workout response without changing the recurring plan. P1 now supplies tags/archive,
-and P2 supplies freestyle and Save as workout. Multiple sessions per date remain
-in the separate workouts-and-multi-session workstream.
+Release constraints remain: the compatible API must precede clients that send
+reviewed replacement targets; do not retry an older Worker's rejection with an
+unreviewed legacy swap. Metadata and freestyle migrations were previously
+released; do not repeat them or roll back to a pre-metadata writer that omits
+those fields. Retained historical PR references document source delivery, not
+the current production version. Nick merges; the standing local-review override
+applies to this work, with all required checks tied to the exact head.
 
 ## Notes / open questions
+
+- Exact-record handoff previously showed an intermittent “Couldn’t load this
+  workout record” failure during qualification. The final earlier run passed,
+  but the proposed concurrent-refresh explanation was not established. Keep
+  account/session/attempt/set checks fail-closed; reproduce and diagnose any
+  recurrence before claiming a fix.
 
 - The September 18 follow-up selects P0.5(a)/(b) as the first SensAI-inspired
   implementation candidates, followed by P0.5(c). The owner subsequently

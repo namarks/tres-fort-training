@@ -267,6 +267,7 @@ describe('small parsers', () => {
 
   it('turns refusals into sentences', () => {
     expect(describeWriteError({ error: 'day_in_progress' })).toMatch(/in progress in the app/);
+    expect(describeWriteError({ error: 'active_workout_targets_changed' })).toMatch(/Other weeks remain editable.*unfinished changes are kept/);
     expect(describeWriteError({ error: 'invalid_fields', fields: ['target_reps'] })).toBe('The plan didn’t accept: target_reps.');
     expect(describeWriteError(null)).toBe('That change didn’t save. Please try again.');
   });

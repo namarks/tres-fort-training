@@ -1,6 +1,6 @@
 # Partner Training on One iPad
 
-Slug: partner-training · Status: active · Updated: 2026-11-14 · Theme: gym-floor
+Slug: partner-training · Status: active · Updated: 2026-11-15 · Theme: gym-floor
 
 ## Goal
 
@@ -99,7 +99,7 @@ The design and the choices behind each phase are in spec.md.
     If the iPad is lost, each phone continues as a normal solo workout.
   - Keep the iPad free of partner data afterwards; disable test recording during
     a dual workout.
-- [ ] **P0.1 — Accurate shared exercise instructions**
+- [x] **P0.1 — Accurate shared exercise instructions**
   - The owner selected lifting audit L18 on 2026-11-14. Bring the partner's
     weight review, both phone runners and iPad lanes into parity with the solo
     runner's timed, unilateral, per-hand, bodyweight and assistance semantics.
@@ -124,6 +124,14 @@ The design and the choices behind each phase are in spec.md.
     lanes, including large-text portrait labels. Qualification evidence is
     retained with the implementation PR; it does not establish nearby-device
     discovery, synchronization or physical acceptance.
+- [ ] **P0.2 — Shared ending and invitation recovery**
+  - Remaining lifting audit L19–L20: make stopping one lane, continuing alone,
+    closing a shared workout and recovering an expired invitation understandable
+    from each affected device. Preserve lane ownership and existing step quorum.
+  - This follows the selected ordinary lifting UX pass. Inspect current
+    behavior and define bounded acceptance before implementation; P0.1's
+    instruction work does not establish these flows.
+
 - [ ] **P1 — Count two people side by side**
   - Assign each person a lane (left or right of the iPad) before the start, with
     a swap control, and track each person by position between frames.
@@ -141,24 +149,26 @@ The design and the choices behind each phase are in spec.md.
 ## Execution frontier
 
 - P0
-- P0.1
 
 ## Dependencies
 
 | Local phase | Relationship | Target | Reason |
 |---|---|---|---|
 | P0 | coordinates_with | plan:ipad-workout-station#P2 | The owner authorized the internal backend/client release on 2026-10-07. The single-member link trial and partner trial remain acceptance requirements. |
-| P0 | coordinates_with | plan:workouts-and-multi-session#P1 | One strength session per member per date limits a dual workout to members who have not trained yet that day, until ordered sessions per date ship. |
+| P0 | coordinates_with | plan:workouts-and-multi-session#P1 | Ordered sessions per date are implemented; shared start, ending and recovery must preserve the exact session slot and sibling workouts. |
 | P1 | blocked_by | plan:ipad-workout-station#P1 | Counting two people needs the counter chosen and measured on the mounted iPad first. |
 | P2 | blocked_by | plan:ipad-workout-station#P1 | Counting the person whose turn it is needs the same validated counter. |
 
 ## Next step
 
-**Now (@owner):** Review and merge P0.1 accurate shared exercise instructions
-on `codex/partner-exercise-instructions` after focused phone/iPad verification,
-independent local review and required CI/full branch checks pass. Keep P0's
-paired-device acceptance checks
-open; synthetic screens and model tests do not establish a physical trial.
+**Now (@owner):** Complete P0's paired-device acceptance on a matching,
+separately authorized client. P0.1 was delivered in the source inherited by
+the public repository (original PR #469); the phone/iPad instruction fixtures
+and full native qualification establish synthetic behavior, not a physical
+trial. No review/merge request for that historical branch remains.
+
+**Later (@agent):** P0.2 follows the selected
+[core lifting UX pass](../../initiatives/gym-floor-experience.md).
 
 Historical release evidence: build 49 from internal TestFlight and its
 matching deployed Worker established the original manual trial candidate.

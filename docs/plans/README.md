@@ -133,45 +133,31 @@ AI coaching.
   current set instantly, with Undo. Paired-device validation and measured
   accuracy come before relying on it beyond an opt-in trial.
 
+The selected [core lifting pass](../initiatives/gym-floor-experience.md) orders
+session flexibility, unfinished programming and manual week progression. Each
+linked plan owns its phase status and acceptance evidence.
+
+- [Workout library](workout-library/plan.md) — **active**; P0.14 adds grouped
+  rounds/rest changes during solo sessions; P0.15 protects new-block and
+  workout-details drafts. Existing creation, history/correction, saved-group
+  editing and one-time primary workouts are foundations. Live/device gates
+  remain separate from repository delivery.
 - [Plan over blocks and cycles](progressive-plans/plan.md) — **active**;
-  a member training for a date such as a marathon lays out a block of
-  weeks that each differ, or sets up a cycle that repeats (an A and B
-  week), while the repeating week stays the default. P0 stores the block
-  and makes the calendar follow it; targets that change by week, the Plan
-  tab, a run build-up tool and the web follow.
+  blocks, per-week targets, native scheduling, run builders and the web designer
+  exist. P6 brings manual week/future-target editing to the phone; P5 retains
+  release and device acceptance.
 - [Plan without an AI coach](coach-free-planning/plan.md) — **active**;
-  every plan change the coach can make, the member can make in the app.
-  P0's away dates (trips) in the Plan tab are in the repository and wait on a
-  Worker deploy; the race goal's REST and web editor are in review, and the
-  iOS editor, training phases, deloads and smaller coach-only edits follow.
-- [Partner training on one iPad](partner-training/plan.md) — **planned**;
-  two members start a workout together in front of one iPad and move through
-  it set by set, each on their own iPhone with their own weights and logging.
-  Side-by-side counting comes first, turn-taking later. Waits on the Station
-  link trial and owner activation.
+  P2 adds a reviewed lighter week using block targets, with explicit cycle
+  scope. Standalone native event editing, training phases and remaining
+  coach-only metadata edits follow.
+- [Partner training on one iPad](partner-training/plan.md) — **active**;
+  manual two-person training and accurate exercise instructions exist. The
+  physical trial remains open; shared ending/invitation recovery follows the
+  selected ordinary lifting pass. Camera counting stays separate.
 - [Member activation and adherence](member-activation-and-adherence/plan.md) —
-  **paused**; first-workout entry, starters, the upcoming-sessions week on
-  Today (which replaced the Calendar tab), opt-in workout reminders and the
-  Today widget are delivered. Actionable progress empty states remain a future
-  slice.
-- [Workout library](workout-library/plan.md) — **gated**; present
-  reusable workouts as the primary object, let a member drop one onto any
-  date, add tags and archive, and support a freestyle session that can be
-  saved as a workout. The weekly routine becomes one optional use of the
-  library. P0.5(a)/(b) implement unified exercise guidance/history and shared
-  search/filter behavior; both shipped with the recent usability fixes in
-  internal TestFlight 1.0 (43). P1 tags/archive and P2 freestyle/Save as workout
-  shipped under the build-44 live-verification deferral; build 47 delivered the
-  Focus runner. P0.5(c) adds static preview thumbnails with compact-phone and
-  accessibility verification; PR #244 is merged and the owner-authorized
-  build-49 release records its matching
-  Worker and internal beta. P0.5(d) replaces the photos with reviewed Workout Guide
-  line drawings for 169 exercises, for a client build after 50.
-  Authenticated live workout verification remains
-  separately gated; repository completion cannot establish that acceptance.
-  P3 adds one-time workouts: a change for one date copies that date's workout
-  instead of changing the reusable one. It is released (server, web and
-  TestFlight 79, 2026-11-11); the owner's device check remains.
+  **paused**; bounded onboarding, mixed-week setup, reminders and widget
+  implementation is delivered. P4 progress empty states needs activation;
+  date-only replacement of a scheduled extra remains a documented gap.
 - [Workouts and multi-session days](workouts-and-multi-session/plan.md) —
   **active**; the owner retired legacy-client support. P0(c) removed old wire
   contracts and physical-schema adaptation, preserving historical data. The

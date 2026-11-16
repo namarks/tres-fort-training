@@ -9,9 +9,17 @@ enum APIError: Error, LocalizedError {
     case httpWithRetryAfter(Int, String, TimeInterval)
     case decoding(String)
 
+    static let activeWorkoutTargetsMessage = "Finish or discard the in-progress workout before changing its week targets. Other weeks remain editable. Your unfinished changes are kept."
+
     var errorDescription: String? {
         switch self {
-        case let .http(code, body): return "HTTP \(code): \(body)"
+        case let .http(code, body):
+            if code == 400, let data = body.data(using: .utf8),
+               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               object["error"] as? String == "active_workout_targets_changed" {
+                return Self.activeWorkoutTargetsMessage
+            }
+            return "HTTP \(code): \(body)"
         case let .httpWithRetryAfter(code, body, retryAfter):
             return "HTTP \(code): \(body) (retry after \(retryAfter)s)"
         case let .decoding(msg): return "Decode failed: \(msg)"

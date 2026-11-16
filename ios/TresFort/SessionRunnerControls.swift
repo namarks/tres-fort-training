@@ -109,12 +109,27 @@ struct SessionAddSetSheet: View {
                         }
                         .accessibilityIdentifier("session.addSet.\(exercise.id)")
                     }
+                    ForEach(ExerciseGroupBlock.blocks(sync.exercises).filter(\.isGroup)) { group in
+                        if let first = group.members.first, let roundTarget = sync.sessionRoundTarget(for: first) {
+                            Button {
+                                guard roundTarget.session == target else { return }
+                                if sync.addSessionRound(expected: roundTarget) { dismiss(); onAdded?() }
+                            } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Label("Add a round · \(group.title)", systemImage: "plus.circle")
+                                    Text(group.members.map(\.exercise_name).joined(separator: " · "))
+                                        .font(.caption).foregroundStyle(Theme.muted)
+                                }.frame(minHeight: 44)
+                            }
+                            .accessibilityIdentifier("session.addRound.\(roundTarget.prescription.groupID)")
+                        }
+                    }
                 } footer: {
-                    Text("Add one set to this session, then enter what you do in the runner. Your saved workout stays unchanged. Extra sets are available for exercises outside a superset or circuit.")
+                    Text("Add a set or a whole group round to this session, then enter what you do in the runner. A round includes every group movement, including skipped ones. Your saved workout stays unchanged.")
                 }
                 if let error = sync.loadError { Text(error).foregroundStyle(Theme.danger) }
             }
-            .navigationTitle("Add a set")
+            .navigationTitle("Add sets or a round")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
         }
@@ -151,19 +166,19 @@ struct SessionRestEditor: View {
                     if target.allowsRemainingSets {
                         Picker("Apply to", selection: $remainingSets) {
                             Text("This rest only").tag(false)
-                            Text("Remaining sets of this exercise").tag(true)
+                            Text(target.remainingLabel).tag(true)
                         }
                         .accessibilityIdentifier("rest.duration.scope")
                     }
                 } header: {
-                    Text(target.exerciseName)
+                    Text(target.scopeTitle)
                 } footer: {
                     Text(remainingSets
-                        ? "Restart this rest from now and use this duration after the remaining sets of this exercise. Your saved workout stays unchanged."
+                        ? target.remainingExplanation
                         : "Restart this rest from now. Later rests and your saved workout stay unchanged.")
                 }
                 if !target.allowsRemainingSets {
-                    Text("Only this countdown can be changed here. Group transition and round rests are adjusted one countdown at a time.")
+                    Text("Only this countdown can be changed because its original exercise or group is no longer available.")
                         .font(.footnote).foregroundStyle(Theme.muted)
                 }
                 if value == nil { Text("Enter 0 to 3,600 seconds.").foregroundStyle(Theme.danger) }

@@ -11,7 +11,6 @@ import {
   isRun,
   moveDestination,
   newDraft,
-  parseTags,
   prescriptionFields,
   reorderedMembers,
   replacementDraft,
@@ -40,6 +39,7 @@ import { useEditorDraft } from './useEditorDraft';
 import { editorDraftStore } from './editorDrafts';
 import { groupDraftDocument, groupEditDirty, groupEditProblems, groupEditRequest, isGroupEditDraft, newGroupEdit, reviewGroupEdit, type GroupEditDraft } from './groupEditing';
 import { GroupMembershipEditor } from './GroupMembershipEditor';
+import { detailsDocument, isWorkoutDetailsDraft, newWorkoutDetailsDraft, workoutDetails, workoutDetailsRequest, type WorkoutDetails, type WorkoutDetailsDraft } from './programmingDrafts';
 
 /** Runs one plan write against the version on screen; true when it saved. */
 export type Write = (action: (at: Reviewed) => Promise<unknown>) => Promise<boolean>;
@@ -239,6 +239,10 @@ function WorkoutEditor(props: {
   const { accountId, planId, workout, version, write, busy, catalog, miles, onRemoved, onSchedule } = props;
   const retained = useEditorDraft<SlotEditDraft>({ accountId, planId, documentId: `workout:${workout.id}` }, isSlotEditDraft);
   const groupRetained = useEditorDraft<GroupEditDraft>({ accountId, planId, documentId: groupDraftDocument(workout.id) }, isGroupEditDraft);
+  const detailsRetained = useEditorDraft<WorkoutDetailsDraft>({ accountId, planId, documentId: detailsDocument(workout.id) }, isWorkoutDetailsDraft);
+  const detailsPending = detailsRetained.record?.value;
+  const detailsNeedsReview = !!detailsRetained.record && detailsRetained.record.version !== version;
+  const detailsIdentityMatches = !detailsPending || (detailsPending.workoutId === workout.id && detailsPending.archived === !!workout.archived_at);
   const groupPending = groupRetained.record?.value;
   const groupNeedsReview = !!groupRetained.record && groupRetained.record.version !== version;
   const groupProblems = groupPending ? groupEditProblems(groupPending, workout) : [];
@@ -255,16 +259,20 @@ function WorkoutEditor(props: {
   const archived = !!workout.archived_at;
   const tags = tagsOf(workout);
   const close = () => {
+    if (detailsRetained.record?.dirty && !window.confirm('Discard this unfinished workout-details edit?')) return;
     if (groupRetained.record?.dirty && !window.confirm('Discard this unfinished group edit?')) return;
     if (retained.record?.dirty && !window.confirm('Discard this unfinished target edit?')) return;
-    retained.clear(); groupRetained.clear(); setPanel(null);
+    retained.clear(); groupRetained.clear(); detailsRetained.clear(); setPanel(null);
   };
   const open = (next: Panel) => {
-    if (retained.unreadable || groupRetained.unreadable) return;
+    if (retained.unreadable || groupRetained.unreadable || detailsRetained.unreadable) return;
+    if (detailsRetained.record?.dirty && !window.confirm('Discard the current workout-details edit and open another action?')) return;
     if (groupRetained.record?.dirty && !window.confirm('Discard the current group edit and open another action?')) return;
     if (retained.record?.dirty && !window.confirm('Discard the current target edit and open another action?')) return;
-    retained.clear(); groupRetained.clear();
-    if (next.kind === 'group' && next.existing) {
+    retained.clear(); groupRetained.clear(); detailsRetained.clear();
+    if (next.kind === 'details') {
+      detailsRetained.save(newWorkoutDetailsDraft(workout), version, false); setPanel(null);
+    } else if (next.kind === 'group' && next.existing) {
       const draft = newGroupEdit(workout, next.groupId);
       if (draft) groupRetained.save(draft, version, false);
       setPanel(null);
@@ -284,9 +292,10 @@ function WorkoutEditor(props: {
     if (isChoosing) listRef.current?.querySelector<HTMLInputElement>('input[type=checkbox]')?.focus();
   }, [isChoosing]);
   const startChoosing = () => {
+    if (detailsRetained.record?.dirty && !window.confirm('Discard the current workout-details edit?')) return;
     if (groupRetained.record?.dirty && !window.confirm('Discard the current group edit?')) return;
     if (retained.record?.dirty && !window.confirm('Discard the current target edit?')) return;
-    retained.clear(); groupRetained.clear(); setPanel(null);
+    retained.clear(); groupRetained.clear(); detailsRetained.clear(); setPanel(null);
     setChoosing(new Set());
   };
   const toggle = (slotId: string, on: boolean) => setChoosing((current) => {
@@ -496,9 +505,32 @@ function WorkoutEditor(props: {
         </>}
       </section>}
 
-      {panel?.kind === 'details' && (
-        <DetailsForm workout={workout} busy={busy} onCancel={close} onSubmit={(fields) => run((at) => planWrites.updateWorkout(workout.id, fields, at))} />
-      )}
+      {detailsRetained.unreadable && <div className="panel" role="alert">
+        <p>This browser’s workout-details draft could not be read. No change has been sent.</p>
+        <button type="button" onClick={() => detailsRetained.clear()}>Discard unreadable workout-details draft</button>
+      </div>}
+      {detailsPending && <section aria-label="Retained workout-details draft">
+        <p className="muted">Your unfinished workout details are kept in this browser when you leave this page.</p>
+        {!detailsIdentityMatches && <p role="alert" className="problem">This workout’s archive status changed. Your draft is kept, but cannot be saved until the workout has the same archive status as when you opened it.</p>}
+        {detailsNeedsReview && detailsIdentityMatches && <div className="panel" role="alert">
+          <h3>Review your workout details</h3>
+          <p>Your plan changed. Compare the saved details with your draft before continuing.</p>
+          <div className="block-grid-wrap"><table><thead><tr><th>Setting</th><th>Current saved</th><th>Your draft</th></tr></thead>
+            <tbody>{(['name', 'tags', 'notes'] as const).map(field => <tr key={field}><th scope="row">{field === 'name' ? 'Name' : field === 'tags' ? 'Tags' : 'Notes'}</th><td>{workoutDetails(workout)[field] || 'None'}</td><td>{detailsPending.draft[field] || 'None'}</td></tr>)}</tbody></table></div>
+          <button type="button" className="ghost" disabled={busy} onClick={() => detailsRetained.save({ ...detailsPending, saved: workoutDetails(workout) }, version, JSON.stringify(detailsPending.draft) !== JSON.stringify(workoutDetails(workout)))}>Use draft with latest workout</button>
+        </div>}
+        <DetailsForm value={detailsPending.draft} busy={busy} blocked={detailsNeedsReview || !detailsIdentityMatches || !detailsRetained.record?.dirty} onCancel={close}
+          onChange={draft => detailsRetained.save({ ...detailsPending, draft }, detailsRetained.record!.version, JSON.stringify(draft) !== JSON.stringify(detailsPending.saved))}
+          onSubmit={async fields => {
+            const captured = detailsRetained.record;
+            if (!captured || captured.version !== version || !detailsIdentityMatches || !captured.dirty) return;
+            await write(async at => {
+              if (at.planId !== planId || at.accountId !== accountId || at.version !== captured.version) throw new Error('draft_version_changed');
+              await planWrites.updateWorkout(workout.id, fields, at);
+              detailsRetained.clear(captured);
+            });
+          }} />
+      </section>}
       {panel?.kind === 'archive' && (
         <Confirm busy={busy} action="Archive workout" onCancel={close}
           onConfirm={() => run((at) => planWrites.updateWorkout(workout.id, { archived_at: Date.now() }, at))}>
@@ -724,53 +756,35 @@ function GroupForm(props: {
 }
 
 function DetailsForm(props: {
-  workout: Workout;
+  value: WorkoutDetails;
+  onChange: (draft: WorkoutDetails) => void;
   busy: boolean;
+  blocked: boolean;
   onSubmit: (fields: Record<string, unknown>) => void;
   onCancel: () => void;
 }) {
-  const { workout, busy, onSubmit, onCancel } = props;
-  const [name, setName] = useState(workout.name);
-  const [tags, setTags] = useState(tagsOf(workout).join(', '));
-  const [notes, setNotes] = useState(workout.notes ?? '');
+  const { value, onChange, busy, blocked, onSubmit, onCancel } = props;
   const [error, setError] = useState<string | null>(null);
   const ids = { name: useId(), tags: useId(), notes: useId() };
-
   function submit(event: FormEvent) {
     event.preventDefault();
-    const trimmed = name.trim();
-    if (!trimmed) return setError('Give the workout a name.');
-    const parsed = parseTags(tags);
-    if (!parsed.ok) return setError(parsed.error);
-    const fields: Record<string, unknown> = {};
-    if (trimmed !== workout.name) fields.name = trimmed;
-    if (parsed.tags.join(',') !== tagsOf(workout).join(',')) fields.tags = parsed.tags;
-    const nextNotes = notes.trim() ? notes.trim() : null;
-    if (nextNotes !== (workout.notes ?? null)) fields.notes = nextNotes;
-    if (Object.keys(fields).length === 0) return onCancel();
-    onSubmit(fields);
+    if (blocked || busy) return;
+    const result = workoutDetailsRequest(value);
+    if ('error' in result) { setError(result.error); return; }
+    setError(null); onSubmit(result.fields);
   }
-
   return (
     <form className="panel" onSubmit={submit}>
-      <div className="field">
-        <label htmlFor={ids.name}>Name</label>
-        <input id={ids.name} value={name} onChange={(e) => setName(e.target.value)} maxLength={80} autoFocus />
-      </div>
-      <div className="field">
-        <label htmlFor={ids.tags}>Tags</label>
-        <input id={ids.tags} value={tags} onChange={(e) => setTags(e.target.value)} placeholder="Separate with commas, e.g. travel, upper" aria-describedby={`${ids.tags}-hint`} />
-        <small id={`${ids.tags}-hint`} className="muted">When you pick a workout for an away date in the app, ones tagged travel are listed first.</small>
-      </div>
-      <div className="field">
-        <label htmlFor={ids.notes}>Notes</label>
-        <textarea id={ids.notes} value={notes} onChange={(e) => setNotes(e.target.value)} rows={3} />
-      </div>
+      <div className="field"><label htmlFor={ids.name}>Name</label>
+        <input id={ids.name} value={value.name} onChange={e => onChange({ ...value, name: e.target.value })} maxLength={80} autoFocus /></div>
+      <div className="field"><label htmlFor={ids.tags}>Tags</label>
+        <input id={ids.tags} value={value.tags} onChange={e => onChange({ ...value, tags: e.target.value })} placeholder="Separate with commas, e.g. travel, upper" aria-describedby={`${ids.tags}-hint`} />
+        <small id={`${ids.tags}-hint`} className="muted">When you pick a workout for an away date in the app, ones tagged travel are listed first.</small></div>
+      <div className="field"><label htmlFor={ids.notes}>Notes</label>
+        <textarea id={ids.notes} value={value.notes} onChange={e => onChange({ ...value, notes: e.target.value })} rows={3} /></div>
       {error && <p role="alert" className="problem">{error}</p>}
-      <div className="form-actions">
-        <button type="submit" disabled={busy}>Save</button>
-        <button type="button" className="ghost" onClick={onCancel}>Cancel</button>
-      </div>
+      <div className="form-actions"><button type="submit" disabled={busy || blocked}>Save</button>
+        <button type="button" className="ghost" disabled={busy} onClick={onCancel}>Cancel</button></div>
     </form>
   );
 }

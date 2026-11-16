@@ -465,6 +465,7 @@ private struct UIFixtureServer {
     var failedEnsureRequest = false
     var returnedMoveConflict = false
     var returnedScheduleFailure = false
+    var returnedProgramConflict = false
     var scheduleAttempts = 0
     var signInAttempts = 0
     var stateAttempts = 0
@@ -1030,6 +1031,25 @@ private struct UIFixtureServer {
             plan = makePlan(name: body["name"] as? String ?? "My Training", workouts: false)
             failCreatedWorkoutRefresh = ensureFailure == "refresh"
             response = ["plan": ["id": "synthetic-plan", "name": plan!["name"]!, "version": 1], "created": true]
+        case ("PUT", "/api/plan/program") where scenario == .appStore:
+            let version = plan?["version"] as? Int ?? 1
+            if ProcessInfo.processInfo.environment["TRESFORT_UI_PROGRAM_CONFLICT"] == "1", !returnedProgramConflict {
+                returnedProgramConflict = true
+                plan?["version"] = version + 1
+                status = 409; response = ["conflict": true, "current_version": version + 1]; break
+            }
+            guard body["expected_version"] as? Int == version,
+                  var program = body["program"] as? [String: Any], program["weeks"] is [[String: Any]] else {
+                status = 409; response = ["conflict": true, "current_version": version]; break
+            }
+            var meta = (plan?["meta"] as? String)
+                .flatMap { $0.data(using: .utf8) }
+                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+            program["id"] = (meta["program"] as? [String: Any])?["id"] ?? "synthetic-block"
+            meta["program"] = program
+            plan?["meta"] = String(data: try JSONSerialization.data(withJSONObject: meta), encoding: .utf8)
+            plan?["version"] = version + 1
+            response = ["ok": true, "version": version + 1]
         case ("PUT", "/api/plan/schedule") where [.library, .appStore, .onboarding, .activationManual].contains(scenario):
             let currentVersion = plan?["version"] as? Int ?? 1
             scheduleAttempts += 1

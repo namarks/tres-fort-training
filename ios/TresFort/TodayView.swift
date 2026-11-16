@@ -1645,7 +1645,8 @@ private struct RunnerView: View {
                         .accessibilityIdentifier("runner.sessionAddition")
                 } else if sync.sessionAddedSetCount(for: ex) > 0 {
                     let extraSets = sync.sessionAddedSetCount(for: ex)
-                    Text("\(ex.target_sets - extraSets) planned + \(extraSets) extra \(extraSets == 1 ? "set" : "sets") for this workout")
+                    let unit = ex.group_id != nil ? (extraSets == 1 ? "round" : "rounds") : (extraSets == 1 ? "set" : "sets")
+                    Text("\(ex.target_sets - extraSets) planned + \(extraSets) extra \(unit) for this workout")
                         .font(.caption).foregroundStyle(Theme.muted)
                         .accessibilityIdentifier("runner.sessionAddition")
                 }
@@ -1745,6 +1746,10 @@ private struct RunnerView: View {
             Text((block.isWarmup ? "Warm-up · " : "") + "\(block.title) · Round \(min(sync.currentSetNumber, block.rounds)) of \(block.rounds)")
                 .font(.subheadline.weight(.semibold)).foregroundStyle(Theme.accent)
                 .accessibilityIdentifier("runner.group")
+            Text("\(sync.runnerGroupRestSeconds(for: current, kind: .round))s round rest · \(sync.runnerGroupRestSeconds(for: current, kind: .transition))s between exercises")
+                .font(.caption).foregroundStyle(Theme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("runner.group.restPrescription")
             ForEach(Array(block.members.enumerated()), id: \.element.id) { index, member in
                 let active = member.id == current.id
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -1790,7 +1795,7 @@ private struct RunnerView: View {
                         VStack(alignment: .leading, spacing: 12) {
                             if block.isGroup {
                                 Text(block.title).font(.headline).foregroundStyle(Theme.accent)
-                                Text("\(block.rounds) rounds · \(block.roundRest)s round rest · \(block.transitionRest)s between exercises")
+                                Text("\(block.rounds) rounds · \(sync.runnerGroupRestSeconds(for: block.members[0], kind: .round))s round rest · \(sync.runnerGroupRestSeconds(for: block.members[0], kind: .transition))s between exercises")
                                     .font(.caption).foregroundStyle(Theme.muted)
                             }
                             ForEach(block.members) { member in
@@ -1853,12 +1858,22 @@ private struct RunnerView: View {
             } else {
                 let setNumber = sync.sessionNextSetNumber(for: ex)
                 let sessionTarget = sync.terminalActionTarget
-                Button("Add a set for this workout", systemImage: "plus.circle") {
-                    guard let sessionTarget else { return }
-                    _ = sync.addSessionSet(expected: ex, expectedSetNumber: setNumber, expectedSession: sessionTarget)
+                if ex.group_id != nil {
+                    let roundTarget = sync.sessionRoundTarget(for: ex)
+                    Button("Add a round (all group movements)", systemImage: "plus.circle") {
+                        guard let roundTarget else { return }
+                        _ = sync.addSessionRound(expected: roundTarget)
+                    }
+                    .disabled(roundTarget == nil)
+                    .accessibilityIdentifier("runner.menu.addRound")
+                } else {
+                    Button("Add a set for this workout", systemImage: "plus.circle") {
+                        guard let sessionTarget else { return }
+                        _ = sync.addSessionSet(expected: ex, expectedSetNumber: setNumber, expectedSession: sessionTarget)
+                    }
+                    .disabled(sessionTarget == nil || !sync.canAddSessionSet(for: ex))
+                    .accessibilityIdentifier("runner.menu.addSet")
                 }
-                .disabled(sessionTarget == nil || !sync.canAddSessionSet(for: ex))
-                .accessibilityIdentifier("runner.menu.addSet")
                 if !ex.isTimed && !ex.isWarmup && ex.exercise_modality != "cardio" {
                     Button("Log a warm-up", systemImage: "figure.strengthtraining.traditional") {
                         guard let target = sessionTarget else { return }
@@ -1916,17 +1931,32 @@ private struct RunnerView: View {
             } else {
                 let setNumber = sync.sessionNextSetNumber(for: ex)
                 let sessionTarget = sync.terminalActionTarget
-                Button {
-                    guard let sessionTarget else { return }
-                    if sync.addSessionSet(expected: ex, expectedSetNumber: setNumber, expectedSession: sessionTarget) {
-                        showingOutline = false
+                if ex.group_id != nil {
+                    let roundTarget = sync.sessionRoundTarget(for: ex)
+                    Button {
+                        guard let roundTarget else { return }
+                        if sync.addSessionRound(expected: roundTarget) { showingOutline = false }
+                    } label: {
+                        Label("Add a round for this workout", systemImage: "plus.circle")
+                            .frame(minHeight: 44).contentShape(Rectangle())
                     }
-                } label: {
-                    Label("Add a set for this workout", systemImage: "plus.circle")
-                        .frame(minHeight: 44).contentShape(Rectangle())
+                    .disabled(roundTarget == nil)
+                    .accessibilityIdentifier("runner.outline.addRound")
+                    Text("Includes every group movement, including skipped ones. This session only.")
+                        .font(.caption).foregroundStyle(Theme.muted)
+                } else {
+                    Button {
+                        guard let sessionTarget else { return }
+                        if sync.addSessionSet(expected: ex, expectedSetNumber: setNumber, expectedSession: sessionTarget) {
+                            showingOutline = false
+                        }
+                    } label: {
+                        Label("Add a set for this workout", systemImage: "plus.circle")
+                            .frame(minHeight: 44).contentShape(Rectangle())
+                    }
+                    .disabled(sessionTarget == nil || !sync.canAddSessionSet(for: ex))
+                    .accessibilityIdentifier("runner.outline.addSet")
                 }
-                .disabled(sessionTarget == nil || !sync.canAddSessionSet(for: ex))
-                .accessibilityIdentifier("runner.outline.addSet")
                 if let target = sync.terminalActionTarget {
                     NavigationLink {
                         SessionExercisePicker(sync: sync, target: target, onAdded: { showingOutline = false })
@@ -1945,10 +1975,6 @@ private struct RunnerView: View {
                         }
                         .accessibilityIdentifier("runner.outline.logWarmup")
                     }
-                }
-                if ex.group_id != nil {
-                    Text("Extra sets are available outside supersets and circuits.")
-                        .font(.caption).foregroundStyle(Theme.muted)
                 }
                 if let target = sync.workoutSwapTarget {
                     NavigationLink {
@@ -2292,6 +2318,15 @@ private struct RunnerSetAction: View {
                     }
                     .font(.subheadline)
                     .accessibilityIdentifier("runner.addSet")
+                } else if let roundTarget = sync.sessionRoundTarget(for: ex) {
+                    Button {
+                        _ = sync.addSessionRound(expected: roundTarget)
+                    } label: {
+                        Text("Add a round (all group movements)")
+                            .frame(minHeight: 44).contentShape(Rectangle())
+                    }
+                    .font(.subheadline)
+                    .accessibilityIdentifier("runner.addRound")
                 }
             } else if ex.isTimed {
                 Button("START SET \(displayedSetNumber)") {
@@ -2586,11 +2621,11 @@ private struct FinishedView: View {
 
                 if !sync.isFreestyle && !finishPending, let target = sync.terminalActionTarget {
                     VStack(spacing: 8) {
-                        if sync.exercises.contains(where: { sync.canAddSessionSet(for: $0) }) {
+                        if sync.exercises.contains(where: { sync.canAddSessionSet(for: $0) || sync.sessionRoundTarget(for: $0) != nil }) {
                             Button {
                                 addSetTarget = SessionExerciseActionTarget(session: target)
                             } label: {
-                                Label("Add a set", systemImage: "plus.circle")
+                                Label("Add sets or a round", systemImage: "plus.circle")
                                     .frame(maxWidth: .infinity, minHeight: 44)
                                     .contentShape(Rectangle())
                             }
