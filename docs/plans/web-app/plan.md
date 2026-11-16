@@ -372,6 +372,22 @@ no deployment is authorized by this plan cleanup.
   add a "link another sign-in" screen. Sign in with Apple also works on
   Android through the same Services ID. Members who used Hide My Email cannot
   be matched by email, so linking happens while signed in.
+- People without an iPhone (owner reviewed 2026-11-16, decided to leave it
+  for now; no plan covers it). Today they can create an Apple Account on the
+  web, sign in here, plan and analyze, but the gateway refuses set logging,
+  session lifecycle, uploads and connections (intervals.icu, Garmin, WHOOP),
+  so training needs the iOS app or an AI coach, which the no-AI rule does
+  not accept. Options sized then, in the order recommended: (1) Google
+  sign-in with an identity table that lets one account hold several
+  sign-ins, about two to three PRs; `users.apple_sub` is `NOT NULL` today.
+  (2) Training on the web at phone size: log a workout, enter an activity,
+  upload a `.fit` file and connect sources from the web, about five to eight
+  PRs; this reverses the 2026-11-01 "web is not for training" scope and is
+  weaker offline than the app. (3) A native Android app (Kotlin, Health
+  Connect as the Apple Health equivalent) only on demand, starting with the
+  run recorder and activity import. The iOS app is roughly 74,000 lines of
+  Swift with no reusable code for Android, and Android would add a third
+  copy of the calendar and program parity rules.
 - Size estimate: P1 about three PRs, P2 five to seven (the largest), P3 two to
   three, P4 two. The Worker change is small because the REST API already
   covers planning, history and settings.
