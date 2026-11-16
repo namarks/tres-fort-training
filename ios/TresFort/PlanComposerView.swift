@@ -40,14 +40,25 @@ enum PlanComposer {
         /// The kinds that make something new, in the order their tiles show.
         static let new: [Kind] = [.run, .ride, .swim, .lift, .home, .sport]
 
-        /// The composer's tiles before any ranking: four, then three.
-        static let rows: [[Kind]] = layout(new)
-
-        /// The composer's tiles for kinds in a given order: the first four,
-        /// then the other two and Saved, which always comes last.
-        static func layout(_ order: [Kind]) -> [[Kind]] {
-            [Array(order.prefix(4)), Array(order.dropFirst(4)) + [.saved]]
+        /// The composer's one row of tiles: the kind it opened on first, then
+        /// the others in the given order, and Saved last unless it is the
+        /// one chosen. The row scrolls sideways, so every tile keeps one
+        /// size (app-design-pass P27).
+        static func strip(_ order: [Kind], selected: Kind) -> [Kind] {
+            let rest = (order + [.saved]).filter { $0 != selected }
+            var seen = Set<Kind>()
+            return ([selected] + rest).filter { seen.insert($0).inserted }
         }
+    }
+
+    /// A name no saved workout has yet: the name itself, else "Core
+    /// routine 2", "Core routine 3" and so on. A second routine from the
+    /// same starter needs no typing (app-design-pass P27).
+    static func availableName(_ base: String, in plan: PlanTree?) -> String {
+        guard PlannedActivity.existing(named: base, in: plan) != nil else { return base }
+        var number = 2
+        while PlannedActivity.existing(named: "\(base) \(number)", in: plan) != nil { number += 1 }
+        return "\(base) \(number)"
     }
 
     /// The kinds to make something new, the member's most frequent first
@@ -309,12 +320,16 @@ enum PlanComposer {
         case core, stretching, bodyweight, own
         var id: String { rawValue }
 
+        /// The chips' order: the member's own first, so a suggestion reads
+        /// as one choice among others (P27).
+        static let chipOrder: [HomeStart] = [.own, .core, .stretching, .bodyweight]
+
         var title: String {
             switch self {
             case .core: return "Core"
             case .stretching: return "Stretching"
             case .bodyweight: return "Bodyweight"
-            case .own: return "My own"
+            case .own: return "Your own"
             }
         }
 
@@ -343,6 +358,11 @@ enum PlanComposer {
         func exercises(in catalog: [ExerciseCatalog]) -> [ExerciseCatalog] {
             exerciseIDs.compactMap { id in catalog.first { $0.id == id } }
         }
+    }
+
+    /// A rest as it reads in a sentence: "2 min", "90 sec".
+    static func restPhrase(_ seconds: Int) -> String {
+        seconds >= 60 && seconds % 60 == 0 ? "\(seconds / 60) min" : "\(seconds) sec"
     }
 
     /// Up to one decimal without a trailing zero: "3", "3.5", "21.1".
@@ -386,15 +406,20 @@ struct PlanComposerView: View {
     @State private var creatingLift = false
     @State private var liftID: String?
     @State private var planning: Planning?
-    /// What a routine at home starts from.
-    @State private var homeStart = PlanComposer.HomeStart.core
     @State private var logOnlyConfirmed = false
     /// An optional time of day, set on every chosen day, with a reminder.
     @State private var timed = false
     @State private var timeOfDay = Date()
-    /// The tiles' order, the member's most frequent first, fixed while the
-    /// sheet is open so a sync doesn't move a tile under a finger.
+    /// The tiles' order: the kind it opened on first, then the member's most
+    /// frequent, fixed while the sheet is open so a sync doesn't move a tile
+    /// under a finger.
     @State private var order: [PlanComposer.Kind]
+    /// A starter routine saved straight from this screen, kept until it
+    /// lands so a retry sends the same request and can't make a second.
+    @State private var homeRequest: WorkoutPrescriptionRequest?
+    /// The routine at home as it stands on screen: a suggestion's exercises
+    /// or the member's own, in their order, with its sets and rests (P27).
+    @State private var home: HomeRoutineBuilder
     @FocusState private var nameFocused: Bool
 
     private let unit = RunDistanceUnit.preferred()
@@ -412,7 +437,8 @@ struct PlanComposerView: View {
         _distance = State(initialValue: amounts.defaultDistance)
         _minutes = State(initialValue: amounts.defaultMinutes)
         _timeOfDay = State(initialValue: Self.date(minutes: PlanComposer.defaultTimeOfDay(for: kind)))
-        _order = State(initialValue: PlanComposer.ranked(for: sync))
+        _order = State(initialValue: PlanComposer.Kind.strip(PlanComposer.ranked(for: sync), selected: kind))
+        _home = State(initialValue: HomeRoutineBuilder(catalog: sync.catalog))
         self.isRoot = isRoot
         self.onFinished = onFinished
     }
@@ -432,7 +458,7 @@ struct PlanComposerView: View {
     // MARK: - Form
 
     /// Once a request is out, what it creates is fixed until it lands.
-    private var locked: Bool { authority != nil || createdID != nil || liftID != nil }
+    private var locked: Bool { authority != nil || createdID != nil || liftID != nil || homeRequest != nil }
     private var busy: Bool { saving || sync.isRoutineMutationInFlight || sync.plan == nil }
 
     private var form: some View {
@@ -446,6 +472,9 @@ struct PlanComposerView: View {
                     .padding(.vertical, 4)
                     .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
             }
+            // When comes before what: the day and time are what the member
+            // came to set, so they sit above the fold (P27).
+            whenSection
             switch kind {
             case .run: runSections
             case .ride, .swim: enduranceSections
@@ -454,8 +483,14 @@ struct PlanComposerView: View {
             case .sport: sportSection
             case .saved: savedSection
             }
-            daysSection
-            timeSection
+            // Everything is saved under a name it gets on its own, so the
+            // optional name comes last.
+            switch kind {
+            case .run: nameSection(placeholder: autoRunName)
+            case .ride, .swim: nameSection(placeholder: autoEnduranceName)
+            case .home: nameSection(placeholder: homeAutoName)
+            case .lift, .sport, .saved: EmptyView()
+            }
         }
         .scrollContentBackground(.hidden)
         // The add button stays in view below the form: with seven tiles and
@@ -478,20 +513,12 @@ struct PlanComposerView: View {
         // The reviewed routine lands on its days after creation closes;
         // scheduling never races an exercise edit or recreates a saved ID.
         .sheet(isPresented: $creatingLift, onDismiss: scheduleCreatedLift) {
-            if kind == .home {
-                CreateWorkoutView(sync: sync, onCreated: { liftID = $0 },
-                                  initialName: homeName,
-                                  initialExercises: homeStart.exercises(in: sync.catalog),
-                                  equipmentFree: true,
-                                  initialCircuit: homeStart == .bodyweight,
-                                  completionTitle: PlanComposer.addTitle(days),
-                                  scheduleSummary: creationScheduleSummary)
-            } else {
-                CreateWorkoutView(sync: sync, onCreated: { liftID = $0 },
-                                  completionTitle: PlanComposer.addTitle(days),
-                                  scheduleSummary: creationScheduleSummary)
-            }
+            CreateWorkoutView(sync: sync, onCreated: { liftID = $0 },
+                              completionTitle: PlanComposer.addTitle(days),
+                              scheduleSummary: creationScheduleSummary)
         }
+        // A routine at home is built right in its list (P27).
+        .homeRoutineSheets(sync: sync, builder: $home)
         .onChange(of: kind) { _, newKind in
             logOnlyConfirmed = false
             // Each kind starts from its own usual amount.
@@ -537,17 +564,19 @@ struct PlanComposerView: View {
         .background(Theme.background)
     }
 
-    /// What to add: four tiles, then three, the member's most frequent
-    /// first and Saved last. Each tile has a fixed icon height so the
-    /// names line up.
+    /// What to add: one row of tiles of one size, the kind it opened on
+    /// first, then the member's most frequent, and Saved last. The row
+    /// scrolls sideways; the next tile peeks in at the edge. Each tile has
+    /// a fixed icon height so the names line up.
     private var kindPicker: some View {
-        VStack(spacing: 8) {
-            ForEach(Array(PlanComposer.Kind.layout(order).enumerated()), id: \.offset) { _, row in
-                HStack(spacing: 8) {
-                    ForEach(row) { option in kindTile(option) }
-                }
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(order) { option in kindTile(option) }
             }
+            .padding(.vertical, 2)
         }
+        .scrollClipDisabled()
+        .accessibilityIdentifier("composer.kinds")
     }
 
     private func kindTile(_ option: PlanComposer.Kind) -> some View {
@@ -564,7 +593,8 @@ struct PlanComposerView: View {
                     .lineLimit(1).minimumScaleFactor(0.75)
             }
             .padding(.horizontal, 4)
-            .frame(maxWidth: .infinity, minHeight: 68)
+            .frame(width: 84)
+            .frame(minHeight: 68)
             .background(selected ? Theme.accent.opacity(0.12) : Theme.surface,
                         in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -597,7 +627,6 @@ struct PlanComposerView: View {
         } header: {
             Text(measure == .steps ? "Plan it step by step" : measure == .distance ? "How far" : "How long")
         }
-        nameSection(placeholder: autoRunName)
     }
 
     /// A ride or a swim: how far or how long, then its name. It is kept as
@@ -618,7 +647,6 @@ struct PlanComposerView: View {
         } footer: {
             Text("On the day, Today shows it with a button to log it. A \(kind == .swim ? "swim" : "ride") synced from your watch, bike computer or Zwift counts too.")
         }
-        nameSection(placeholder: autoEnduranceName)
     }
 
     /// The distance or time stepper and its shortcuts, in the kind's units.
@@ -648,50 +676,21 @@ struct PlanComposerView: View {
         }
     }
 
-    /// A routine at home: core, stretching or a bodyweight circuit to start
-    /// from, or exercises of the member's own. It is saved with its
-    /// exercises, so Today starts it set by set, with holds timed.
-    @ViewBuilder private var homeSections: some View {
-        Section {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(PlanComposer.HomeStart.allCases) { start in
-                        let on = start == homeStart
-                        Button(start.title) { homeStart = start }
-                            .font(Theme.mono(13, .bold))
-                            .foregroundStyle(on ? Theme.onAccent : Theme.text)
-                            .padding(.horizontal, 12).frame(minHeight: 36)
-                            .background(on ? Theme.accent : Theme.surface2, in: Capsule())
-                            .buttonStyle(.plain)
-                            .accessibilityAddTraits(on ? [.isSelected] : [])
-                            .accessibilityIdentifier("composer.home.\(start.rawValue)")
-                    }
-                }
-                .padding(.vertical, 2)
-            }
-            .disabled(locked || saving)
-            let exercises = homeStart.exercises(in: sync.catalog)
-            if exercises.isEmpty {
-                Text("Pick exercises next: core, stretches, push-ups and squats, all with no equipment.")
-                    .font(Theme.mono(13)).foregroundStyle(Theme.muted)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
-                ForEach(exercises) { exercise in
-                    HStack {
-                        Text(exercise.name).font(Theme.mono(14, .bold)).foregroundStyle(Theme.text)
-                        Spacer()
-                        Text(ExerciseSearchPolicy.initialTargets(for: exercise))
-                            .font(Theme.mono(12)).foregroundStyle(Theme.muted)
-                    }
-                    .accessibilityElement(children: .combine)
-                }
-            }
-        } header: {
-            Text("Core, stretching, bodyweight")
-        } footer: {
-            Text("Review the exercises, sets or rounds, work times and rests before saving. Today guides each set with timers.")
+    /// A routine at home, built right in its list (P27): the member's own
+    /// from nothing, or a suggestion (core, stretching or a bodyweight
+    /// circuit) that is theirs to change. Drag to reorder, swipe to
+    /// remove, tap one for its own sets, reps or hold, and add more from
+    /// the no-equipment catalog. It is saved with its exercises, so Today
+    /// starts it set by set, with holds timed.
+    private var homeSections: some View {
+        HomeRoutineSections(builder: $home, catalog: sync.catalog, disabled: locked || saving) {
+            nameFocused = false
         }
-        nameSection(placeholder: homeStart.defaultName)
+    }
+
+    private func chooseHome(_ start: PlanComposer.HomeStart) {
+        nameFocused = false
+        home.choose(start, catalog: sync.catalog)
     }
 
     @ViewBuilder private var sportSection: some View {
@@ -705,7 +704,7 @@ struct PlanComposerView: View {
             ideas(PlannedActivity.suggestions)
             if let routine = suggestedHomeRoutine {
                 Button("Follow exercises with timers") {
-                    homeStart = routine
+                    chooseHome(routine)
                     typedName = ""
                     kind = .home
                 }
@@ -790,7 +789,10 @@ struct PlanComposerView: View {
             ?? "Repeats every week. Outlined days already have something; picking one swaps it."
     }
 
-    private var daysSection: some View {
+    /// When it happens: the weekdays and an optional time of day, right
+    /// under the tiles (P27). With a time the app reminds the member then
+    /// (P19); without, nothing changes.
+    private var whenSection: some View {
         Section {
             HStack(spacing: 6) {
                 ForEach(PlanSchedule.weekdayKeys, id: \.self) { key in
@@ -817,25 +819,7 @@ struct PlanComposerView: View {
             }
             .listRowBackground(Color.clear)
             .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
-            if daysHoldOther {
-                Toggle("Keep what's on those days", isOn: $alongside)
-                    .font(Theme.mono(14))
-                    .tint(Theme.accent)
-                    .disabled(saving)
-                    .accessibilityIdentifier("composer.alongside")
-            }
-        } header: {
-            Text("Which days")
-        } footer: {
-            Text(daysNote)
-        }
-    }
-
-    /// An optional time of day for the new item on each chosen day. With
-    /// one, the app reminds the member then (P19); without, nothing changes.
-    private var timeSection: some View {
-        Section {
-            Toggle("Set a time", isOn: $timed)
+            Toggle("At a set time", isOn: $timed)
                 .font(Theme.mono(14))
                 .tint(Theme.accent)
                 .disabled(saving)
@@ -847,14 +831,22 @@ struct PlanComposerView: View {
                     .accessibilityIdentifier("composer.time.picker")
                 ScheduleReminderPermissionView()
             }
+            if daysHoldOther {
+                Toggle("Keep what's on those days", isOn: $alongside)
+                    .font(Theme.mono(14))
+                    .tint(Theme.accent)
+                    .disabled(saving)
+                    .accessibilityIdentifier("composer.alongside")
+            }
         } header: {
-            Text("Time · optional")
+            Text("When")
         } footer: {
-            Text(timed ? "Shows on the plan and Today. Notification permission is separate."
-                       : "Give this workout its own time. You can also set one later from the day.")
+            Text(timed ? daysNote + " It shows on the plan and Today at that time." : daysNote)
         }
     }
 
+    /// The optional name, last: what's added is saved under a name of its
+    /// own anyway, and can be renamed later from Workouts (P27).
     private func nameSection(placeholder: String) -> some View {
         Section {
             TextField(placeholder, text: $typedName)
@@ -864,7 +856,9 @@ struct PlanComposerView: View {
                 .disabled(locked || saving)
                 .accessibilityIdentifier("composer.name")
         } header: {
-            Text("Name")
+            Text("Name · optional")
+        } footer: {
+            Text("Saved to your workouts, so you can add it again from Saved or rename it later.")
         }
     }
 
@@ -949,8 +943,12 @@ struct PlanComposerView: View {
         PlanComposer.enduranceName(kind, measure: measure, distance: distance, minutes: minutes, unit: unit)
     }
 
+    /// The name a routine at home gets when none is typed: its starter's,
+    /// numbered when a saved workout already has it ("Core routine 2").
+    private var homeAutoName: String { PlanComposer.availableName(home.start.defaultName, in: sync.plan) }
+
     /// The name a routine at home is saved under.
-    private var homeName: String { cleanTyped.isEmpty ? homeStart.defaultName : cleanTyped }
+    private var homeName: String { cleanTyped.isEmpty ? homeAutoName : cleanTyped }
 
     /// The name a new run, ride, swim or activity is saved under.
     private var newName: String {
@@ -966,7 +964,7 @@ struct PlanComposerView: View {
     /// A routine at home under a name another workout already has; it
     /// would read as that one on the plan and Today.
     private var homeNameTaken: Workout? {
-        guard kind == .home, liftID == nil else { return nil }
+        guard kind == .home, liftID == nil, homeRequest == nil else { return nil }
         return PlannedActivity.existing(named: homeName, in: sync.plan)
     }
 
@@ -1017,7 +1015,10 @@ struct PlanComposerView: View {
     private var canSave: Bool {
         guard !busy, !needsLibraryReview, !needsRunReview, !days.isEmpty else { return false }
         switch kind {
-        case .run, .home: return !nameTaken
+        case .run: return !nameTaken
+        case .home:
+            // A routine already saved only needs its days again.
+            return !nameTaken && (liftID != nil || homeRequest != nil || home.isReady)
         case .sport: return !newName.isEmpty && (suggestedHomeRoutine == nil || logOnlyConfirmed)
         case .ride, .swim: return !newName.isEmpty
         case .saved: return savedID != nil
@@ -1047,7 +1048,6 @@ struct PlanComposerView: View {
         if locked { return "Try again" }
         if days.isEmpty { return PlanComposer.addTitle(days) }
         if kind == .lift { return "Choose exercises" }
-        if kind == .home { return homeStart.exercises(in: sync.catalog).isEmpty ? "Choose exercises" : "Review exercises" }
         if kind == .run && measure == .steps { return "Add and plan steps" }
         return PlanComposer.addTitle(days)
     }
@@ -1056,9 +1056,14 @@ struct PlanComposerView: View {
         guard canSave else { return }
         nameFocused = false
         switch kind {
-        case .lift, .home:
-            // A lift or routine already made only needs its days again.
+        case .lift:
+            // A lift already made only needs its days again.
             if let liftID { scheduleLift(liftID) } else { creatingLift = true }
+        case .home:
+            // A routine already made only needs its days again; otherwise
+            // it is saved as the list shows it.
+            if let liftID { scheduleLift(liftID) }
+            else { saveHomeRoutine() }
         case .saved:
             guard let savedID else { return }
             saving = true
@@ -1177,6 +1182,35 @@ struct PlanComposerView: View {
         return Calendar.current.date(byAdding: .minute, value: minutes, to: today) ?? today
     }
 
+    /// Saves the routine as the list shows it, then puts it on its days. A
+    /// retry sends the very same request, so a reply lost after the save
+    /// can't make a second routine.
+    private func saveHomeRoutine() {
+        guard let plan = sync.plan else { return }
+        let request = homeRequest ?? home.routine.request(name: homeName, exercises: home.exercises,
+                                                          planID: plan.id, version: plan.version)
+        guard let request else { return }
+        homeRequest = request
+        saving = true
+        Task {
+            defer { saving = false }
+            switch await sync.saveWorkoutPrescription(request: request) {
+            case let .saved(receipt):
+                liftID = receipt.workout_id
+                homeRequest = nil
+                await scheduleSaved(receipt.workout_id)
+            case .reviewDraft:
+                // Rejected before saving: nothing was made, so a fresh
+                // request may go once the screen shows the current plan.
+                if hadUncertainAttempt { needsLibraryReview = true } else { homeRequest = nil }
+            case .needsReview:
+                needsLibraryReview = true
+            case .retrySameRequest:
+                hadUncertainAttempt = true
+            }
+        }
+    }
+
     private func scheduleCreatedLift() {
         guard let id = liftID else { return }
         scheduleLift(id)
@@ -1188,17 +1222,21 @@ struct PlanComposerView: View {
         saving = true
         Task {
             defer { saving = false }
-            // Creation can be acknowledged while its refresh fails. Recover
-            // the saved identity before deriving a new schedule write.
-            if sync.workout(id: id) == nil { await sync.load() }
-            guard sync.workout(id: id) != nil else {
-                sync.loadError = "Your workout is saved, but couldn't be loaded to schedule it. Try again."
-                return
-            }
-            if await schedule(id) {
-                liftID = nil
-                onFinished()
-            }
+            await scheduleSaved(id)
+        }
+    }
+
+    private func scheduleSaved(_ id: String) async {
+        // Creation can be acknowledged while its refresh fails. Recover
+        // the saved identity before deriving a new schedule write.
+        if sync.workout(id: id) == nil { await sync.load() }
+        guard sync.workout(id: id) != nil else {
+            sync.loadError = "Your workout is saved, but couldn't be loaded to schedule it. Try again."
+            return
+        }
+        if await schedule(id) {
+            liftID = nil
+            onFinished()
         }
     }
 
