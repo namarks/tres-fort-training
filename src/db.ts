@@ -8584,6 +8584,9 @@ type PlanMetaWrite =
  * Finishing a workout meanwhile is harmless and does not block the write. */
 async function activeProgramTargetsGuard(
   db: D1Database, plan: PlanRow, program: TrainingProgram | null | undefined,
+  /** Slots this same write gives new targets of their own (slot id → the
+   * slot as it will be saved), so the prescription compared is the final one. */
+  savedSlots?: ReadonlyMap<string, TargetSlot>,
 ): Promise<{ guard: { sql: string; json: string } }
   | { conflict: true; current_version: number }
   | { error: 'active_workout_targets_changed' }> {
@@ -8610,9 +8613,11 @@ async function activeProgramTargetsGuard(
       const workouts = session.workout_id == null ? tree.workouts
         : tree.workouts.filter(workout => workout.id === session.workout_id);
       for (const workout of workouts) {
-        const swapped = { ...workout, exercises: workout.exercises.map(slot =>
-          applicableSessionSwap(session.exercise_swaps, slot, session.attempt)?.replacement ?? slot) };
-        if (signature(swapped, oldProgram, session.date) !== signature(swapped, program, session.date)) {
+        // A swapped slot runs its replacement, whatever its own targets become.
+        const mounted = (final: boolean) => ({ ...workout, exercises: workout.exercises.map(slot =>
+          applicableSessionSwap(session.exercise_swaps, slot, session.attempt)?.replacement
+            ?? (final && savedSlots?.has(slot.id) ? { ...slot, ...savedSlots.get(slot.id)! } : slot)) });
+        if (signature(mounted(false), oldProgram, session.date) !== signature(mounted(true), program, session.date)) {
           return { error: 'active_workout_targets_changed' };
         }
       }
@@ -8653,6 +8658,8 @@ async function writePlanMeta(
   /** Plan-tree statements for the same version, each gated on the write's
    * claim (`version=-plan.version AND plan_write_nonce=nonce`). */
   alongside?: (claim: { plan: PlanRow; nonce: string; ts: number }) => D1PreparedStatement[],
+  /** Slots `alongside` saves new targets to, for the active-workout guard. */
+  savedSlots?: ReadonlyMap<string, TargetSlot>,
 ): Promise<PlanMetaWrite> {
   const plan = await getActivePlan(db, userId);
   if (!plan) return { error: 'no_active_plan' };
@@ -8663,8 +8670,8 @@ async function writePlanMeta(
   const oldProgram = JSON.stringify(meta.program ?? null);
   const err = mutate(meta);
   if (typeof err === 'string') return { error: err };
-  const protection = oldProgram === JSON.stringify(meta.program ?? null) ? null
-    : await activeProgramTargetsGuard(db, plan, meta.program);
+  const protection = oldProgram === JSON.stringify(meta.program ?? null) && !savedSlots?.size ? null
+    : await activeProgramTargetsGuard(db, plan, meta.program, savedSlots);
   if (protection && !('guard' in protection)) return protection;
   const ts = now();
   // Enforce optimistic concurrency at WRITE time, not just the pre-check: gate
@@ -8691,8 +8698,10 @@ async function writePlanMeta(
     }
     return { conflict: true, current_version: cur?.version ?? plan.version };
   }
-  // The meta as stored, which is what every client reads back.
-  return { ok: true, version: row.version, meta: parsePlanMeta(serialized) };
+  // The block as stored (a layered one is laid again on the way in), which is
+  // what every client reads back; the rest of the meta is as the write left it.
+  const program = parsePlanMeta(serialized).program;
+  return { ok: true, version: row.version, meta: { ...meta, program } };
 }
 
 /** A block as a client or the coach sends it (docs/plans/progressive-plans
@@ -9067,7 +9076,7 @@ export async function endProgramKeepingWeek(
           AND p.version=-?13 AND p.plan_write_nonce=?14)`,
   ).bind(slot.id, slot.target_sets, slot.target_reps, slot.target_reps_max, slot.target_rpe, slot.target_weight,
     slot.target_weight_unit ?? 'lb', slot.target_duration_s, slot.run_steps ?? null, ts,
-    plan.id, userId, plan.version, nonce)));
+    plan.id, userId, plan.version, nonce)), new Map(changed.map((slot) => [slot.id, slot])));
   return 'ok' in res ? { ok: true, version: res.version, program: null, schedule: res.meta.schedule }
     : res as { conflict: true; current_version: number } | { error: 'no_active_plan' | 'active_workout_targets_changed' };
 }

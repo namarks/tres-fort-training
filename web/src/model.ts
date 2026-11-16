@@ -108,6 +108,9 @@ export function formatScheduleTime(time: string, locale?: string): string {
     .format(new Date(Date.UTC(2000, 0, 1, hour, minute)));
 }
 
+/** Days `projectCalendar` covers in one call. */
+const PROJECTION_DAYS = 90;
+
 /** One projected cell per date in [from, to]; past dates without history have none. */
 export function projectRange(
   inputs: CalendarInputs,
@@ -115,7 +118,13 @@ export function projectRange(
   to: string,
   today: string,
 ): Map<string, CalendarCell> {
-  return new Map(projectCalendarWindow(inputs, from, to, today).map((cell) => [cell.date, cell]));
+  // The projection covers at most 90 days a call; the Plan page scrolls further.
+  const cells = new Map<string, CalendarCell>();
+  for (let start = from; start <= to; start = addDays(start, PROJECTION_DAYS)) {
+    const end = addDays(start, PROJECTION_DAYS - 1);
+    for (const cell of projectCalendarWindow(inputs, start, end < to ? end : to, today)) cells.set(cell.date, cell);
+  }
+  return cells;
 }
 
 /**

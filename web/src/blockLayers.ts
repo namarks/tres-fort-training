@@ -143,10 +143,13 @@ export function removingFromBlock<P extends ProgramBody>(program: P, workout: Pi
 }
 
 /** The repeating week without the block's own workouts, as `PUT
- * /api/plan/program` takes it beside the block; null when it holds none. */
+ * /api/plan/program` takes it beside the block; null when it holds none.
+ * Times are left out: the server keeps each saved one that its weekday,
+ * in the week or in a block week, still holds, so a block workout moved
+ * to another day never sends a time for a day it has left. */
 export function trimmedSchedule(
   schedule: WeeklySchedule, workoutIds: readonly string[] | undefined,
-): Pick<WeeklySchedule, 'week' | 'extras' | 'times'> | null {
+): Pick<WeeklySchedule, 'week' | 'extras'> | null {
   const blockIds = new Set(workoutIds ?? []);
   if (!WEEKDAYS.some((day) => dayEntries(schedule, day).some((id) => blockIds.has(id)))) return null;
   const week = {} as ScheduleWeek;
@@ -157,7 +160,7 @@ export function trimmedSchedule(
     const kept = (schedule.extras?.[day] ?? []).filter((id) => !blockIds.has(id));
     if (kept.length > 0) extras[day] = kept;
   }
-  return { week, extras, ...(schedule.times ? { times: schedule.times } : {}) };
+  return { week, extras };
 }
 
 /** What the member does every week beside the block: each workout the

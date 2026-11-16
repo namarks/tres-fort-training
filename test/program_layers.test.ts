@@ -289,6 +289,29 @@ describe('a block beside the repeating week over REST', () => {
     expect(wrong.body).toEqual({ error: 'time_not_on_day', weekday: 'wed', ref: f.ids.kb });
   });
 
+  it('drops a block workout’s time from a day it has left when the week is sent without times', async () => {
+    const { put } = await f.start();
+    const stored = (await f.read()).meta;
+    expect(stored.schedule.times?.tue).toEqual({ [f.ids.kb]: '06:30' });
+    // The block moves its workout to Wednesday and sends the week it sits beside, as the web does.
+    const moved = await f.call('PUT', 'plan/program', {
+      program: { name: 'Fast 3 mile', start: '2030-01-07', repeat: false, workout_ids: [f.ids.kb, f.ids.tempo],
+        weeks: [{ week: { wed: f.ids.kb, fri: f.ids.tempo } }, { week: { wed: f.ids.kb, fri: f.ids.tempo } }] },
+      schedule: { week: { mon: f.ids.soccer }, extras: { mon: [f.ids.core], tue: [f.ids.core], fri: [f.ids.core] } },
+      expected_version: put.body.version,
+    });
+    expect(moved.status).toBe(200);
+    expect(moved.body.schedule.times).toEqual({ mon: { [f.ids.soccer]: '19:00' }, fri: { [f.ids.tempo]: '06:30', [f.ids.core]: '21:00' } });
+    // Naming the time on the day it left is still refused.
+    const named = await f.call('PUT', 'plan/program', {
+      program: { name: 'Fast 3 mile', start: '2030-01-07', repeat: false, workout_ids: [f.ids.kb, f.ids.tempo],
+        weeks: [{ week: { thu: f.ids.kb, fri: f.ids.tempo } }] },
+      schedule: { week: { mon: f.ids.soccer }, extras: {}, times: { wed: { [f.ids.kb]: '06:30' } } },
+      expected_version: moved.body.version,
+    });
+    expect(named.body).toMatchObject({ error: 'schedule', schedule: { error: 'time_not_on_day', weekday: 'wed' } });
+  });
+
   it('ends the block keeping one week going, targets included', async () => {
     const { put } = await f.start();
     const bad = await f.call('DELETE', `plan/program?expected_version=${put.body.version}&keep_week=7`);
@@ -322,5 +345,36 @@ describe('a block beside the repeating week over REST', () => {
     expect(meta.program?.workout_ids).toEqual([f.ids.kb]);
     expect(dayEntries(meta.program!.weeks[0]!, 'fri')).toEqual([f.ids.core]);
     expect(meta.schedule.times?.fri).toEqual({ [f.ids.core]: '21:00' });
+  });
+
+  it('keeps a week while a workout is in progress only when what it asks for stays the same', async () => {
+    // Its own plan, so the workouts left in progress here reach no other test.
+    const g = await setup();
+    const { put } = await g.start();
+    const begin = async (date: string) => {
+      const session = (await g.call('POST', 'sessions', { date, workout_id: g.ids.kb })).body;
+      const started = await g.call('PATCH', `sessions/${session.id}?expected_attempt=${session.attempt}`, { status: 'in_progress' });
+      expect(started.status).toBe(200);
+      return { id: session.id as string, attempt: (started.body.attempt ?? session.attempt) as number };
+    };
+    const slot = () => env.DB.prepare('SELECT target_sets, target_reps FROM template_exercises WHERE id=?1')
+      .bind(g.slots['Kettlebell A']).first<{ target_sets: number; target_reps: number }>();
+    // In progress in week 2, which asks for 4 × 10. Keeping week 1 (3 × 9) would change it.
+    const inBlock = await begin('2030-01-15');
+    const other = await g.call('DELETE', `plan/program?expected_version=${put.body.version}&keep_week=0`);
+    expect(other.body).toEqual({ error: 'active_workout_targets_changed' });
+    // In progress before the block, on the workout's own 3 × 8. Keeping week 2 would save 4 × 10 to it.
+    const outside = await begin('2029-12-25');
+    const changing = await g.call('DELETE', `plan/program?expected_version=${put.body.version}&keep_week=1`);
+    expect(changing.body).toEqual({ error: 'active_workout_targets_changed' });
+    expect((await g.read()).version).toBe(put.body.version);
+    expect(await slot()).toEqual({ target_sets: 3, target_reps: 8 });
+    const done = await g.call('PATCH', `sessions/${outside.id}?expected_attempt=${outside.attempt}`, { status: 'completed' });
+    expect(done.body).toMatchObject({ status: 'completed' });
+    // Only the week-2 workout is in progress now, and keeping week 2 leaves it asking for the same 4 × 10.
+    const kept = await g.call('DELETE', `plan/program?expected_version=${put.body.version}&keep_week=1`);
+    expect(kept.body).toMatchObject({ ok: true, program: null });
+    expect(await slot()).toEqual({ target_sets: 4, target_reps: 10 });
+    expect(inBlock.id).toBeTruthy();
   });
 });

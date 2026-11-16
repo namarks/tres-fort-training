@@ -68,12 +68,13 @@ describe('a block beside the repeating week', () => {
     expect(block.weeks[0]).not.toBe(block.weeks[1]);
   });
 
-  it('takes the block’s workouts out of the repeating week and keeps the rest, with its times', () => {
+  it('takes the block’s workouts out of the repeating week and keeps the rest', () => {
     expect(trimmedSchedule(usual, ['lift', 'tempo'])).toEqual({
       week: { ...none, mon: 'soccer', wed: 'core', thu: 'core', sat: 'core', sun: 'core' },
       extras: { mon: ['core'], tue: ['core'], fri: ['core'] },
-      times: usual.times,
     });
+    // No times: the server keeps the saved ones still on their day.
+    expect(trimmedSchedule(usual, ['lift', 'tempo'])).not.toHaveProperty('times');
     expect(trimmedSchedule(usual, ['nothing-here'])).toBeNull();
     expect(trimmedSchedule(usual, undefined)).toBeNull();
   });
@@ -81,7 +82,7 @@ describe('a block beside the repeating week', () => {
   it('reads the stored whole days back as what the block owns, and lays the week over it again', () => {
     const own: ProgramBody = { start: '2026-11-16', repeat: false, workout_ids: ['lift', 'tempo'],
       weeks: [{ week: { ...none, tue: 'lift', fri: 'tempo' }, targets: { squat: { target_reps: 8 } } }] };
-    const trimmed = { ...usual, ...trimmedSchedule(usual, ['lift', 'tempo'])! };
+    const trimmed: WeeklySchedule = { ...usual, ...trimmedSchedule(usual, ['lift', 'tempo'])! };
     const stored = layerProgram({ ...own, id: 'b1' } as TrainingProgram, trimmed, trimmed);
     expect(stored.weeks[0]!.week).toEqual({ ...none, mon: 'soccer', tue: 'lift', wed: 'core', thu: 'core', fri: 'tempo', sat: 'core', sun: 'core' });
     expect(stored.weeks[0]!.extras).toEqual({ mon: ['core'], tue: ['core'], fri: ['core'] });

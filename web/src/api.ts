@@ -304,10 +304,10 @@ export const planWrites = {
    * `schedule` saves the repeating week in the same plan version, for a
    * block whose own workouts leave it. A block that never listed its own
    * workouts says so (null), or the server would keep a replaced block's. */
-  setProgram: (program: ProgramBody, at: Reviewed, schedule?: Pick<WeeklySchedule, 'week' | 'extras' | 'times'> | null) =>
+  setProgram: (program: ProgramBody, at: Reviewed, schedule?: Pick<WeeklySchedule, 'week' | 'extras'> | null) =>
     request('PUT', '/api/plan/program', {
       program: { ...program, workout_ids: program.workout_ids ?? null },
-      ...(schedule ? { schedule: { week: schedule.week, extras: schedule.extras ?? {}, times: schedule.times ?? {} } } : {}),
+      ...(schedule ? { schedule: { week: schedule.week, extras: schedule.extras ?? {} } } : {}),
       expected_version: at.version,
     }, at.accountId),
   /** Ends the block; only the repeating week is left. */

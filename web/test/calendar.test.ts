@@ -114,6 +114,17 @@ describe('calendar', () => {
     expect(cells.get('2026-11-06')).toMatchObject({ status: 'unavailable' }); // trip over a Friday
   });
 
+  it('projects every week of a long range, past the projection’s 90 days a call', () => {
+    const inputs = calendarInputs(state())!;
+    const cells = projectRange(inputs, '2026-09-14', '2027-01-03', '2026-11-16');
+    // Mondays hold w1 every week from today on, 91 days from the range's start and later too.
+    for (const monday of ['2026-11-16', '2026-12-07', '2026-12-14', '2026-12-28']) {
+      expect(cells.get(monday)).toMatchObject({ status: 'projected', workout_id: 'w1' });
+    }
+    expect(cells.has('2027-01-03')).toBe(true);
+    expect(cells.has('2027-01-04')).toBe(false);
+  });
+
   it('has no calendar without a plan', () => {
     expect(calendarInputs(state({ plan: null }))).toBeNull();
   });
