@@ -96,17 +96,35 @@ struct DayWorkoutsView: View {
     }
 }
 
+/// Today's Add another workout (app-design-pass P27): build a routine
+/// right now from your own exercises or a suggestion you can change, follow
+/// a freestyle workout, or start a saved one.
 struct AdditionalWorkoutPicker: View {
     @ObservedObject var sync: SyncModel
     @Environment(\.dismiss) private var dismiss
     @State private var freestyle = false
+    @State private var building: PlanComposer.HomeStart?
+    private let unit = RunDistanceUnit.preferred()
 
     var body: some View {
         NavigationStack {
             List {
                 Section {
-                    Button("Freestyle workout") { freestyle = true }
-                        .frame(minHeight: 44).accessibilityIdentifier("additional.freestyle")
+                    HomeStartChips(selected: nil, disabled: sync.isAddingWorkout) { building = $0 }
+                } header: {
+                    Text("Build one now")
+                } footer: {
+                    Text("Your own exercises, or a suggestion that's yours to change. It's saved to your workouts too.")
+                }
+                Section {
+                    Button { freestyle = true } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Freestyle workout").foregroundStyle(Theme.text)
+                            Text("Pick exercises as you go").font(.caption).foregroundStyle(Theme.muted)
+                        }
+                        .frame(minHeight: 44)
+                    }
+                    .accessibilityIdentifier("additional.freestyle")
                 }
                 Section("Saved workouts") {
                     ForEach((sync.plan?.libraryWorkouts ?? []).filter { !$0.exercises.isEmpty }) { workout in
@@ -116,10 +134,17 @@ struct AdditionalWorkoutPicker: View {
                                 if await sync.addAnotherWorkout(workout.id) { dismiss() }
                             }
                         } label: {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(workout.name).foregroundStyle(Theme.text)
-                                Text("\(workout.exercises.count) exercises").font(.caption).foregroundStyle(Theme.muted)
-                            }.frame(minHeight: 44)
+                            HStack(spacing: 12) {
+                                Image(systemName: PlanItemSummary.glyph(for: workout))
+                                    .foregroundStyle(Theme.muted).frame(width: 24)
+                                    .accessibilityHidden(true)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(workout.name).foregroundStyle(Theme.text)
+                                    Text(PlanItemSummary.detail(for: workout, unit: unit))
+                                        .font(.caption).foregroundStyle(Theme.muted).lineLimit(1)
+                                }
+                            }
+                            .frame(minHeight: 44)
                         }
                         .accessibilityIdentifier("additional.workout.\(workout.id)")
                     }
@@ -129,9 +154,146 @@ struct AdditionalWorkoutPicker: View {
             .disabled(sync.isAddingWorkout)
             .navigationTitle("Add another workout").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(sync.isAddingWorkout) } }
+            .navigationDestination(item: $building) { start in
+                TodayRoutineBuilderView(sync: sync, start: start) { dismiss() }
+            }
             .sheet(isPresented: $freestyle) {
                 FreestyleExercisePicker(sync: sync, starting: true, additional: true, onStarted: { dismiss() })
             }
         }.interactiveDismissDisabled(sync.isAddingWorkout)
+    }
+}
+
+/// A routine built and started right now from Today (P27): the same list as
+/// Add to your week, then Start. It is saved to the library first, so the
+/// new workout starts from a real saved workout and can be done again.
+struct TodayRoutineBuilderView: View {
+    @ObservedObject var sync: SyncModel
+    var onStarted: () -> Void
+    @State private var home: HomeRoutineBuilder
+    @State private var typedName = ""
+    /// The save in flight, kept until it lands so a retry sends the same
+    /// request and can't make a second routine.
+    @State private var request: WorkoutPrescriptionRequest?
+    /// Saved but not started yet: Start again only starts it.
+    @State private var savedID: String?
+    @State private var saving = false
+    @State private var hadUncertainAttempt = false
+    @State private var needsLibraryReview = false
+    @FocusState private var nameFocused: Bool
+
+    init(sync: SyncModel, start: PlanComposer.HomeStart, onStarted: @escaping () -> Void) {
+        _sync = ObservedObject(wrappedValue: sync)
+        _home = State(initialValue: HomeRoutineBuilder(start: start, catalog: sync.catalog))
+        self.onStarted = onStarted
+    }
+
+    private var locked: Bool { request != nil || savedID != nil }
+    private var busy: Bool { saving || sync.isAddingWorkout }
+    private var autoName: String { PlanComposer.availableName(home.start.defaultName, in: sync.plan) }
+    private var cleanTyped: String { typedName.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var name: String { cleanTyped.isEmpty ? autoName : cleanTyped }
+    private var takenBy: Workout? {
+        guard !locked else { return nil }
+        return PlannedActivity.existing(named: name, in: sync.plan)
+    }
+    private var canStart: Bool {
+        !busy && !needsLibraryReview && sync.canAddAnotherWorkout && takenBy == nil
+            && (locked || home.isReady)
+    }
+
+    var body: some View {
+        List {
+            HomeRoutineSections(builder: $home, catalog: sync.catalog, disabled: locked || busy) {
+                nameFocused = false
+            }
+            Section {
+                TextField(autoName, text: $typedName)
+                    .textInputAutocapitalization(.sentences)
+                    .submitLabel(.done)
+                    .focused($nameFocused)
+                    .disabled(locked || busy)
+                    .accessibilityIdentifier("additional.routine.name")
+            } header: {
+                Text("Name · optional")
+            } footer: {
+                Text("Saved to your workouts, so you can do it again from Saved or rename it later.")
+            }
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .navigationTitle("Build a workout").navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(busy)
+        .safeAreaInset(edge: .bottom, spacing: 0) { startBar }
+        .homeRoutineSheets(sync: sync, builder: $home)
+    }
+
+    private var startBar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let error = sync.loadError {
+                Text(error).font(.footnote).foregroundStyle(Theme.danger)
+                if needsLibraryReview {
+                    Text("The first try may have saved. Check Saved workouts before making it again.")
+                        .font(.footnote).foregroundStyle(Theme.muted)
+                }
+            }
+            if let taken = takenBy {
+                Text("You already have a workout named \(taken.name). Type another name.")
+                    .font(.footnote).foregroundStyle(Theme.danger)
+            }
+            Button(busy ? "Starting…" : "Start") { start() }
+                .buttonStyle(WorkoutPrimaryButtonStyle())
+                .disabled(!canStart)
+                .accessibilityIdentifier("additional.routine.start")
+        }
+        .padding(.horizontal, 20).padding(.vertical, 12)
+        .background(Theme.background)
+    }
+
+    private func start() {
+        nameFocused = false
+        if let savedID {
+            saving = true
+            Task {
+                defer { saving = false }
+                await begin(savedID)
+            }
+            return
+        }
+        guard let plan = sync.plan,
+              let pending = request ?? home.routine.request(name: name, exercises: home.exercises,
+                                                            planID: plan.id, version: plan.version)
+        else { return }
+        request = pending
+        saving = true
+        Task {
+            defer { saving = false }
+            switch await sync.saveWorkoutPrescription(request: pending) {
+            case let .saved(receipt):
+                savedID = receipt.workout_id
+                self.request = nil
+                await begin(receipt.workout_id)
+            case .reviewDraft:
+                // Rejected before saving: nothing was made, so a fresh
+                // request may go once the screen shows the current plan.
+                if hadUncertainAttempt { needsLibraryReview = true } else { self.request = nil }
+            case .needsReview:
+                needsLibraryReview = true
+            case .retrySameRequest:
+                hadUncertainAttempt = true
+            }
+        }
+    }
+
+    /// Starts the saved routine as today's next workout.
+    private func begin(_ id: String) async {
+        // Creation can be acknowledged while its refresh fails. Recover the
+        // saved identity before starting it.
+        if sync.workout(id: id) == nil { await sync.load() }
+        guard sync.workout(id: id) != nil else {
+            sync.loadError = "Your workout is saved, but couldn't be loaded to start it. Try again."
+            return
+        }
+        await RestCue.requestNotificationPermissionIfNeeded()
+        if await sync.addAnotherWorkout(id) { onStarted() }
     }
 }

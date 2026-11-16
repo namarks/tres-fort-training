@@ -628,9 +628,17 @@ The owner chose to keep importing all Health history. P26 addresses that.
     second routine. The review screen stays for lifts.
   - A second routine from the same starter is named "Core routine 2"
     instead of being refused until the member types a new name.
+  - Today's Add another workout, which offered only Freestyle and the
+    saved list, gets the same start: "Build one now" with the same chips
+    opens the same list, with Start instead of days. Start saves the
+    routine to the library first, then starts it as the day's next
+    workout, so it can be done again from Saved. Saved rows show what
+    each workout is ("6 × 400 m", "Swing, goblet squat, press +3")
+    instead of an exercise count.
   - No backend change and no migration. Unit tests cover the tile order,
     the numbered name, the chip order and an exercise's own sets, reps and
-    hold in the saved request and timer preview; the mixed-week journey
+    hold in the saved request and timer preview, and the shared routine
+    builder's suggestions, your own and a late catalog; the mixed-week journey
     sets the routine's timing from its list. The mock kit's Add to your week screens show
     the new layout. Needs the owner's look on a TestFlight build like P5.
 

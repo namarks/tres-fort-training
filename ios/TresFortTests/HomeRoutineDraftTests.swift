@@ -119,4 +119,50 @@ final class HomeRoutineDraftTests: XCTestCase {
         XCTAssertEqual(request.slots.map(\.rest_seconds), [60, 60])
         XCTAssertEqual(request.slots.map(\.group_rest_seconds), [60, 60])
     }
+
+    /// Add to your week and Today's Add another workout share one builder:
+    /// a suggestion is filled from the catalog, your own starts empty with
+    /// the catalog open, and a removed exercise drops its own targets.
+    func testTheRoutineBuilderStartsFromASuggestionOrYourOwn() {
+        let catalog = ["ex_plank", "ex_dead_bug", "ex_side_plank", "ex_bird_dog", "ex_hollow",
+                       "ex_pushup", "ex_bw_squat", "ex_bw_reverse_lunge", "ex_glute_bridge_march"]
+            .map { exercise($0) }
+        var builder = HomeRoutineBuilder(catalog: catalog)
+        XCTAssertEqual(builder.start, .core)
+        XCTAssertEqual(builder.exercises.map(\.id), PlanComposer.HomeStart.core.exerciseIDs)
+        XCTAssertTrue(builder.isReady)
+        XCTAssertFalse(builder.adding)
+        XCTAssertEqual(builder.timingSummary, "3 sets · 2 min rest")
+        XCTAssertEqual(builder.header, "Suggested core routine · yours to change")
+
+        builder.routine.overrides["ex_dead_bug"] = .init(sets: 2)
+        builder.remove(catalog[1])
+        XCTAssertNil(builder.routine.overrides["ex_dead_bug"])
+        XCTAssertFalse(builder.exercises.contains { $0.id == "ex_dead_bug" })
+        XCTAssertTrue(builder.touched)
+
+        builder.choose(.bodyweight, catalog: catalog)
+        XCTAssertTrue(builder.routine.circuit)
+        XCTAssertFalse(builder.touched)
+        XCTAssertEqual(builder.timingSummary, "3 rounds · circuit")
+
+        builder.choose(.own, catalog: catalog)
+        XCTAssertTrue(builder.exercises.isEmpty)
+        XCTAssertFalse(builder.isReady)
+        XCTAssertTrue(builder.adding)
+        XCTAssertEqual(builder.header, "Your routine")
+        builder.refill(catalog: catalog)
+        XCTAssertTrue(builder.exercises.isEmpty, "Your own never refills with a suggestion")
+
+        // A catalog that loads after the screen opens fills an untouched
+        // suggestion, never one the member emptied.
+        var late = HomeRoutineBuilder(start: .core, catalog: [])
+        XCTAssertTrue(late.exercises.isEmpty)
+        late.refill(catalog: catalog)
+        XCTAssertEqual(late.exercises.count, 5)
+        late.exercises.removeAll()
+        late.touched = true
+        late.refill(catalog: catalog)
+        XCTAssertTrue(late.exercises.isEmpty)
+    }
 }

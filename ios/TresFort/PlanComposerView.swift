@@ -406,8 +406,6 @@ struct PlanComposerView: View {
     @State private var creatingLift = false
     @State private var liftID: String?
     @State private var planning: Planning?
-    /// What a routine at home starts from.
-    @State private var homeStart = PlanComposer.HomeStart.core
     @State private var logOnlyConfirmed = false
     /// An optional time of day, set on every chosen day, with a reminder.
     @State private var timed = false
@@ -421,14 +419,7 @@ struct PlanComposerView: View {
     @State private var homeRequest: WorkoutPrescriptionRequest?
     /// The routine at home as it stands on screen: a suggestion's exercises
     /// or the member's own, in their order, with its sets and rests (P27).
-    @State private var homeExercises: [ExerciseCatalog]
-    @State private var routine = HomeRoutineDraft()
-    /// The member changed the list, so a catalog that loads late doesn't
-    /// put the suggestion back.
-    @State private var homeTouched = false
-    @State private var addingExercises = false
-    @State private var editingExercise: ExerciseCatalog?
-    @State private var editingTiming = false
+    @State private var home: HomeRoutineBuilder
     @FocusState private var nameFocused: Bool
 
     private let unit = RunDistanceUnit.preferred()
@@ -447,7 +438,7 @@ struct PlanComposerView: View {
         _minutes = State(initialValue: amounts.defaultMinutes)
         _timeOfDay = State(initialValue: Self.date(minutes: PlanComposer.defaultTimeOfDay(for: kind)))
         _order = State(initialValue: PlanComposer.Kind.strip(PlanComposer.ranked(for: sync), selected: kind))
-        _homeExercises = State(initialValue: PlanComposer.HomeStart.core.exercises(in: sync.catalog))
+        _home = State(initialValue: HomeRoutineBuilder(catalog: sync.catalog))
         self.isRoot = isRoot
         self.onFinished = onFinished
     }
@@ -527,26 +518,7 @@ struct PlanComposerView: View {
                               scheduleSummary: creationScheduleSummary)
         }
         // A routine at home is built right in its list (P27).
-        .sheet(isPresented: $addingExercises) {
-            HomeExercisePicker(sync: sync, exercises: $homeExercises) { homeTouched = true }
-        }
-        .sheet(item: $editingExercise) { exercise in
-            HomeExerciseTargetSheet(exercise: exercise, routine: $routine) {
-                homeExercises.removeAll { $0.id == exercise.id }
-                routine.overrides[exercise.id] = nil
-                homeTouched = true
-            }
-            .presentationDetents([.medium])
-        }
-        .sheet(isPresented: $editingTiming) {
-            HomeRoutineTimingSheet(routine: $routine, exercises: homeExercises)
-        }
-        .onChange(of: sync.catalog.count) { _, _ in
-            // The catalog can arrive after the sheet opens.
-            if homeExercises.isEmpty, homeStart != .own, !homeTouched {
-                homeExercises = homeStart.exercises(in: sync.catalog)
-            }
-        }
+        .homeRoutineSheets(sync: sync, builder: $home)
         .onChange(of: kind) { _, newKind in
             logOnlyConfirmed = false
             // Each kind starts from its own usual amount.
@@ -710,120 +682,15 @@ struct PlanComposerView: View {
     /// remove, tap one for its own sets, reps or hold, and add more from
     /// the no-equipment catalog. It is saved with its exercises, so Today
     /// starts it set by set, with holds timed.
-    @ViewBuilder private var homeSections: some View {
-        Section {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(PlanComposer.HomeStart.chipOrder) { start in
-                        let on = start == homeStart
-                        Button { chooseHome(start) } label: {
-                            HStack(spacing: 4) {
-                                if start == .own { Image(systemName: "plus").font(.system(size: 12, weight: .bold)) }
-                                Text(start.title)
-                            }
-                        }
-                        .font(Theme.mono(13, .bold))
-                        .foregroundStyle(on ? Theme.onAccent : start == .own ? Theme.accent : Theme.text)
-                        .padding(.horizontal, 12).frame(minHeight: 36)
-                        .background(on ? Theme.accent : Theme.surface2, in: Capsule())
-                        .buttonStyle(.plain)
-                        .accessibilityAddTraits(on ? [.isSelected] : [])
-                        .accessibilityIdentifier("composer.home.\(start.rawValue)")
-                    }
-                }
-                .padding(.vertical, 2)
-            }
-            .disabled(locked || saving)
-            ForEach(homeExercises) { exercise in
-                Button { editingExercise = exercise } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: "line.3.horizontal")
-                            .font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.dim)
-                            .accessibilityHidden(true)
-                        Text(exercise.name).font(Theme.mono(14, .bold)).foregroundStyle(Theme.text)
-                        Spacer()
-                        Text(routine.targetLabel(for: exercise))
-                            .font(Theme.mono(12)).foregroundStyle(Theme.muted)
-                    }
-                    .frame(minHeight: 36)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .disabled(locked || saving)
-                .accessibilityElement(children: .combine)
-                .accessibilityHint("Sets its own sets, reps or hold")
-                .accessibilityIdentifier("composer.home.exercise.\(exercise.id)")
-            }
-            .onMove { from, to in
-                homeExercises.move(fromOffsets: from, toOffset: to)
-                homeTouched = true
-            }
-            .onDelete { offsets in
-                for index in offsets { routine.overrides[homeExercises[index].id] = nil }
-                homeExercises.remove(atOffsets: offsets)
-                homeTouched = true
-            }
-            .moveDisabled(locked || saving)
-            .deleteDisabled(locked || saving)
-            Button {
-                nameFocused = false
-                addingExercises = true
-            } label: {
-                Label("Add exercise", systemImage: "plus").frame(minHeight: 44)
-            }
-            .foregroundStyle(Theme.accent)
-            .disabled(locked || saving)
-            .accessibilityIdentifier("composer.home.add")
-            if !homeExercises.isEmpty {
-                Button {
-                    nameFocused = false
-                    editingTiming = true
-                } label: {
-                    HStack {
-                        Label("Sets and rests", systemImage: "timer")
-                        Spacer()
-                        Text(timingSummary).font(Theme.mono(12)).foregroundStyle(Theme.muted)
-                        Image(systemName: "chevron.right").font(.footnote.weight(.semibold))
-                            .foregroundStyle(Theme.muted)
-                            .accessibilityHidden(true)
-                    }
-                    .frame(minHeight: 44)
-                    .contentShape(Rectangle())
-                }
-                .foregroundStyle(Theme.accent)
-                .disabled(locked || saving)
-                .accessibilityIdentifier("composer.home.timing")
-            }
-        } header: {
-            Text(homeStart == .own ? "Your routine" : "Suggested \(homeStart.title.lowercased()) routine · yours to change")
-        } footer: {
-            if homeExercises.isEmpty {
-                Text("Add the exercises you want: core, stretches, push-ups and squats, all with no equipment.")
-            } else if let message = routine.validationMessage(for: homeExercises) {
-                Text(message).foregroundStyle(Theme.danger)
-            } else {
-                Text("Drag to reorder, swipe to remove, or tap one for its own sets, reps or hold. Today guides each set with timers.")
-            }
+    private var homeSections: some View {
+        HomeRoutineSections(builder: $home, catalog: sync.catalog, disabled: locked || saving) {
+            nameFocused = false
         }
     }
 
-    /// The shared timing in a few words: "3 sets · 2 min rest",
-    /// "3 rounds · circuit".
-    private var timingSummary: String {
-        routine.circuit
-            ? "\(routine.sets) rounds · circuit"
-            : "\(routine.sets) sets · \(PlanComposer.restPhrase(Int(routine.rest) ?? 0)) rest"
-    }
-
-    /// Starts the routine from a suggestion, or empty for the member's own,
-    /// opening the catalog so the first exercise is a tap away.
     private func chooseHome(_ start: PlanComposer.HomeStart) {
-        homeStart = start
-        homeExercises = start.exercises(in: sync.catalog)
-        routine = HomeRoutineDraft(circuit: start == .bodyweight)
-        homeTouched = false
         nameFocused = false
-        if start == .own { addingExercises = true }
+        home.choose(start, catalog: sync.catalog)
     }
 
     @ViewBuilder private var sportSection: some View {
@@ -1078,7 +945,7 @@ struct PlanComposerView: View {
 
     /// The name a routine at home gets when none is typed: its starter's,
     /// numbered when a saved workout already has it ("Core routine 2").
-    private var homeAutoName: String { PlanComposer.availableName(homeStart.defaultName, in: sync.plan) }
+    private var homeAutoName: String { PlanComposer.availableName(home.start.defaultName, in: sync.plan) }
 
     /// The name a routine at home is saved under.
     private var homeName: String { cleanTyped.isEmpty ? homeAutoName : cleanTyped }
@@ -1151,8 +1018,7 @@ struct PlanComposerView: View {
         case .run: return !nameTaken
         case .home:
             // A routine already saved only needs its days again.
-            return !nameTaken && (liftID != nil || homeRequest != nil
-                || (!homeExercises.isEmpty && routine.validationMessage(for: homeExercises) == nil))
+            return !nameTaken && (liftID != nil || homeRequest != nil || home.isReady)
         case .sport: return !newName.isEmpty && (suggestedHomeRoutine == nil || logOnlyConfirmed)
         case .ride, .swim: return !newName.isEmpty
         case .saved: return savedID != nil
@@ -1321,8 +1187,8 @@ struct PlanComposerView: View {
     /// can't make a second routine.
     private func saveHomeRoutine() {
         guard let plan = sync.plan else { return }
-        let request = homeRequest ?? routine.request(name: homeName, exercises: homeExercises,
-                                                     planID: plan.id, version: plan.version)
+        let request = homeRequest ?? home.routine.request(name: homeName, exercises: home.exercises,
+                                                          planID: plan.id, version: plan.version)
         guard let request else { return }
         homeRequest = request
         saving = true
