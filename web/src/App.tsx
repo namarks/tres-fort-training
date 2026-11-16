@@ -16,6 +16,7 @@ import {
 import { describeWriteError } from './editing';
 import { WorkoutsPage, type Catalog, type Write } from './WorkoutEditor';
 import { ActivityPage } from './ActivityPage';
+import { BlockPage } from './BlockPage';
 import { PlanPage } from './PlanPage';
 import { PlanTabs } from './PlanTabs';
 import { DiagnosticsPage } from './DiagnosticsPage';
@@ -113,7 +114,8 @@ export function App() {
 }
 
 type View =
-  | { kind: 'plan'; scheduleWorkoutId?: string | null; startBlock?: boolean }
+  | { kind: 'plan'; scheduleWorkoutId?: string | null }
+  | { kind: 'block' }
   | { kind: 'activity'; entryKey: string | null }
   | { kind: 'analysis'; page: AnalysisPageKey; section: MethodSection | null }
   | { kind: 'workouts'; workoutId: string | null }
@@ -122,7 +124,7 @@ type View =
 
 /** `#plan` (and the older `#calendar`) opens the Plan page,
  * `#plan/schedule/<id>` with a workout to add to the usual week, `#block`
- * with the form that starts a block, `#workouts` and `#workouts/<id>` the
+ * the training block (a tab of Plan), `#workouts` and `#workouts/<id>` the
  * workout editor (a tab of Plan), `#activity` and
  * `#activity/<entry key>` the Activity page, `#analysis` the Analysis
  * overview, `#analysis/event` its Event page and
@@ -134,7 +136,7 @@ export function viewFromHash(hash: string): View {
   if (schedule) return { kind: 'plan', scheduleWorkoutId: safeDecode(schedule[1]!) };
   if (hash === '#diagnostics') return { kind: 'diagnostics' };
   if (hash === '#members') return { kind: 'members' };
-  if (hash === '#block') return { kind: 'plan', startBlock: true };
+  if (hash === '#block') return { kind: 'block' };
   if (hash === '#analysis') return { kind: 'analysis', page: 'overview', section: null };
   if (hash === '#analysis/strength') return { kind: 'analysis', page: 'strength', section: null };
   if (hash === '#analysis/event') return { kind: 'analysis', page: 'event', section: null };
@@ -149,9 +151,9 @@ export function viewFromHash(hash: string): View {
 
 export function hashFor(view: View): string {
   if (view.kind === 'plan') {
-    if (view.scheduleWorkoutId) return `#plan/schedule/${encodeURIComponent(view.scheduleWorkoutId)}`;
-    return view.startBlock ? '#block' : '#plan';
+    return view.scheduleWorkoutId ? `#plan/schedule/${encodeURIComponent(view.scheduleWorkoutId)}` : '#plan';
   }
+  if (view.kind === 'block') return '#block';
   if (view.kind === 'diagnostics') return '#diagnostics';
   if (view.kind === 'members') return '#members';
   if (view.kind === 'analysis') {
@@ -184,7 +186,7 @@ function SignIn() {
         <p className="lede">Everything you train. One plan.</p>
         <p className="muted">Build your week with runs, lifts and timed routines. Schedule core separately from a run, with its own days and time.</p>
         <p className="muted">New here? Sign in to create your account. Already use Très Fort? Use the same Apple account to open your plan.</p>
-        {opensBlock && <p className="muted">The block editor will open after sign-in. Start a block if you do not have one yet. Choose a workout and exercise under Targets by week to change one week’s sets, reps, load or time.</p>}
+        {opensBlock && <p className="muted">Your training block will open after sign-in. You can start one there if you do not have one yet.</p>}
         {problem && SIGNIN_PROBLEMS[problem] && <p role="alert" className="problem">{SIGNIN_PROBLEMS[problem]}</p>}
         <a className="apple-button" href={signInHref}>
           <AppleLogo /> Sign in with Apple
@@ -232,7 +234,7 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
   // The exercise list names exercises for editing and on the Activity page,
   // so it loads with either view.
   useEffect(() => {
-    if (view.kind === 'plan' || (view.kind === 'analysis' && view.page !== 'strength') || view.kind === 'diagnostics' || view.kind === 'members' || catalog) return;
+    if (view.kind === 'plan' || view.kind === 'block' || (view.kind === 'analysis' && view.page !== 'strength') || view.kind === 'diagnostics' || view.kind === 'members' || catalog) return;
     setCatalog({ kind: 'loading' });
     fetchExercises()
       .then((exercises) => setCatalog({ kind: 'ready', exercises }))
@@ -292,7 +294,7 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
       <header className="topbar">
         <div className="brand"><img src="/assets/app-icon.png" alt="" width={32} height={32} /><span className="wordmark">Très Fort</span></div>
         <nav className="views" aria-label="Views">
-          <a href="#plan" aria-current={view.kind === 'plan' || view.kind === 'workouts' ? 'page' : undefined}>Plan</a>
+          <a href="#plan" aria-current={view.kind === 'plan' || view.kind === 'block' || view.kind === 'workouts' ? 'page' : undefined}>Plan</a>
           <a href="#activity" aria-current={view.kind === 'activity' ? 'page' : undefined}>Activity</a>
           <a href="#analysis" aria-current={view.kind === 'analysis' ? 'page' : undefined}>Analysis</a>
           {isOwner && <a href="#members" aria-current={view.kind === 'members' ? 'page' : undefined}>Members</a>}
@@ -342,6 +344,9 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
           catalog={catalog ?? { kind: 'loading' }}
           miles={prefersMiles()}
         /></>
+      ) : view.kind === 'block' ? (
+        <><PlanTabs current="block" /><BlockPage key={`${me.id}:${state.plan?.id ?? 'none'}`} state={state} write={write} busy={busy}
+          accountId={me.id} onEditWorkout={(workoutId) => go({ kind: 'workouts', workoutId })} /></>
       ) : view.kind === 'activity' ? (
         <ActivityPage key={view.entryKey ?? ''} state={state} catalog={catalog?.kind === 'ready' ? catalog.exercises : null} initialKey={view.entryKey}
           accountId={me.id} reload={reload} onSignedOut={onSignedOut} onFeedbackSaved={onFeedbackSaved} />
@@ -352,7 +357,6 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
         <><PlanTabs current="schedule" /><PlanPage key={`${me.id}:${state.plan?.id ?? 'none'}`} state={state} write={write} busy={busy} accountId={me.id}
           reload={reload} onSignedOut={onSignedOut}
           scheduleWorkoutId={view.kind === 'plan' ? view.scheduleWorkoutId : null}
-          startBlock={view.kind === 'plan' && view.startBlock}
           onScheduled={() => go({ kind: 'plan' })}
           onEditWorkout={(workoutId) => go({ kind: 'workouts', workoutId })} /></>
       )}

@@ -23,7 +23,7 @@ import {
 import { parseSwimDetail } from '../swimDetail';
 import { asEncodedRoute } from '../activityRoute';
 import { importFitActivity, deleteFitActivity, setActivityEffort } from '../db';
-import type { EventBuildResult, ExerciseReplacementTargets, HealthKitStreams, ProgramInput, SetProgramResult } from '../db';
+import type { EventBuildResult, ExerciseReplacementTargets, HealthKitStreams, ProgramInput, ScheduleInput, SetProgramResult } from '../db';
 import { isGroupId } from '../exerciseGroups';
 import { isPartnerStartInput } from '../partnerTraining';
 import { appleProviderConfig } from '../apple';
@@ -107,6 +107,7 @@ import {
   updateTrip,
   removeTrip,
   setProgram,
+  endProgramKeepingWeek,
   buildEventBlock,
   setRace,
   clearRace,
@@ -613,8 +614,12 @@ function tripWriteResponse(
 
 // A block of weeks (docs/plans/progressive-plans P0): replaced whole, or
 // cleared, through the same versioned service as the coach's set_program.
-const PROGRAM_KEYS = new Set(['program', 'expected_version']);
-const PROGRAM_BODY_KEYS = new Set(['name', 'start', 'repeat', 'weeks']);
+// `schedule` saves the repeating week in the same plan version (starting a
+// block moves its workouts out of it); `program.workout_ids` lists the
+// block's own workouts so the repeating week carries on beside it.
+const PROGRAM_KEYS = new Set(['program', 'expected_version', 'schedule']);
+const PROGRAM_BODY_KEYS = new Set(['name', 'start', 'repeat', 'weeks', 'workout_ids']);
+const PROGRAM_SCHEDULE_KEYS = new Set(['week', 'extras', 'times']);
 const PROGRAM_WEEK_KEYS = new Set(['label', 'week', 'extras', 'targets']);
 
 function programWriteResponse(c: Context<HonoEnv>, result: SetProgramResult) {
@@ -634,6 +639,11 @@ apiRoutes.put('/plan/program', async (c) => {
   else {
     invalid.push(...Object.keys(program).filter((key) => !PROGRAM_BODY_KEYS.has(key)).map((key) => `program.${key}`));
     if (program.repeat !== undefined && typeof program.repeat !== 'boolean') invalid.push('program.repeat');
+    if (program.workout_ids !== undefined && program.workout_ids !== null
+        && !(Array.isArray(program.workout_ids)
+          && program.workout_ids.every((ref) => typeof ref === 'string' && ref.length > 0))) {
+      invalid.push('program.workout_ids');
+    }
     if (Array.isArray(program.weeks)) {
       program.weeks.forEach((week, index) => {
         if (week && typeof week === 'object' && !Array.isArray(week)) {
@@ -676,9 +686,23 @@ apiRoutes.put('/plan/program', async (c) => {
       });
     }
   }
+  const schedule = b.schedule as Record<string, unknown> | undefined;
+  if (schedule !== undefined) {
+    if (!schedule || typeof schedule !== 'object' || Array.isArray(schedule)) invalid.push('schedule');
+    else {
+      invalid.push(...Object.keys(schedule).filter((key) => !PROGRAM_SCHEDULE_KEYS.has(key)).map((key) => `schedule.${key}`));
+      const week = schedule.week;
+      if (!week || typeof week !== 'object' || Array.isArray(week)
+          || Object.entries(week).some(([key, value]) => !(WEEKDAYS as readonly string[]).includes(key)
+            || (value !== null && typeof value !== 'string'))) invalid.push('schedule.week');
+      if (schedule.extras !== undefined && !isScheduleExtrasInput(schedule.extras)) invalid.push('schedule.extras');
+      if (schedule.times !== undefined && !isScheduleTimesInput(schedule.times)) invalid.push('schedule.times');
+    }
+  }
   if (invalid.length > 0) return c.json({ error: 'invalid_fields', fields: invalid }, 400);
   const result = await setProgram(c.env.DB, c.get('userId'), program as unknown as ProgramInput,
-    b.expected_version as number, { actor: c.get('appClient'), operation: 'set_program', args: b });
+    b.expected_version as number, { actor: c.get('appClient'), operation: 'set_program', args: b },
+    schedule as ScheduleInput | undefined);
   return programWriteResponse(c, result);
 });
 
@@ -686,6 +710,19 @@ apiRoutes.delete('/plan/program', async (c) => {
   const expected = Number(c.req.query('expected_version'));
   if (!isPositiveInteger(expected)) {
     return c.json({ error: 'invalid_fields', fields: ['expected_version'] }, 400);
+  }
+  // `keep_week` ends the block with one of its weeks carried on: its days
+  // become the repeating week and its targets the workouts' own.
+  const keep = c.req.query('keep_week');
+  if (keep !== undefined) {
+    const index = Number(keep);
+    if (!/^\d+$/.test(keep) || !Number.isSafeInteger(index)) {
+      return c.json({ error: 'invalid_fields', fields: ['keep_week'] }, 400);
+    }
+    return programWriteResponse(c, await endProgramKeepingWeek(c.env.DB, c.get('userId'), index, expected, {
+      actor: c.get('appClient'), operation: 'set_program',
+      args: { program: null, keep_week: index, expected_version: expected },
+    }));
   }
   const result = await setProgram(c.env.DB, c.get('userId'), null, expected, {
     actor: c.get('appClient'), operation: 'set_program', args: { program: null, expected_version: expected },

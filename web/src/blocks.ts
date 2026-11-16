@@ -4,7 +4,7 @@
 // for one PUT /api/plan/program at the version on screen. The run builders
 // stay in the app; nothing here needs AI.
 import { addDays, programWeekOn, weekdayOf } from '../../src/calendarProjection';
-import { RUN_EXERCISE_ID } from '../../src/runSteps';
+import { parseRunSteps, RUN_EXERCISE_ID, type RunPlanItem } from '../../src/runSteps';
 import {
   MAX_PROGRAM_LABEL,
   MAX_PROGRAM_NAME,
@@ -39,6 +39,8 @@ export function programBody(program: TrainingProgram | ProgramBody): ProgramBody
       ...(week.extras && Object.keys(week.extras).length > 0 ? { extras: week.extras } : {}),
       ...(week.targets && Object.keys(week.targets).length > 0 ? { targets: week.targets } : {}),
     })),
+    // The block's own workouts; present, the repeating week carries on beside it.
+    ...(Array.isArray(program.workout_ids) ? { workout_ids: [...program.workout_ids] } : {}),
   };
 }
 
@@ -102,44 +104,6 @@ export function newBlock(
 
 function withWeeks<P extends ProgramBody>(program: P, weeks: ProgramWeek[]): P {
   return { ...program, weeks };
-}
-
-/** A day's main workout (null = rest) in one week. An extra that becomes the
- * main workout leaves the extras rather than appear twice. */
-export function settingDay<P extends ProgramBody>(program: P, index: number, day: Weekday, workoutId: string | null): P {
-  const weeks = program.weeks.map((week, i) => {
-    if (i !== index) return week;
-    const extras = { ...(week.extras ?? {}) };
-    if (workoutId && extras[day]) {
-      const kept = extras[day]!.filter((id) => id !== workoutId);
-      if (kept.length > 0) extras[day] = kept;
-      else delete extras[day];
-    }
-    return { ...week, week: { ...week.week, [day]: workoutId }, extras };
-  });
-  return withWeeks(program, weeks);
-}
-
-/** One more workout beside a day's main one; null past four or a repeat. */
-export function addingExtra<P extends ProgramBody>(program: P, index: number, day: Weekday, workoutId: string): P | null {
-  const week = program.weeks[index];
-  if (!week) return null;
-  const current = week.extras?.[day] ?? [];
-  if (current.length >= MAX_SCHEDULE_EXTRAS || current.includes(workoutId) || week.week[day] === workoutId) return null;
-  const weeks = program.weeks.map((w, i) => i === index ? { ...w, extras: { ...(w.extras ?? {}), [day]: [...current, workoutId] } } : w);
-  return withWeeks(program, weeks);
-}
-
-export function removingExtra<P extends ProgramBody>(program: P, index: number, day: Weekday, workoutId: string): P {
-  const weeks = program.weeks.map((w, i) => {
-    if (i !== index) return w;
-    const extras = { ...(w.extras ?? {}) };
-    const kept = (extras[day] ?? []).filter((id) => id !== workoutId);
-    if (kept.length > 0) extras[day] = kept;
-    else delete extras[day];
-    return { ...w, extras };
-  });
-  return withWeeks(program, weeks);
 }
 
 export function relabeling<P extends ProgramBody>(program: P, index: number, label: string): P {
@@ -269,6 +233,24 @@ export function weekChanges(program: ProgramBody, index: number, slot: Slot, fie
 function groupOf(slot: Slot, workout: Workout): Slot[] {
   if (!slot.group_id) return [slot];
   return (workout.exercises as Slot[]).filter((s) => s.group_id === slot.group_id);
+}
+
+/** A week's own steps for a planned run, or back to the workout's own
+ * (`null`, or the same steps). Canonical text, as the slot keeps it. */
+export function settingRunSteps<P extends ProgramBody>(program: P, index: number, slot: Slot, steps: RunPlanItem[] | null): P {
+  const week = program.weeks[index];
+  if (!week) return program;
+  const targets: Record<string, SlotTargets> = structuredClone(week.targets ?? {});
+  const entry: SlotTargets = { ...(targets[slot.id] ?? {}) };
+  const own = slot.run_steps ? parseRunSteps(slot.run_steps) : null;
+  if (steps === null || (own?.ok && JSON.stringify(own.items) === JSON.stringify(steps))) delete entry.run_steps;
+  else entry.run_steps = JSON.stringify(steps);
+  if (Object.keys(entry).length > 0) targets[slot.id] = entry;
+  else delete targets[slot.id];
+  const next = { ...week };
+  if (Object.keys(targets).length > 0) next.targets = targets;
+  else delete next.targets;
+  return { ...program, weeks: program.weeks.map((other, at) => (at === index ? next : other)) };
 }
 
 /** Week `index` with one field of a slot set (null = back to the slot's own).

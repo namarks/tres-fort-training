@@ -17,8 +17,9 @@ export async function manualProgressionJourney({ page, origin, apiCall, width = 
     weeks: [{ week: { mon: created.id, wed: created.id } }, { week: { mon: created.id }, targets: { [slot.id]: { target_weight: 120 } } }] }, expected_version: state.plan.version });
   state = await apiCall('GET', '/api/state');
   const beforeProgram = JSON.parse(state.plan.meta).program;
-  await page.goto(`${origin}/#plan`);
-  const firstWeek = page.getByRole('rowheader').filter({ has: page.getByText('Week 1', { exact: true }) }).first();
+  // The block is shaped in its own tab; each week's tools are in its column.
+  await page.goto(`${origin}/#block`);
+  const firstWeek = page.getByRole('columnheader').filter({ hasText: /^Week 1\b/ }).first();
   await firstWeek.locator('summary').click();
   await firstWeek.getByRole('button', { name: 'Make week lighter', exact: true }).click();
   const preview = page.getByRole('region', { name: 'Make week lighter', exact: true });

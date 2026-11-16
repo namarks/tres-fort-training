@@ -228,18 +228,50 @@ partner training are not web features.
     its own is marked "This date only", a chip keeps its time on its own
     line, and the Workouts tab names the days each workout is on
     (`workoutWeekdays` in `web/src/scheduling.ts`).
-  - Open (owner, 2026-11-16: the repeating week and training blocks
+  - Then (owner, 2026-11-16: the repeating week and training blocks
     "don't interact well"; editing the week must not override a running
-    block, and standing weekly items such as a nightly core routine or a
-    weekly game sit apart from the block). Today a block's own week
-    replaces the top row for its dates, and the panel says so. Proposed
-    and with the owner, not built: the top row holds what repeats every
-    week and carries on beside a block; a block holds only its own
-    workouts and their targets by week; starting a block moves the chosen
-    workouts out of the top row into it; each date shows both, and
-    neither edit reaches the other. It needs a Worker change to how a
-    block week and the schedule combine, kept compatible with released
-    iPhone builds, and so an API release.
+    block, standing weekly items such as a nightly core routine or a
+    weekly game sit apart from the block, and block management belongs in
+    its own tab; the owner approved the mocked model): a block sits
+    beside the repeating week. Plan has three tabs, Schedule, Block
+    (`#block`, `web/src/BlockPage.tsx`) and Workouts.
+    - A block that lists its own workouts (`program.workout_ids`) is
+      layered: the top row holds what repeats every week and carries on
+      during the block, and the block holds only its own workouts and
+      their targets by week. Neither edit reaches the other. Stored block
+      weeks still hold the whole day (the block's entries first, then the
+      repeating week's), so `weekPatternOn`, the Swift mirror, the parity
+      fixture and released iPhone builds read them unchanged;
+      `layerProgram` (`src/programLayers.ts`) rewrites them whenever the
+      plan's meta is written. A block without `workout_ids` (older ones,
+      the event builder's, the iPhone app's) keeps its own weeks as before
+      and the Block tab offers to sort it.
+    - Starting a block: tick what it trains (each weekday's main workout
+      is ticked, what sits beside it is not) and add any other workout on
+      a day. `PUT /api/plan/program` takes an optional `schedule`, so the
+      block and the week its workouts leave are one plan version.
+    - The Block tab: the block's workouts by week, each with what its week
+      asks for; a workout's days for every week; week labels, copy down
+      and a lighter week; targets by week and ramps; one week of a planned
+      run's steps (kept in the block's draft, the workout's own steps
+      unchanged); what carries on every week beside it; start over when
+      it ends. End block keeps one week going every week (`DELETE
+      /api/plan/program?keep_week=`: its days go into the repeating week
+      and its targets are saved to its workouts) or just ends it.
+    - The Schedule tab shows a running block's name and week with a link
+      to it, marks block workouts on their dates with what the week asks
+      for, and a block date's panel changes that date only. The top row
+      reads "Fills every week below" with no block and "Carries on beside
+      your block" while a layered one runs.
+    - A reminder time may belong to a workout only a block week holds on
+      that weekday, and a schedule write that does not name it keeps it.
+    - Known limits: a day shows at most five entries, and the repeating
+      week's are the ones cut; a client that does not know the list
+      cannot take a repeating-week entry off one block week (the next
+      write puts it back); a block workout also placed in the repeating
+      week shows only outside the block; keeping a week is refused while
+      a workout it would change is in progress. It needs an API release
+      before the web one.
 - [ ] **P3 — Trends and progress**
   - Equal in importance to plan editing; it can run alongside P2 once P1 is
     in.
@@ -388,12 +420,15 @@ discovery, signed-out entry, primary date-only editing, Event analysis, Strength
 charts and exact workout correction. Earlier private PR numbers are historical
 source-delivery references, not pending public-repository work.
 
-Plan page simplification (owner, 2026-11-16): the tabs, the Training block
-button, the removed sections, the repeating week as the calendar's first
-row, away dates behind a button, the "This date only" mark and the days on
-the Workouts tab are built. The block side waits for the owner's answer on
-the model described in P2 (the block beside the every-week row); nothing
-for blocks is built before it.
+Plan page simplification (owner, 2026-11-16): the tabs, the removed
+sections, the repeating week as the calendar's first row, away dates behind
+a button, the "This date only" mark and the days on the Workouts tab are
+built, and so is the block beside the repeating week with its own Block tab
+(P2). Next for it: the owner merges, then a separately authorized API
+release followed by the web release, and a check on the phone that a block
+date shows the block's workout together with what repeats every week. The
+iPhone app still starts and edits blocks as whole weeks; teaching it the
+block's own list is later work there.
 
 **Later (@agent):** Date-only replacement of scheduled extras still needs a
 shared replacement/lineage contract, as described in member activation P7.

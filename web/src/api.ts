@@ -300,12 +300,23 @@ export const planWrites = {
     request('PUT', '/api/plan/race', { race, expected_version: at.version }, at.accountId),
   clearEvent: (at: Reviewed) =>
     request('DELETE', `/api/plan/race?expected_version=${at.version}`, undefined, at.accountId),
-  /** The whole block of weeks; weeks, days and targets left out are gone. */
-  setProgram: (program: ProgramBody, at: Reviewed) =>
-    request('PUT', '/api/plan/program', { program, expected_version: at.version }, at.accountId),
-  /** Ends the block; the repeating week takes over again. */
+  /** The whole block of weeks; weeks, days and targets left out are gone.
+   * `schedule` saves the repeating week in the same plan version, for a
+   * block whose own workouts leave it. A block that never listed its own
+   * workouts says so (null), or the server would keep a replaced block's. */
+  setProgram: (program: ProgramBody, at: Reviewed, schedule?: Pick<WeeklySchedule, 'week' | 'extras'> | null) =>
+    request('PUT', '/api/plan/program', {
+      program: { ...program, workout_ids: program.workout_ids ?? null },
+      ...(schedule ? { schedule: { week: schedule.week, extras: schedule.extras ?? {} } } : {}),
+      expected_version: at.version,
+    }, at.accountId),
+  /** Ends the block; only the repeating week is left. */
   clearProgram: (at: Reviewed) =>
     request('DELETE', `/api/plan/program?expected_version=${at.version}`, undefined, at.accountId),
+  /** Ends the block with one of its weeks carried on: its days become the
+   * repeating week and its targets the workouts' own. */
+  endProgramKeeping: (weekIndex: number, at: Reviewed) =>
+    request('DELETE', `/api/plan/program?expected_version=${at.version}&keep_week=${weekIndex}`, undefined, at.accountId),
 };
 
 /**

@@ -21,16 +21,38 @@ describe('new block and workout metadata drafts', () => {
     expect(store.read({ ...scope, accountId: 'a2' }, isNewBlockDraft)).toBeNull();
     expect(store.read({ ...scope, planId: 'p2' }, isNewBlockDraft)).toBeNull();
     expect(store.read({ ...scope, documentId: 'block' }, isNewBlockDraft)).toBeNull();
+    // The block is built from the week reviewed when the draft began, and
+    // holds only the workouts ticked for it.
     week.week.mon = null;
-    expect(newBlockRequest({ ...draft, weeks: '3' })?.weeks).toHaveLength(3);
-    expect(newBlockRequest({ ...draft, weeks: '3' })?.weeks[0]?.week.mon).toBe('w1');
+    expect(newBlockRequest({ ...draft, weeks: '3' })).toBeNull();
+    const request = newBlockRequest({ ...draft, weeks: '3', picked: ['w1'] });
+    expect(request?.weeks).toHaveLength(3);
+    expect(request?.weeks[0]?.week).toMatchObject({ mon: 'w1', tue: 'w1', wed: null });
+    expect(request?.workout_ids).toEqual(['w1']);
     week.week.mon = 'w1';
+  });
+  it('starts a block from ticked and added workouts only, without archived ones', () => {
+    const core: Workout = { ...workout, id: 'core', name: 'Core' };
+    const run: Workout = { ...workout, id: 'run', name: 'Tempo run' };
+    const usual: WeeklySchedule = { version: 1, week: { mon: 'w1', tue: null, wed: null, thu: null, fri: null, sat: null, sun: null }, extras: { mon: ['core'] } };
+    const draft = { ...newBlockDraft(usual, [workout, core, run], '2026-11-16'), picked: ['w1'], added: [{ id: 'run', day: 'fri' as const }] };
+    expect(draft.weeks).toBe('6');
+    const request = newBlockRequest(draft, [workout, core, run]);
+    expect(request?.weeks).toHaveLength(6);
+    expect(request?.weeks[0]).toEqual({ week: { mon: 'w1', tue: null, wed: null, thu: null, fri: 'run', sat: null, sun: null } });
+    expect(request?.workout_ids).toEqual(['w1', 'run']);
+    expect(newBlockRequest(draft, [core, run])?.workout_ids).toEqual(['run']);
+    expect(newBlockRequest({ ...draft, added: [] }, [core, run])).toBeNull();
   });
   it('rejects invalid creation inputs and corrupt stored structure without clamping', () => {
     const draft = newBlockDraft(week, [workout], '2026-11-16');
     expect(isNewBlockDraft(draft)).toBe(true);
-    for (const weeks of ['', '0', '-1', '2.5', '53', '1e1']) expect(newBlockRequest({ ...draft, weeks })).toBeNull();
-    expect(newBlockRequest({ ...draft, start: 'not-a-date' })).toBeNull();
+    const ticked = { ...draft, picked: ['w1'] };
+    expect(newBlockRequest(ticked)).not.toBeNull();
+    for (const weeks of ['', '0', '-1', '2.5', '53', '1e1']) expect(newBlockRequest({ ...ticked, weeks })).toBeNull();
+    expect(newBlockRequest({ ...ticked, start: 'not-a-date' })).toBeNull();
+    expect(isNewBlockDraft({ ...draft, picked: [1] })).toBe(false);
+    expect(isNewBlockDraft({ ...draft, added: [{ id: 'w1', day: 'someday' }] })).toBe(false);
     expect(isNewBlockDraft({ ...draft, source: { ...draft.source, weeks: [] } })).toBe(false);
     expect(isNewBlockDraft({ ...draft, repeat: 'yes' })).toBe(false);
   });

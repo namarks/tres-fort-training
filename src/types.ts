@@ -1,3 +1,5 @@
+import { layerProgram, MAX_DAY_EXTRAS, normalizeWorkoutIds, programHeld } from './programLayers';
+
 export interface Env {
   DB: D1Database;
   APPLE_BUNDLE_ID: string;
@@ -562,7 +564,7 @@ export type ScheduleWeek = Record<Weekday, string | null>;
 export type ScheduleExtras = Partial<Record<Weekday, string[]>>;
 
 /** The most activities one weekday holds besides its main workout. */
-export const MAX_SCHEDULE_EXTRAS = 4;
+export const MAX_SCHEDULE_EXTRAS = MAX_DAY_EXTRAS;
 
 /** Request shape for schedule extras: weekday keys to lists of non-empty
  *  workout refs. Shape only; `setPlanSchedule` resolves and checks each ref. */
@@ -584,14 +586,15 @@ export type ScheduleTimes = Partial<Record<Weekday, Record<string, string>>>;
 export const SCHEDULE_TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 /** Request shape for schedule times: weekday keys to maps of non-empty
- *  workout refs to "HH:MM". Shape only; `setPlanSchedule` resolves each ref. */
-export function isScheduleTimesInput(value: unknown): value is ScheduleTimes {
+ *  workout refs to "HH:MM", or null for no time (how a block workout's time
+ *  is cleared). Shape only; `setPlanSchedule` resolves each ref. */
+export function isScheduleTimesInput(value: unknown): value is Partial<Record<Weekday, Record<string, string | null>>> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   return Object.entries(value as Record<string, unknown>).every(([key, map]) =>
     (WEEKDAYS as readonly string[]).includes(key)
       && map !== null && typeof map === 'object' && !Array.isArray(map)
       && Object.entries(map as Record<string, unknown>).every(([ref, time]) =>
-        ref.length > 0 && typeof time === 'string' && SCHEDULE_TIME.test(time)));
+        ref.length > 0 && (time === null || (typeof time === 'string' && SCHEDULE_TIME.test(time)))));
 }
 
 export interface WeeklySchedule {
@@ -721,6 +724,11 @@ export interface TrainingProgram {
   start: string;
   repeat: boolean;
   weeks: ProgramWeek[];
+  /** The block's own workouts. Present (even empty), the repeating week
+   * carries on beside the block: every stored week holds the block's own
+   * entries and the repeating week's (`src/programLayers.ts`). Absent, the
+   * block's weeks replace the repeating week. */
+  workout_ids?: string[];
 }
 
 export const MAX_PROGRAM_WEEKS = 52;
@@ -840,20 +848,25 @@ export function normalizeScheduleExtras(v: unknown, week: ScheduleWeek): Schedul
 
 /**
  * Each weekday's times, kept only for what that weekday holds (its main
- * workout or one of its extras) and only in "HH:MM" form. Undefined when
+ * workout or one of its extras, or what a block week holds that weekday)
+ * and only in "HH:MM" form. Undefined when
  * nothing keeps a time, so a schedule without times round-trips unchanged.
  */
 export function normalizeScheduleTimes(
   v: unknown,
   week: ScheduleWeek,
   extras: ScheduleExtras | undefined,
+  /** What a block's weeks hold on each weekday (`programHeld`): a time may
+   * also belong to one of those. */
+  blockHeld?: Partial<Record<Weekday, ReadonlySet<string>>>,
 ): ScheduleTimes | undefined {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
   const out: ScheduleTimes = {};
   for (const d of WEEKDAYS) {
     const map = (v as Record<string, unknown>)[d];
     if (!map || typeof map !== 'object' || Array.isArray(map)) continue;
-    const held = new Set([week[d], ...(extras?.[d] ?? [])].filter((id): id is string => !!id));
+    const held = new Set([week[d], ...(extras?.[d] ?? []), ...(blockHeld?.[d] ?? [])]
+      .filter((id): id is string => !!id));
     const kept: Record<string, string> = {};
     for (const [id, time] of Object.entries(map as Record<string, unknown>)) {
       if (held.has(id) && typeof time === 'string' && SCHEDULE_TIME.test(time)) kept[id] = time;
@@ -919,7 +932,9 @@ export function normalizeProgram(v: unknown): TrainingProgram | undefined {
   }
   if (weeks.length === 0) return undefined;
   const name = typeof p.name === 'string' ? p.name.trim().slice(0, MAX_PROGRAM_NAME) : '';
-  return { id: p.id, ...(name ? { name } : {}), start: p.start, repeat: p.repeat === true, weeks };
+  const workoutIds = normalizeWorkoutIds(p.workout_ids);
+  return { id: p.id, ...(name ? { name } : {}), start: p.start, repeat: p.repeat === true, weeks,
+    ...(workoutIds ? { workout_ids: workoutIds } : {}) };
 }
 
 /**
@@ -952,10 +967,12 @@ export function parsePlanMeta(raw: string | null): PlanMeta {
     sched && typeof sched === 'object' ? (sched as Record<string, unknown>).extras : undefined,
     week,
   );
+  const program = normalizeProgram(obj.program);
   const times = normalizeScheduleTimes(
     sched && typeof sched === 'object' ? (sched as Record<string, unknown>).times : undefined,
     week,
     extras,
+    programHeld(program),
   );
   return {
     ...obj,
@@ -969,11 +986,17 @@ export function parsePlanMeta(raw: string | null): PlanMeta {
     periodization: normalizePeriodization(obj.periodization),
     trips: normalizeTrips(obj.trips),
     stress_model: normalizeStressModel(obj.stress_model),
-    program: normalizeProgram(obj.program),
+    program,
   };
 }
 
-/** Serialize meta back, with the schedule slotted in (preserving other keys). */
+/**
+ * Serialize meta back, with the schedule slotted in (preserving other keys).
+ * `meta.schedule` is the repeating week the stored block was written against
+ * and `schedule` the one being saved, so a layered block's weeks follow a
+ * change to the repeating week in the same write (`layerProgram`).
+ */
 export function serializePlanMeta(meta: PlanMeta, schedule: WeeklySchedule): string {
-  return JSON.stringify({ ...meta, schedule });
+  const program = meta.program ? layerProgram(meta.program, meta.schedule, schedule) : undefined;
+  return JSON.stringify({ ...meta, ...(program ? { program } : {}), schedule });
 }

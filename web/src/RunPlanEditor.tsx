@@ -29,8 +29,11 @@ export function RunPlanEditor(props: {
   busy: boolean;
   onSave: (steps: RunPlanItem[] | null) => void;
   onCancel: () => void;
+  /** One week of a block: the run that week asks for, kept in the block's
+   * draft. `changed` offers the way back to the workout's own steps. */
+  week?: { title: string; save: string; changed: boolean };
 }) {
-  const { slot, miles, busy, onSave, onCancel } = props;
+  const { slot, miles, busy, onSave, onCancel, week } = props;
   const initial = useMemo(() => draftFromRunSteps(slot.run_steps, miles), [slot.run_steps, miles]);
   const [items, setItems] = useState<ItemDraft[]>(initial ?? []);
   const [showErrors, setShowErrors] = useState(false);
@@ -79,7 +82,7 @@ export function RunPlanEditor(props: {
 
   return (
     <form ref={formRef} className="panel run-plan" onSubmit={submit} noValidate aria-label={`Plan ${slot.exercise_name}`}>
-      <h3>Plan this run</h3>
+      <h3>{week ? week.title : 'Plan this run'}</h3>
       {items.length === 0 && (
         <p className="muted">
           No steps yet, so this is a run at your own pace. Add steps such as a warm-up, then a repeat for intervals,
@@ -169,8 +172,10 @@ export function RunPlanEditor(props: {
         <ul role="alert" className="problem">{result.errors.map((error) => <li key={error}>{error}</li>)}</ul>
       )}
       <div className="form-actions">
-        <button type="submit" disabled={busy}>{busy ? 'Saving…' : 'Save steps'}</button>
-        {slot.run_steps && (
+        <button type="submit" disabled={busy}>{week ? week.save : busy ? 'Saving…' : 'Save steps'}</button>
+        {week ? week.changed && (
+          <button type="button" className="ghost" disabled={busy} onClick={() => onSave(null)}>Use the workout’s own steps</button>
+        ) : slot.run_steps && (
           <button type="button" className="ghost danger" disabled={busy} onClick={() => onSave(null)}>Remove all steps</button>
         )}
         <button type="button" className="ghost" onClick={onCancel}>Cancel</button>

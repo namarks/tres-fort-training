@@ -1,10 +1,9 @@
 // The web Plan page (docs/plans/web-app P2): one calendar of week rows that
-// shows the usual week and, where one covers a week, the block's week, so a
-// block is edited where it is seen. Pure; edits return a whole program for
-// the same one PUT /api/plan/program the block designer used.
+// shows the repeating week and, where a block covers a week, that block
+// week. Pure. The block itself is edited in the Block tab (blockLayers.ts).
 import { addDays, programWeekOn } from '../../src/calendarProjection';
-import type { TrainingProgram, Weekday } from '../../src/types';
-import { addingExtra, mondayOnOrBefore, removingExtra, settingDay, type ProgramBody } from './blocks';
+import type { TrainingProgram } from '../../src/types';
+import { mondayOnOrBefore, type ProgramBody } from './blocks';
 
 /** One row of the Plan page: a Monday, and the block week it shows (null
  * when the usual week applies). */
@@ -57,43 +56,4 @@ export function planRows(program: ProgramBody | null, today: string, earlier = 0
     rows.push({ monday, week: weekOf(program, monday) });
   }
   return rows;
-}
-
-/** Where a change to one block day applies. */
-export type DayScope = 'week' | 'block' | 'later';
-
-/** The block weeks a scoped change touches, from week `index`. */
-export function scopedWeeks(program: ProgramBody, index: number, scope: DayScope): number[] {
-  const all = program.weeks.map((_, i) => i);
-  if (scope === 'week') return all.includes(index) ? [index] : [];
-  if (scope === 'later') return all.filter((i) => i >= index);
-  return all;
-}
-
-/** True when the weeks in scope don't already share one plan for the day. */
-export function scopeDiffers(program: ProgramBody, weeks: number[], day: Weekday): boolean {
-  const shape = (i: number) => JSON.stringify([program.weeks[i]?.week[day] ?? null, program.weeks[i]?.extras?.[day] ?? []]);
-  return new Set(weeks.map(shape)).size > 1;
-}
-
-/** A day's main workout set in every week in scope. */
-export function settingDayIn<P extends ProgramBody>(program: P, weeks: number[], day: Weekday, workoutId: string | null): P {
-  return weeks.reduce((next, i) => settingDay(next, i, day, workoutId), program);
-}
-
-/** One more workout beside the day's main one in every week in scope that
- * has room for it; null when no week could take it. */
-export function addingExtraIn<P extends ProgramBody>(program: P, weeks: number[], day: Weekday, workoutId: string): P | null {
-  let changed = false;
-  const next = weeks.reduce((current, i) => {
-    const added = addingExtra(current, i, day, workoutId);
-    if (!added) return current;
-    changed = true;
-    return added;
-  }, program);
-  return changed ? next : null;
-}
-
-export function removingExtraIn<P extends ProgramBody>(program: P, weeks: number[], day: Weekday, workoutId: string): P {
-  return weeks.reduce((next, i) => removingExtra(next, i, day, workoutId), program);
 }
