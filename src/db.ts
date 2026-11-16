@@ -29,7 +29,7 @@ import { isPartnerWorkoutInput, isPartnerStartInput, partnerRequestJSON, partner
 import { validWorkoutTags, normalizeWorkoutTags, validArchivedAt } from './workoutMetadata';
 import { deriveFreestylePrescriptions, type FreestylePrescription } from './freestyle';
 import { addDays, weekdayOf, weekPatternOn, projectCalendar, projectCalendarWindow, projectRideConflicts } from './calendarProjection';
-import { applyWeekTargets, weekTargetsOn } from './programTargets';
+import { applySlotTargets, applyWeekTargets, weekTargetsOn, type TargetSlot } from './programTargets';
 import {
   buildEventProgram, defaultPeakMeters, defaultTaperWeeks, defaultWorkoutWeekday, goalPace, mondayOf, mondayOnOrAfter,
   BUILD_LIMITS, type BuildUnit, type BuildWeekSummary,
@@ -80,6 +80,7 @@ import type {
   Env,
 } from './types';
 import { MAX_PROGRAM_LABEL, MAX_PROGRAM_NAME, MAX_PROGRAM_WEEKS, MAX_PROGRAM_WEEK_TARGETS, MAX_SCHEDULE_EXTRAS, SLOT_TARGET_FIELDS, WEEKDAYS, normalizeScheduleExtras, normalizeScheduleTimes, parsePlanMeta, serializePlanMeta, type ProgramWeek, type SlotTargets, type TrainingProgram } from './types';
+import { dayEntries, isLayered, layerProgram, placedWorkoutIds, programHeld } from './programLayers';
 import {
   comparePlanSnapshots,
   parsePlanSnapshot,
@@ -3899,7 +3900,8 @@ export async function restorePlanSnapshot(
   }
   const restoreMeta = parsePlanMeta(target.plan.meta);
   const restoreSchedule = scrubSchedule(restoreMeta.schedule,
-    new Set(target.workouts.filter(day => day.archived_at == null).map(day => day.id)));
+    new Set(target.workouts.filter(day => day.archived_at == null).map(day => day.id)),
+    programHeld(restoreMeta.program));
   const restoredMeta = restoreSchedule == null
     ? target.plan.meta : serializePlanMeta(restoreMeta, restoreSchedule);
   statements.push(db.prepare(
@@ -4405,8 +4407,8 @@ export async function patchWorkoutAtVersion(
   if (archiving) {
     const meta = parsePlanMeta(plan.meta);
     const liveIds = new Set(currentDays.results.filter(day => day.id !== dayId).map(day => day.id));
-    const schedule = scrubSchedule(meta.schedule, liveIds);
     const program = scrubProgram(meta.program, liveIds);
+    const schedule = scrubSchedule(meta.schedule, liveIds, programHeld(program ?? meta.program));
     statements.push(prepareArchiveAssignments(db, plan, dayId, merged.updated_at, nonce));
     statements.push(db.prepare(`UPDATE plans SET meta=?1 WHERE id=?2 AND user_id=?3
       AND version=-?4 AND plan_write_nonce=?5`)
@@ -7514,13 +7516,6 @@ export async function updatePlanTree(
     }
     if (Object.keys(map).length > 0) remappedTimes[wd] = map;
   }
-  const normalizedRemappedTimes = normalizeScheduleTimes(
-    remappedTimes, remappedPattern.week, remappedPattern.extras);
-  const remappedSchedule: WeeklySchedule = {
-    version: baseMeta.schedule.version,
-    ...remappedPattern,
-    ...(normalizedRemappedTimes ? { times: normalizedRemappedTimes } : {}),
-  };
   if (baseMeta.program) {
     // Slot ids are rebuilt too: a week's targets follow their slot to its
     // new id, and drop with a slot the rebuild removed.
@@ -7532,14 +7527,33 @@ export async function updatePlanTree(
       }
       return Object.keys(out).length > 0 ? { targets: out } : {};
     };
+    // The block's own list follows its workouts to their new ids.
+    const workoutIds = baseMeta.program.workout_ids?.flatMap((oldId) => {
+      const newId = oldToNewDay.get(oldId);
+      return newId && metadataByNewId.get(newId)?.archived_at == null ? [newId] : [];
+    });
     baseMeta.program = { ...baseMeta.program, weeks: baseMeta.program.weeks.map((week) => ({
       ...(week.label ? { label: week.label } : {}), ...remapPattern(week), ...remapTargets(week.targets),
-    })) };
+    })), ...(workoutIds ? { workout_ids: workoutIds } : {}) };
     // A rebuild that regroups slots must still agree with each week's counts.
     const weekMismatch = programGroupSetsMismatch(baseMeta.program,
       groupCandidates.flatMap((day) => day.exercises));
     if (weekMismatch) return weekMismatch;
   }
+  // The stored repeating week still names the old ids, so the block's days
+  // can't be told apart against it: lay the remapped block over the remapped
+  // week here, and the serializer below finds nothing left to change.
+  if (baseMeta.program) {
+    baseMeta.program = layerProgram(baseMeta.program, remapPattern(existingMeta.schedule), remappedPattern);
+  }
+  const normalizedRemappedTimes = normalizeScheduleTimes(
+    remappedTimes, remappedPattern.week, remappedPattern.extras, programHeld(baseMeta.program));
+  const remappedSchedule: WeeklySchedule = {
+    version: baseMeta.schedule.version,
+    ...remappedPattern,
+    ...(normalizedRemappedTimes ? { times: normalizedRemappedTimes } : {}),
+  };
+  baseMeta.schedule = remappedSchedule;
   stmts.push(
     db
       .prepare(
@@ -8348,49 +8362,38 @@ export async function getVolume(
 // plans.version and use optimistic concurrency. The one-off planned/skip
 // session writes are append-only sessions rows and do NOT bump version.
 
-/**
- * Replace the full weekly map. Resolves each value (id, day_label, or day
- * name) to a workout_id belonging to the active plan; rejects any ref
- * that doesn't resolve to a day in THIS plan (no partial write). Optimistic
- * concurrency on expected_version. Bumps plans.version on success.
- */
-export async function setPlanSchedule(
-  db: D1Database,
-  userId: string,
-  weekInput: Partial<Record<Weekday, string | null>>,
-  expectedVersion?: number | null,
-  expectedPlanId?: string | null,
-  attribution: PlanWriteAttribution = { actor: 'system', operation: 'set_schedule' },
+/** A repeating week as a client sends it: each value an id, day_label or
+ * workout name. */
+export interface ScheduleInput {
+  week: Partial<Record<Weekday, string | null>>;
   /** Each weekday's activities besides its main workout, replacing the
    *  saved ones; omitted keeps them (a caller that knows only `week`). */
-  extrasInput?: Partial<Record<Weekday, string[]>>,
+  extras?: Partial<Record<Weekday, string[]>>;
   /** Each weekday's optional times (workout ref → "HH:MM"), replacing the
-   *  saved ones; omitted keeps those still on their day. */
-  timesInput?: Partial<Record<Weekday, Record<string, string>>>,
-): Promise<
-  | { conflict: true; current_plan_id: string; current_version: number }
-  | { error: 'no_active_plan' }
+   *  saved ones; omitted keeps those still on their day. Null clears one. */
+  times?: Partial<Record<Weekday, Record<string, string | null>>>;
+}
+
+type ScheduleResolveError =
   | { error: 'unknown_day_ref'; ref: string }
   | { error: 'too_many_extras'; weekday: Weekday; max: number }
-  | { error: 'time_not_on_day'; weekday: Weekday; ref: string }
-  | { ok: true; plan: PlanRow; schedule: WeeklySchedule; version: number }
-> {
-  const plan = await getActivePlan(db, userId);
-  if (!plan) return { error: 'no_active_plan' };
-  if (expectedPlanId != null && expectedPlanId !== plan.id) {
-    return {
-      conflict: true,
-      current_plan_id: plan.id,
-      current_version: plan.version,
-    };
-  }
-  if (expectedVersion != null && expectedVersion !== plan.version) {
-    return {
-      conflict: true,
-      current_plan_id: plan.id,
-      current_version: plan.version,
-    };
-  }
+  | { error: 'time_not_on_day'; weekday: Weekday; ref: string };
+
+/**
+ * Resolve a repeating week as sent against the plan's live workouts (no
+ * partial result: any ref that doesn't resolve fails the whole week).
+ * `program` is the block the week will sit beside once saved: a time may
+ * belong to what a block week holds on its weekday, and a client that only
+ * knows the repeating week never clears one of those by leaving it out.
+ */
+async function resolveScheduleInput(
+  db: D1Database,
+  plan: { id: string },
+  meta: PlanMeta,
+  input: ScheduleInput,
+  program: TrainingProgram | null | undefined,
+): Promise<{ schedule: WeeklySchedule } | ScheduleResolveError> {
+  const { week: weekInput, extras: extrasInput, times: timesInput } = input;
   const days = await db
     .prepare(`SELECT w.id, w.name, w.day_label
       FROM workouts w WHERE w.plan_id = ?1 AND w.archived_at IS NULL AND w.one_time_date IS NULL`)
@@ -8419,7 +8422,6 @@ export async function setPlanSchedule(
     if (!id) return { error: 'unknown_day_ref', ref };
     resolved[wd] = id;
   }
-  const meta = parsePlanMeta(plan.meta);
   // Each full workout in extras starts an independent session on its date.
   let extras: ScheduleExtras;
   if (extrasInput === undefined) {
@@ -8446,33 +8448,93 @@ export async function setPlanSchedule(
     }
   }
   const normalizedExtras = normalizeScheduleExtras(extras, resolved);
+  // What the block's weeks will hold beside this week once it is saved.
+  const blockHeld = programHeld(program
+    ? layerProgram(program, meta.schedule, { week: resolved, extras: normalizedExtras }) : null);
   // Times belong to what a weekday holds. Omitted, the saved ones stay for
   // whatever is still on its day; given, each ref must be on its weekday.
   let times: ScheduleTimes | undefined = meta.schedule.times;
   if (timesInput !== undefined) {
     times = {};
     for (const wd of WEEKDAYS) {
-      const held = new Set([resolved[wd], ...(normalizedExtras?.[wd] ?? [])]);
+      const weekHeld = new Set([resolved[wd], ...(normalizedExtras?.[wd] ?? [])]);
       const kept: Record<string, string> = {};
+      const named = new Set<string>();
       for (const [ref, time] of Object.entries(timesInput[wd] ?? {})) {
         const id = byId.get(ref) ?? byLabel.get(ref.toLowerCase()) ?? byName.get(ref.toLowerCase());
         if (!id) return { error: 'unknown_day_ref', ref };
-        if (!held.has(id)) return { error: 'time_not_on_day', weekday: wd, ref };
-        kept[id] = time;
+        if (!weekHeld.has(id) && !blockHeld[wd]?.has(id)) return { error: 'time_not_on_day', weekday: wd, ref };
+        named.add(id);
+        if (time != null) kept[id] = time;
+      }
+      // A block workout's time stays unless this write names it: a client
+      // that sends only the repeating week's times doesn't know it.
+      for (const [id, time] of Object.entries(meta.schedule.times?.[wd] ?? {})) {
+        if (!named.has(id) && !weekHeld.has(id) && blockHeld[wd]?.has(id)) kept[id] = time;
       }
       if (Object.keys(kept).length > 0) times[wd] = kept;
     }
   }
-  const normalizedTimes = normalizeScheduleTimes(times, resolved, normalizedExtras);
+  const normalizedTimes = normalizeScheduleTimes(times, resolved, normalizedExtras, blockHeld);
   // schedule.version is a monotonic change counter for the schedule itself
   // (distinct from plans.version): bump it on every successful write so
   // clients can detect a schedule change without diffing the full week map.
-  const schedule: WeeklySchedule = {
+  return { schedule: {
     version: meta.schedule.version + 1,
     week: resolved,
     ...(normalizedExtras ? { extras: normalizedExtras } : {}),
     ...(normalizedTimes ? { times: normalizedTimes } : {}),
-  };
+  } };
+}
+
+/**
+ * Replace the full weekly map. Resolves each value (id, day_label, or day
+ * name) to a workout_id belonging to the active plan; rejects any ref
+ * that doesn't resolve to a day in THIS plan (no partial write). Optimistic
+ * concurrency on expected_version. Bumps plans.version on success.
+ */
+export async function setPlanSchedule(
+  db: D1Database,
+  userId: string,
+  weekInput: Partial<Record<Weekday, string | null>>,
+  expectedVersion?: number | null,
+  expectedPlanId?: string | null,
+  attribution: PlanWriteAttribution = { actor: 'system', operation: 'set_schedule' },
+  /** Each weekday's activities besides its main workout, replacing the
+   *  saved ones; omitted keeps them (a caller that knows only `week`). */
+  extrasInput?: Partial<Record<Weekday, string[]>>,
+  /** Each weekday's optional times (workout ref → "HH:MM"), replacing the
+   *  saved ones; omitted keeps those still on their day. */
+  timesInput?: Partial<Record<Weekday, Record<string, string | null>>>,
+): Promise<
+  | { conflict: true; current_plan_id: string; current_version: number }
+  | { error: 'no_active_plan' }
+  | { error: 'unknown_day_ref'; ref: string }
+  | { error: 'too_many_extras'; weekday: Weekday; max: number }
+  | { error: 'time_not_on_day'; weekday: Weekday; ref: string }
+  | { ok: true; plan: PlanRow; schedule: WeeklySchedule; version: number }
+> {
+  const plan = await getActivePlan(db, userId);
+  if (!plan) return { error: 'no_active_plan' };
+  if (expectedPlanId != null && expectedPlanId !== plan.id) {
+    return {
+      conflict: true,
+      current_plan_id: plan.id,
+      current_version: plan.version,
+    };
+  }
+  if (expectedVersion != null && expectedVersion !== plan.version) {
+    return {
+      conflict: true,
+      current_plan_id: plan.id,
+      current_version: plan.version,
+    };
+  }
+  const meta = parsePlanMeta(plan.meta);
+  const resolvedSchedule = await resolveScheduleInput(db, plan, meta,
+    { week: weekInput, extras: extrasInput, times: timesInput }, meta.program);
+  if (!('schedule' in resolvedSchedule)) return resolvedSchedule;
+  const schedule = resolvedSchedule.schedule;
   const ts = now();
   // Gate on the read version (write-time optimistic concurrency) — same as
   // writePlanMeta; a concurrent plan write → no row updated → 409.
@@ -8588,6 +8650,9 @@ async function writePlanMeta(
   expectedVersion: number | null | undefined,
   mutate: (meta: PlanMeta) => string | void,
   attribution: PlanWriteAttribution,
+  /** Plan-tree statements for the same version, each gated on the write's
+   * claim (`version=-plan.version AND plan_write_nonce=nonce`). */
+  alongside?: (claim: { plan: PlanRow; nonce: string; ts: number }) => D1PreparedStatement[],
 ): Promise<PlanMetaWrite> {
   const plan = await getActivePlan(db, userId);
   if (!plan) return { error: 'no_active_plan' };
@@ -8609,10 +8674,12 @@ async function writePlanMeta(
   // changes. No row updated → another writer won → 409 (caller refetches).
   const nonce = uuid();
   const statements = preparePlanWriteStart(db, plan, attribution, ts, nonce, false, [], protection?.guard);
+  const serialized = serializePlanMeta(meta, meta.schedule);
   statements.push(db.prepare(
     `UPDATE plans SET meta=?2,updated_at=?3
       WHERE id=?1 AND version=-?4 AND user_id=?5 AND plan_write_nonce=?6`,
-  ).bind(plan.id, serializePlanMeta(meta, meta.schedule), ts, plan.version, userId, nonce));
+  ).bind(plan.id, serialized, ts, plan.version, userId, nonce));
+  if (alongside) statements.push(...alongside({ plan, nonce, ts }));
   const versionResultIndex = statements.length;
   statements.push(...preparePlanWriteFinish(db, plan, attribution, ts, nonce));
   const results = await runWorkoutWriteBatch<{ version: number }>(db, statements);
@@ -8624,7 +8691,8 @@ async function writePlanMeta(
     }
     return { conflict: true, current_version: cur?.version ?? plan.version };
   }
-  return { ok: true, version: row.version, meta };
+  // The meta as stored, which is what every client reads back.
+  return { ok: true, version: row.version, meta: parsePlanMeta(serialized) };
 }
 
 /** A block as a client or the coach sends it (docs/plans/progressive-plans
@@ -8641,6 +8709,11 @@ export interface ProgramInput {
      * step array, like a slot's run_steps. */
     targets?: Record<string, Record<string, unknown>>;
   }>;
+  /** The block's own workouts (ids, labels or names): the repeating week
+   * then carries on beside the block (`src/programLayers.ts`). Omitted, a
+   * replaced block keeps its list; null makes the weeks replace the
+   * repeating week, as a block without a list does. */
+  workout_ids?: string[] | null;
 }
 
 interface ProgramSlotRow {
@@ -8774,8 +8847,12 @@ export type SetProgramResult =
   | { error: 'unknown_day_ref'; ref: string; week: number }
   | { error: 'too_many_extras'; weekday: Weekday; max: number; week: number }
   | { error: 'invalid_weekday'; weekday: string; week: number }
+  | { error: 'invalid_workout_ids' }
+  | { error: 'unknown_block_workout'; ref: string }
+  | { error: 'invalid_keep_week' }
+  | { error: 'schedule'; schedule: ScheduleResolveError }
   | Exclude<WeekTargetsResult, { ok: true }>
-  | { ok: true; version: number; program: TrainingProgram | null };
+  | { ok: true; version: number; program: TrainingProgram | null; schedule?: WeeklySchedule };
 
 type ProgramResolveError = Exclude<SetProgramResult, { ok: true } | { conflict: true; current_version: number }>;
 
@@ -8865,8 +8942,24 @@ async function resolveProgram(
       ...(targets.targets ? { targets: targets.targets } : {}) });
   }
   const name = input.name?.trim() ?? '';
+  // The block's own workouts: as sent, else the replaced block's. Only the
+  // ones a week still places are kept, so a workout taken out of the block
+  // goes back to being the repeating week's.
+  let workoutIds: string[] | undefined;
+  if (input.workout_ids === undefined) {
+    workoutIds = existing?.workout_ids?.filter((id) => byId.has(id));
+  } else if (input.workout_ids !== null) {
+    if (!Array.isArray(input.workout_ids)) return { error: 'invalid_workout_ids' };
+    workoutIds = [];
+    for (const ref of input.workout_ids) {
+      const id = typeof ref === 'string' ? resolve(ref) : undefined;
+      if (!id) return { error: 'unknown_block_workout', ref: String(ref) };
+      if (!workoutIds.includes(id)) workoutIds.push(id);
+    }
+  }
   return { program: { id: existing?.id ?? uuid(), ...(name ? { name } : {}), start: input.start,
-    repeat: input.repeat === true, weeks } };
+    repeat: input.repeat === true, weeks,
+    ...(workoutIds ? { workout_ids: placedWorkoutIds(workoutIds, weeks) } : {}) } };
 }
 
 /**
@@ -8880,6 +8973,10 @@ export async function setProgram(
   input: ProgramInput | null,
   expectedVersion?: number | null,
   attribution: PlanWriteAttribution = { actor: 'system', operation: 'set_program' },
+  /** The repeating week to save in the same plan version: starting a block
+   * moves its workouts out of the repeating week, and the two must never be
+   * seen half done. */
+  scheduleInput?: ScheduleInput,
 ): Promise<SetProgramResult> {
   const plan = await getActivePlan(db, userId);
   if (!plan) return { error: 'no_active_plan' };
@@ -8892,12 +8989,86 @@ export async function setProgram(
     if (!('program' in resolved)) return resolved;
     program = resolved.program;
   }
+  let schedule: WeeklySchedule | null = null;
+  if (scheduleInput) {
+    const resolved = await resolveScheduleInput(db, plan, parsePlanMeta(plan.meta), scheduleInput, program);
+    if (!('schedule' in resolved)) return { error: 'schedule', schedule: resolved };
+    schedule = resolved.schedule;
+  }
   // Gate the write on the version the references were resolved against.
   const res = await writePlanMeta(db, userId, plan.version, (meta) => {
-    if (program) meta.program = program;
+    // The block as sent holds days written against the saved repeating
+    // week; lay it over the one being saved before that one replaces it.
+    const before = meta.schedule;
+    if (schedule) meta.schedule = schedule;
+    if (program) meta.program = layerProgram(program, before, meta.schedule);
     else delete meta.program;
   }, attribution);
-  return 'ok' in res ? { ok: true, version: res.version, program: res.meta.program ?? null }
+  return 'ok' in res
+    ? { ok: true, version: res.version, program: res.meta.program ?? null,
+      ...(schedule ? { schedule: res.meta.schedule } : {}) }
+    : res as { conflict: true; current_version: number } | { error: 'no_active_plan' | 'active_workout_targets_changed' };
+}
+
+/**
+ * End the block and keep one of its weeks going: that week's days become
+ * the repeating week, and the targets it gave each slot become the slot's
+ * own, so the workouts read the same the week after. One plan version.
+ * A workout in progress whose targets this would change must finish first
+ * (`active_workout_targets_changed`).
+ */
+export async function endProgramKeepingWeek(
+  db: D1Database,
+  userId: string,
+  weekIndex: number,
+  expectedVersion?: number | null,
+  attribution: PlanWriteAttribution = { actor: 'system', operation: 'set_program' },
+): Promise<SetProgramResult> {
+  const plan = await getActivePlan(db, userId);
+  if (!plan) return { error: 'no_active_plan' };
+  if (expectedVersion != null && expectedVersion !== plan.version) {
+    return { conflict: true, current_version: plan.version };
+  }
+  const saved = parsePlanMeta(plan.meta);
+  const kept = saved.program?.weeks[weekIndex];
+  if (!kept || !Number.isInteger(weekIndex)) return { error: 'invalid_keep_week' };
+  const live = await db
+    .prepare(`SELECT w.id FROM workouts w
+      WHERE w.plan_id = ?1 AND w.archived_at IS NULL AND w.one_time_date IS NULL`)
+    .bind(plan.id).all<{ id: string }>();
+  const pattern = scrubSchedule({ version: 0, week: kept.week, ...(kept.extras ? { extras: kept.extras } : {}) },
+    new Set(live.results.map((row) => row.id))) ?? kept;
+  const times = normalizeScheduleTimes(saved.schedule.times, pattern.week, pattern.extras);
+  const schedule: WeeklySchedule = {
+    version: saved.schedule.version + 1,
+    week: pattern.week,
+    ...(pattern.extras ? { extras: pattern.extras } : {}),
+    ...(times ? { times } : {}),
+  };
+  const slotRows = await db
+    .prepare(`SELECT te.id, te.exercise_id, te.target_sets, te.target_reps, te.target_reps_max,
+        te.target_rpe, te.target_weight, te.target_weight_unit, te.target_duration_s, te.run_steps
+      FROM template_exercises te JOIN workouts w ON w.id = te.workout_id
+      WHERE w.plan_id = ?1 AND w.archived_at IS NULL AND w.one_time_date IS NULL`)
+    .bind(plan.id).all<TargetSlot>();
+  const changed = slotRows.results.flatMap((slot) => {
+    const targets = kept.targets?.[slot.id];
+    return targets ? [applySlotTargets(slot, targets)] : [];
+  });
+  const res = await writePlanMeta(db, userId, plan.version, (meta) => {
+    meta.schedule = schedule;
+    delete meta.program;
+  }, attribution, ({ nonce, ts }) => changed.map((slot) => db.prepare(
+    `UPDATE template_exercises
+        SET target_sets=?2, target_reps=?3, target_reps_max=?4, target_rpe=?5, target_weight=?6,
+            target_weight_unit=?7, target_duration_s=?8, run_steps=?9, updated_at=?10
+      WHERE id=?1 AND EXISTS (SELECT 1 FROM workouts d JOIN plans p ON p.id=d.plan_id
+        WHERE d.id=template_exercises.workout_id AND p.id=?11 AND p.user_id=?12
+          AND p.version=-?13 AND p.plan_write_nonce=?14)`,
+  ).bind(slot.id, slot.target_sets, slot.target_reps, slot.target_reps_max, slot.target_rpe, slot.target_weight,
+    slot.target_weight_unit ?? 'lb', slot.target_duration_s, slot.run_steps ?? null, ts,
+    plan.id, userId, plan.version, nonce)));
+  return 'ok' in res ? { ok: true, version: res.version, program: null, schedule: res.meta.schedule }
     : res as { conflict: true; current_version: number } | { error: 'no_active_plan' | 'active_workout_targets_changed' };
 }
 
@@ -9059,7 +9230,10 @@ export async function buildEventBlock(
     plan_version: plan.version,
   };
   if (!save) return { ok: true, preview };
-  const resolved = await resolveProgram(db, plan, built.program as unknown as ProgramInput);
+  // A built block lays out whole weeks from the repeating week, so its
+  // weeks stand in for it: it never takes over a replaced block's own list.
+  const resolved = await resolveProgram(db, plan,
+    { ...(built.program as unknown as ProgramInput), workout_ids: null });
   if (!('program' in resolved)) return resolved;
   const program = resolved.program;
   // Gate the write on the version the block was built against.
@@ -9234,6 +9408,9 @@ export async function setStressModel(
 function scrubSchedule(
   schedule: WeeklySchedule,
   liveIds: Set<string>,
+  /** What the plan's block holds on each weekday (`programHeld`), so a
+   * block workout's time is not dropped with the scrub. */
+  blockHeld?: Partial<Record<Weekday, ReadonlySet<string>>>,
 ): WeeklySchedule | null {
   let changed = false;
   const week: ScheduleWeek = { ...schedule.week };
@@ -9251,7 +9428,7 @@ function scrubSchedule(
   }
   if (!changed) return null;
   const normalized = normalizeScheduleExtras(extras, week);
-  const times = normalizeScheduleTimes(schedule.times, week, normalized);
+  const times = normalizeScheduleTimes(schedule.times, week, normalized, blockHeld);
   return { version: schedule.version + 1, week, ...(normalized ? { extras: normalized } : {}),
     ...(times ? { times } : {}) };
 }
@@ -9261,6 +9438,8 @@ function scrubSchedule(
 function scrubProgram(program: TrainingProgram | undefined, liveIds: Set<string>): TrainingProgram | null {
   if (!program) return null;
   let changed = false;
+  const workoutIds = program.workout_ids?.filter((id) => liveIds.has(id));
+  if (workoutIds && workoutIds.length !== program.workout_ids!.length) changed = true;
   const weeks = program.weeks.map((week) => {
     const scrubbed = scrubSchedule({ version: 0, ...week }, liveIds);
     if (!scrubbed) return week;
@@ -9268,7 +9447,7 @@ function scrubProgram(program: TrainingProgram | undefined, liveIds: Set<string>
     return { ...(week.label ? { label: week.label } : {}), week: scrubbed.week,
       ...(scrubbed.extras ? { extras: scrubbed.extras } : {}), ...(week.targets ? { targets: week.targets } : {}) };
   });
-  return changed ? { ...program, weeks } : null;
+  return changed ? { ...program, weeks, ...(workoutIds ? { workout_ids: workoutIds } : {}) } : null;
 }
 
 export type DeleteWorkoutResult =
@@ -9319,7 +9498,7 @@ export async function deleteWorkoutAtVersion(
   if (groupInvalid) return groupInvalid;
   const meta = parsePlanMeta(plan.meta);
   const liveIds = new Set(remaining.map((r) => r.id));
-  const scrubbed = scrubSchedule(meta.schedule, liveIds);
+  const scrubbed = scrubSchedule(meta.schedule, liveIds, programHeld(scrubProgram(meta.program, liveIds) ?? meta.program));
   // A session may deliberately keep workout_id NULL and resolve its
   // workout from the recurring schedule for that civil date. Treat those
   // rows as references to this day too, using the same mon..sun rule as the

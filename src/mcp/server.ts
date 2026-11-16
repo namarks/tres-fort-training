@@ -1820,6 +1820,11 @@ const TOOLS: Record<string, Tool> = {
             name: { type: 'string', description: 'Optional, up to 60 characters.' },
             start: { type: 'string', description: 'The Monday the first week starts, YYYY-MM-DD.' },
             repeat: { type: 'boolean', description: 'true = a cycle that starts over after the last week.' },
+            workout_ids: {
+              type: ['array', 'null'],
+              items: { type: 'string' },
+              description: 'Optional. The workouts this block owns (ids, labels or names). With it, the weekly schedule carries on BESIDE the block: each week keeps the listed workouts where you put them, and everything else on a day comes from set_schedule and follows later changes to it. Omit to keep a replaced block\'s list; null makes the weeks replace the weekly schedule on the dates they cover.',
+            },
             weeks: {
               type: 'array',
               minItems: 1,
