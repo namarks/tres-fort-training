@@ -1,4 +1,4 @@
-import { useId, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useState } from 'react';
 import { MAX_SCHEDULE_EXTRAS, WEEKDAYS, type Weekday } from '../../src/types';
 import { planWrites, type Reviewed } from './api';
 import { formatScheduleTime, isRunOnlyWorkout, WEEKDAY_LABELS, type Workout } from './model';
@@ -80,8 +80,10 @@ export function EveryWeekdayPanel(props: {
   write: Write; busy: boolean; onClose: () => void; onNewWorkout: () => void;
   /** Which dates this weekday fills. */
   scope: string;
+  /** Told whenever the day holds changes that are not saved, so leaving it can ask first. */
+  onDirty?: (dirty: boolean) => void;
 }) {
-  const { day, write, busy, onClose } = props;
+  const { day, write, busy, onClose, onDirty } = props;
   const workouts = useMemo(() => choosableWorkouts(props.workouts), [props.workouts]);
   // The week as reviewed when this weekday was opened.
   const [review] = useState<RoutineReview>(() => ({ schedule: structuredClone(props.schedule), at: { ...props.reviewed } }));
@@ -94,6 +96,7 @@ export function EveryWeekdayPanel(props: {
   const problem = routineDayProblem(draft, workouts);
   const dirty = JSON.stringify(routineDay(review.schedule, day)) !== JSON.stringify(draft);
   const full = routineDayFull(draft);
+  useEffect(() => { onDirty?.(dirty); return () => onDirty?.(false); }, [dirty, onDirty]);
   const available = workouts.filter((workout) => !entries.includes(workout.id)
     && workout.name.toLowerCase().includes(search.trim().toLowerCase()));
   const groups: Array<[string, Workout[]]> = [

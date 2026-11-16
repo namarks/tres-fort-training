@@ -197,6 +197,11 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
   const [lighterWeek, setLighterWeek] = useState<number | null>(null);
   // The weekday of the repeating week open in the side panel, if any.
   const [weekday, setWeekday] = useState<Weekday | null>(null);
+  // An open weekday with unsaved changes asks before another day or date replaces it.
+  const weekdayDirty = useRef(false);
+  const noteWeekdayDirty = useCallback((dirty: boolean) => { weekdayDirty.current = dirty; }, []);
+  const leaveWeekday = (next: Weekday | null) => next === weekday || !weekdayDirty.current
+    || window.confirm(`Discard your unsaved changes to ${weekday ? WEEKDAY_LABELS[weekday] : 'this day'}?`);
   const [awayOpen, setAwayOpen] = useState(false);
   const [addDismissed, setAddDismissed] = useState<string | null>(null);
   const [editSelection, setEditSelection] = useState<DateWorkoutSelection | null>(null);
@@ -332,7 +337,7 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
               {WEEKDAYS.map((day) => <div key={day} role="columnheader">{WEEKDAY_LABELS[day].slice(0, 3)}</div>)}
             </div>
             <EveryWeekRow schedule={plan.schedule} workouts={plan.workouts} selected={weekday} disabled={!!adding}
-              onSelect={setWeekday} hint={active ? 'Outside your block' : 'Fills every week below'} />
+              onSelect={(day) => { if (leaveWeekday(day)) setWeekday(day); }} hint={active ? 'Outside your block' : 'Fills every week below'} />
           </div>
           {scroller.canAdd && (
             <div role="row" className="grid-row weeks-more" ref={scroller.topRef}>
@@ -360,7 +365,7 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
                       ownDate={date >= today && dateSetOnItsOwn(cells.get(date))}
                       isSelected={weekday === null && date === selected}
                       sports={sports}
-                      onSelect={() => { setSelected(date); setWeekday(null); }}
+                      onSelect={() => { if (leaveWeekday(null)) { setSelected(date); setWeekday(null); } }}
                     />
                   );
                 })}
@@ -407,7 +412,7 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
       {weekday ? (
         <aside className="detail" aria-labelledby="every-day-title">
           <EveryWeekdayPanel key={`${plan.id}:${weekday}`} day={weekday} schedule={plan.schedule} workouts={plan.workouts}
-            reviewed={reviewed} write={write} busy={busy} onClose={() => setWeekday(null)} onNewWorkout={() => onEditWorkout(null)}
+            reviewed={reviewed} write={write} busy={busy} onClose={() => setWeekday(null)} onNewWorkout={() => onEditWorkout(null)} onDirty={noteWeekdayDirty}
             scope={weekScope ?? `Fills each ${WEEKDAY_LABELS[weekday]} you haven’t changed on its own date.`} />
         </aside>
       ) : <DayDetail

@@ -429,6 +429,13 @@ export async function mixedWeekJourney({ page, origin, width, apiCall }) {
   assert.equal(await edit.getByLabel('Time for Evening core · optional', { exact: true }).inputValue(), '18:00');
   await screenshot(page, `web-plan-every-tuesday-${width}.png`);
   await edit.getByLabel('Time for Evening core · optional', { exact: true }).fill('18:30');
+  // Choosing another weekday or a date asks before an unsaved day is replaced; declining keeps it.
+  for (const other of [routine.getByRole('gridcell', { name: 'Edit Wednesday', exact: true }), page.locator('.week-row .day').first()]) {
+    const asked = new Promise(resolve => page.once('dialog', async dialog => { const text = dialog.message(); await dialog.dismiss(); resolve(text); }));
+    await other.click();
+    assert.match(await asked, /Discard your unsaved changes to Tuesday\?/);
+    assert.equal(await edit.getByLabel('Time for Evening core · optional', { exact: true }).inputValue(), '18:30');
+  }
   await click(edit.getByRole('button', { name: 'Save Tuesday', exact: true }));
   await edit.waitFor({ state: 'detached' });
   const edited = await apiCall('GET', '/api/state');

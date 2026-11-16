@@ -31,6 +31,8 @@
   --hero-edge: #15273e;
   --hero-raised: #2a4466;
   --fort-label: #83a4ce;
+  /* Text on the hero navy (BrandPalette.fortText). */
+  --fort-text: #dce6f2;
   --fort-orange: #ed4929;
   --fort-orange-text: #ee694f;
   --fort-idle: #2c4362;
@@ -912,9 +914,9 @@ a.ghost { text-decoration: none; display: inline-block; }
 .weeks .weekdays { background: var(--surface); }
 .weeks .weeks-top + .grid-row { border-top: 0; }
 .every-week { background: color-mix(in srgb, var(--accent) 7%, var(--surface)); }
-.every-week .week-head { background: var(--hero); color: #fff; }
+.every-week .week-head { background: var(--hero); color: var(--fort-text); }
 .every-week .week-head .kicker { color: var(--fort-label); }
-.every-hint { font-size: 0.75rem; color: #d6e2f0; }
+.every-hint { font-size: 0.75rem; color: var(--fort-text); }
 .weeks .every-week .day { min-height: 84px; background: transparent; }
 .weeks .every-week .day:hover:not(:disabled), .weeks .every-week .day.selected { background: var(--surface); }
 .every-entry {
