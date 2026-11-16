@@ -53,33 +53,43 @@ struct RoutineTimerPreview: Equatable {
 }
 
 extension HomeRoutineDraft {
+    /// Every work set and rest in order, with each exercise's own sets,
+    /// reps or hold where it has them (app-design-pass P27).
     func timerPreview(for exercises: [ExerciseCatalog]) -> RoutineTimerPreview? {
-        guard validationMessage(for: exercises) == nil, let sets = Int(sets.trimmingCharacters(in: .whitespacesAndNewlines)) else { return nil }
-        let workSeconds = Int(seconds.trimmingCharacters(in: .whitespacesAndNewlines))
-        let repetitions = Int(reps.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard validationMessage(for: exercises) == nil else { return nil }
         let regularRest = Int(rest.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
         let transition = Int(transitionRest.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
         let round = Int(roundRest.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        // (exercise index, set number, sets in all) for each work set.
+        var work: [(index: Int, set: Int, of: Int)] = []
+        if circuit {
+            guard let rounds = Self.number(sets, in: Self.setRange) else { return nil }
+            for set in 1...rounds { for index in exercises.indices { work.append((index, set, rounds)) } }
+        } else {
+            for (index, exercise) in exercises.enumerated() {
+                guard let count = self.sets(for: exercise) else { return nil }
+                for set in 1...count { work.append((index, set, count)) }
+            }
+        }
         var steps: [RoutineTimerPreview.Step] = []
         var timedWorkSeconds = 0, restSeconds = 0, untimedSets = 0
-        let count = exercises.count * sets
-        for workIndex in 0..<count {
-            let exerciseIndex = circuit ? workIndex % exercises.count : workIndex / sets
-            let set = circuit ? workIndex / exercises.count + 1 : workIndex % sets + 1
-            let exercise = exercises[exerciseIndex]
+        for (position, item) in work.enumerated() {
+            let exercise = exercises[item.index]
             let timed = isTimed(exercise)
+            guard let value = amount(for: exercise) else { return nil }
+            let context = "\(circuit ? "Round" : "Set") \(item.set) of \(item.of)"
             steps.append(.init(id: steps.count, kind: .work, exerciseID: exercise.id, title: exercise.name,
-                context: "\(circuit ? "Round" : "Set") \(set) of \(sets)", seconds: timed ? workSeconds : nil,
-                reps: timed ? nil : repetitions, perSide: !timed && exercise.laterality == "unilateral"))
-            if timed { timedWorkSeconds += workSeconds! } else { untimedSets += 1 }
-            guard workIndex + 1 < count else { continue }
-            let endsRound = exerciseIndex + 1 == exercises.count
+                context: context, seconds: timed ? value : nil,
+                reps: timed ? nil : value, perSide: !timed && exercise.laterality == "unilateral"))
+            if timed { timedWorkSeconds += value } else { untimedSets += 1 }
+            guard position + 1 < work.count else { continue }
+            let endsRound = item.index + 1 == exercises.count
             let pause = circuit ? (endsRound ? round : transition) : regularRest
             guard pause > 0 else { continue }
             restSeconds += pause
             steps.append(.init(id: steps.count, kind: .rest, exerciseID: exercise.id,
                 title: circuit ? (endsRound ? "Between rounds" : "Between exercises") : "After the set",
-                context: "\(circuit ? "Round" : "Set") \(set) of \(sets)", seconds: pause, reps: nil, perSide: false))
+                context: context, seconds: pause, reps: nil, perSide: false))
         }
         return RoutineTimerPreview(steps: steps, timedWorkSeconds: timedWorkSeconds, restSeconds: restSeconds, untimedSets: untimedSets)
     }

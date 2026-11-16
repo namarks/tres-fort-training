@@ -600,6 +600,48 @@ The owner chose to keep importing all Health history. P26 addresses that.
     date and decoding the start. Needs the owner's look on a TestFlight
     build like P5.
 
+- [ ] **P27 — Add to your week reads top down**
+  - The owner, adding a routine at home to a Tuesday on TestFlight, found
+    the sheet hard to read: the suggested core routine looked fixed and
+    "My own" was easy to miss, the second row of type tiles was wider than
+    the first, the day and time sat below the fold, and the optional name
+    came first. After picking this layout, the owner asked that suggested
+    routines read as suggestions, that building one's own be easy, and
+    that exercises can be dragged into order.
+  - The type tiles are one row of one size that scrolls sideways: the kind
+    the sheet opened on first, then the member's most frequent, and Saved
+    last. The next tile peeks in at the edge.
+  - When comes first, right under the tiles: the weekdays, "At a set time"
+    with its time, and "Keep what's on those days". Then what (a run's
+    distance or time, a ride, a routine), and the optional name last,
+    saying it's saved to the workouts to add again from Saved or rename
+    later.
+  - A routine at home is built right in its list. "+ Your own" is the
+    first chip and opens the no-equipment catalog; Core, Stretching and
+    Bodyweight are suggestions, headed "Suggested core routine · yours to
+    change". Drag to reorder, swipe to remove, Add exercise for more, and
+    tap one exercise for its own sets and reps or hold (a circuit's rounds
+    stay shared). Sets and rests opens the routine's shared timing, circuit
+    choice and timer preview, which follows each exercise's own values.
+    Add saves the list as shown through the same prescribed-workout save;
+    a retry after a lost reply sends the same request, so it never makes a
+    second routine. The review screen stays for lifts.
+  - A second routine from the same starter is named "Core routine 2"
+    instead of being refused until the member types a new name.
+  - Today's Add another workout, which offered only Freestyle and the
+    saved list, gets the same start: "Build one now" with the same chips
+    opens the same list, with Start instead of days. Start saves the
+    routine to the library first, then starts it as the day's next
+    workout, so it can be done again from Saved. Saved rows show what
+    each workout is ("6 × 400 m", "Swing, goblet squat, press +3")
+    instead of an exercise count.
+  - No backend change and no migration. Unit tests cover the tile order,
+    the numbered name, the chip order and an exercise's own sets, reps and
+    hold in the saved request and timer preview, and the shared routine
+    builder's suggestions, your own and a late catalog; the mixed-week journey
+    sets the routine's timing from its list. The mock kit's Add to your week screens show
+    the new layout. Needs the owner's look on a TestFlight build like P5.
+
 ## Execution frontier
 
 - P5
@@ -624,6 +666,7 @@ The owner chose to keep importing all Health history. P26 addresses that.
 - P24
 - P25
 - P26
+- P27
 
 ## Dependencies
 
@@ -633,16 +676,16 @@ The owner chose to keep importing all Health history. P26 addresses that.
 
 ## Next step
 
-**Now (@agent):** Land P25 (Details, Swap and Skip for a planned day)
-with green CI and a clean Codex review, then capture the real Today card,
-Details and Swap on the Mac mini.
+**Now (@agent):** Land P27 (Add to your week reads top down) with green
+CI and a clean Codex review, then capture the real sheet on the Mac mini
+along with P25's Today card, Details and Swap.
 
 **Then (@owner):** TestFlight builds since 66 carry P0 to P8. Try them on the
 iPhone. P9 to P19 are in TestFlight 1.2 (75); P20 reaches the phone with the next TestFlight build,
 which needs its own go-ahead. P24 (rides, swims, routines at home and a
 time while adding) is in TestFlight 79 and needs the same
 look. P25 reaches the phone with the next TestFlight build after it merges.
-P26 (the calendar's list follows its month) reaches it the same way.
+P26 (the calendar's list follows its month) reaches it the same way. P27 (Add to your week reads top down) does too.
 
 ## Notes / open questions
 

@@ -49,6 +49,24 @@ extension XCUIElement {
 }
 
 extension XCUIApplication {
+    /// Brings a kind tile on Add to your week into view. The tiles are one
+    /// row that scrolls sideways (app-design-pass P27), so a vertical swipe
+    /// never reveals one past the screen's edge: drag the row instead, in
+    /// short slow drags that stop where the finger stops.
+    @discardableResult
+    func revealComposerKind(_ kind: String, maxDrags: Int = 6) -> XCUIElement {
+        let tile = buttons["composer.kind.\(kind)"]
+        let strip = scrollViews["composer.kinds"]
+        _ = tile.waitForExistence(timeout: UITestWait.screen)
+        for _ in 0..<maxDrags where !(tile.isHittable && frame.contains(tile.frame)) {
+            guard strip.exists else { break }
+            let start = strip.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
+            let end = strip.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.5))
+            start.press(forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.3)
+        }
+        return tile
+    }
+
     /// Scrolls the current screen in short, slow drags until `element` can be
     /// tapped, and reports whether it can. Use it instead of a `swipeUp()`
     /// loop: a swipe is a fling, and on a loaded simulator one fling can carry

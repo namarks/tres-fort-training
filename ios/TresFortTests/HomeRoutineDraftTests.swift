@@ -48,6 +48,49 @@ final class HomeRoutineDraftTests: XCTestCase {
         XCTAssertTrue(request.slots.allSatisfy { $0.group_id == nil && $0.group_rest_seconds == nil })
     }
 
+    func testAnExerciseSetOnItsOwnKeepsItsSetsAndAmount() throws {
+        let exercises = [exercise("ex_dead_bug"), exercise("ex_plank", modality: "timed"), exercise("ex_bird_dog")]
+        var draft = HomeRoutineDraft()
+        draft.overrides["ex_dead_bug"] = .init(sets: 4, reps: 12)
+        draft.overrides["ex_plank"] = .init(seconds: 60)
+        let request = try XCTUnwrap(draft.request(name: "Core", exercises: exercises, planID: "plan", version: 1))
+        XCTAssertEqual(request.slots.map(\.target_sets), [4, 3, 3], "The others keep the routine's sets")
+        XCTAssertEqual(request.slots.map(\.target_reps), [12, 60, 8])
+        XCTAssertEqual(request.slots.map(\.target_duration_s), [nil, 60, nil])
+        XCTAssertEqual(draft.targetLabel(for: exercises[0]), "4 × 12 reps")
+        XCTAssertEqual(draft.targetLabel(for: exercises[1]), "3 × 60s")
+        XCTAssertEqual(draft.targetLabel(for: exercises[2]), "3 × 8 reps")
+
+        // A circuit's rounds are shared; an exercise's own reps still count.
+        draft.circuit = true
+        let circuit = try XCTUnwrap(draft.request(name: "Core", exercises: exercises, planID: "plan", version: 1))
+        XCTAssertEqual(circuit.slots.map(\.target_sets), [3, 3, 3])
+        XCTAssertEqual(circuit.slots.map(\.target_reps), [12, 60, 8])
+
+        // Timing every exercise uses its own hold, not its reps.
+        draft.circuit = false
+        draft.timeEveryExercise = true
+        let timed = try XCTUnwrap(draft.request(name: "Core", exercises: exercises, planID: "plan", version: 1))
+        XCTAssertEqual(timed.slots.map(\.target_duration_s), [45, 60, 45])
+
+        // The timer preview follows each exercise's own sets and hold.
+        var previewed = HomeRoutineDraft()
+        previewed.rest = "0"
+        previewed.overrides["ex_plank"] = .init(sets: 1, seconds: 60)
+        let preview = try XCTUnwrap(previewed.timerPreview(for: [exercises[1], exercises[0]]))
+        XCTAssertEqual(preview.steps.filter { $0.kind == .work }.map(\.exerciseID),
+                       ["ex_plank", "ex_dead_bug", "ex_dead_bug", "ex_dead_bug"])
+        XCTAssertEqual(preview.timedWorkSeconds, 60)
+        XCTAssertEqual(preview.untimedSets, 3)
+
+        // A shared value every exercise overrides doesn't block saving.
+        var own = HomeRoutineDraft()
+        own.reps = ""
+        own.overrides["ex_dead_bug"] = .init(reps: 10)
+        XCTAssertNil(own.validationMessage(for: [exercises[0]]))
+        XCTAssertNotNil(own.validationMessage(for: [exercises[0], exercises[2]]))
+    }
+
     func testInvalidInputCannotSilentlySaveDefaultTargets() {
         let exercises = [exercise("ex_plank", modality: "timed")]
         for value in ["", "0", "-1", "1.5", "abc", "7201", "999999999999999999999999"] {
@@ -75,5 +118,51 @@ final class HomeRoutineDraftTests: XCTestCase {
         let request = try XCTUnwrap(draft.request(name: "Core", exercises: exercises, planID: "plan", version: 1))
         XCTAssertEqual(request.slots.map(\.rest_seconds), [60, 60])
         XCTAssertEqual(request.slots.map(\.group_rest_seconds), [60, 60])
+    }
+
+    /// Add to your week and Today's Add another workout share one builder:
+    /// a suggestion is filled from the catalog, your own starts empty with
+    /// the catalog open, and a removed exercise drops its own targets.
+    func testTheRoutineBuilderStartsFromASuggestionOrYourOwn() {
+        let catalog = ["ex_plank", "ex_dead_bug", "ex_side_plank", "ex_bird_dog", "ex_hollow",
+                       "ex_pushup", "ex_bw_squat", "ex_bw_reverse_lunge", "ex_glute_bridge_march"]
+            .map { exercise($0) }
+        var builder = HomeRoutineBuilder(catalog: catalog)
+        XCTAssertEqual(builder.start, .core)
+        XCTAssertEqual(builder.exercises.map(\.id), PlanComposer.HomeStart.core.exerciseIDs)
+        XCTAssertTrue(builder.isReady)
+        XCTAssertFalse(builder.adding)
+        XCTAssertEqual(builder.timingSummary, "3 sets · 2 min rest")
+        XCTAssertEqual(builder.header, "Suggested core routine · yours to change")
+
+        builder.routine.overrides["ex_dead_bug"] = .init(sets: 2)
+        builder.remove(catalog[1])
+        XCTAssertNil(builder.routine.overrides["ex_dead_bug"])
+        XCTAssertFalse(builder.exercises.contains { $0.id == "ex_dead_bug" })
+        XCTAssertTrue(builder.touched)
+
+        builder.choose(.bodyweight, catalog: catalog)
+        XCTAssertTrue(builder.routine.circuit)
+        XCTAssertFalse(builder.touched)
+        XCTAssertEqual(builder.timingSummary, "3 rounds · circuit")
+
+        builder.choose(.own, catalog: catalog)
+        XCTAssertTrue(builder.exercises.isEmpty)
+        XCTAssertFalse(builder.isReady)
+        XCTAssertTrue(builder.adding)
+        XCTAssertEqual(builder.header, "Your routine")
+        builder.refill(catalog: catalog)
+        XCTAssertTrue(builder.exercises.isEmpty, "Your own never refills with a suggestion")
+
+        // A catalog that loads after the screen opens fills an untouched
+        // suggestion, never one the member emptied.
+        var late = HomeRoutineBuilder(start: .core, catalog: [])
+        XCTAssertTrue(late.exercises.isEmpty)
+        late.refill(catalog: catalog)
+        XCTAssertEqual(late.exercises.count, 5)
+        late.exercises.removeAll()
+        late.touched = true
+        late.refill(catalog: catalog)
+        XCTAssertTrue(late.exercises.isEmpty)
     }
 }

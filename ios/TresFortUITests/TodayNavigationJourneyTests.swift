@@ -720,17 +720,21 @@ final class TodayNavigationJourneyTests: XCTestCase {
             tap(app.buttons["today.planWeek"], in: app)
             XCTAssertTrue(app.navigationBars["Add to your week"].waitForExistence(timeout: UITestWait.screen))
 
-            // Home routines reach review only after this public entry has
-            // recovered the plan; lifting now creates its plan atomically.
-            tap(app.buttons["composer.kind.home"], in: app)
+            // Home routines are built in the composer only after this public
+            // entry has recovered the plan; lifting creates its plan atomically.
+            tap(app.revealComposerKind("home"), in: app)
             XCTAssertTrue(app.scroll(toReveal: app.buttons["composer.day.tue"]))
             tap(app.buttons["composer.day.tue"], in: app)
-            tap(app.buttons["composer.save"], in: app)
-            tap(app.buttons["exercisePicker.exercise.synthetic-core"], in: app)
-            tap(app.buttons["createWorkout.review"], in: app)
-            XCTAssertTrue(app.navigationBars["Review workout"].waitForExistence(timeout: UITestWait.screen))
-            XCTAssertEqual(app.textFields["createWorkout.name"].value as? String, "Core routine")
-            XCTAssertTrue(app.buttons["createWorkout.create"].isEnabled)
+            XCTAssertTrue(app.scroll(toReveal: app.buttons["composer.home.add"]))
+            tap(app.buttons["composer.home.add"], in: app)
+            tap(app.buttons["homePicker.exercise.synthetic-core"], in: app)
+            tap(app.buttons["homePicker.done"], in: app)
+            XCTAssertTrue(app.scroll(toReveal: app.buttons["composer.home.exercise.synthetic-core"]))
+            let name = app.textFields["composer.name"]
+            XCTAssertTrue(app.scroll(toReveal: name))
+            XCTAssertEqual(name.placeholderValue, "Core routine")
+            XCTAssertEqual(app.buttons["composer.save"].label, "Add to Tuesdays")
+            XCTAssertTrue(app.buttons["composer.save"].isEnabled)
             app.terminate()
         }
     }
