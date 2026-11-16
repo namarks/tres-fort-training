@@ -212,11 +212,24 @@ export function suggestedSorting(program: ProgramBody, schedule: WeekPattern, wo
 }
 
 /** A block that lists `picked` as its own, from one that listed none: own
- * form against the repeating week once those workouts leave it. */
-export function sortingBlock(program: ProgramBody, schedule: WeeklySchedule, picked: readonly string[]): ProgramBody {
+ * form against the repeating week once those workouts leave it. A workout
+ * left out keeps none of the targets the weeks gave it, as when it is
+ * removed from a block: they would still apply, with nowhere to change them. */
+export function sortingBlock(
+  program: ProgramBody, schedule: WeeklySchedule, picked: readonly string[], workouts: readonly Workout[],
+): ProgramBody {
   const trimmed = trimmedSchedule(schedule, picked) ?? schedule;
+  const left = new Set(workouts.filter((workout) => !picked.includes(workout.id)).flatMap((workout) => workout.exercises.map((slot) => slot.id)));
+  const weeks = program.weeks.map((week) => {
+    if (!week.targets) return week;
+    const targets = Object.fromEntries(Object.entries(week.targets).filter(([id]) => !left.has(id)));
+    const next = { ...week };
+    if (Object.keys(targets).length > 0) next.targets = targets;
+    else delete next.targets;
+    return next;
+  });
   // Whatever the repeating week still holds on a day is its own there.
-  return ownForm({ ...program, workout_ids: [...picked] }, trimmed);
+  return ownForm({ ...program, weeks, workout_ids: [...picked] }, trimmed);
 }
 
 /** Most workouts one day holds: its main one and the ones beside it. */

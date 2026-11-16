@@ -440,7 +440,11 @@ function SortBlock({ block, state, busy }: { block: ActiveBlock; state: StateRes
         })}
       </fieldset>
       <button type="button" disabled={busy || picked.length === 0 || !!block.problem || block.needsReview}
-        onClick={() => block.setDraft(sortingBlock(block.draft, plan.schedule, picked))}>Keep these as the block’s own</button>
+        onClick={() => block.setDraft(sortingBlock(block.draft, plan.schedule, picked, plan.workouts))}>Keep these as the block’s own</button>
+      {inBlock.some((workout) => !picked.includes(workout.id)
+        && block.draft.weeks.some((week) => workout.exercises.some((slot) => week.targets?.[slot.id] !== undefined))) && (
+        <p role="status" className="muted fine">An unticked workout goes back to its own targets every week; the week-by-week targets this block gave it are removed.</p>
+      )}
       <p className="muted fine">Nothing is saved until you choose Save changes.</p>
     </section>
   );

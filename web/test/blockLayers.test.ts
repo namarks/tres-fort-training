@@ -152,9 +152,13 @@ describe('a block beside the repeating week', () => {
     const legacy: ProgramBody = { start: '2026-11-16', repeat: false,
       weeks: [{ week: { ...none, mon: 'soccer', tue: 'lift', fri: 'tempo' }, extras: { mon: ['core'], tue: ['core'] }, targets: { squat: { target_reps: 8 } } }] };
     expect(suggestedSorting(legacy, usual, all)).toEqual(['lift']);
-    const sorted = sortingBlock(legacy, usual, ['lift', 'tempo']);
+    const sorted = sortingBlock(legacy, usual, ['lift', 'tempo'], all);
     expect(sorted.workout_ids).toEqual(['lift', 'tempo']);
     expect(sorted.weeks[0]).toEqual({ week: { ...none, tue: 'lift', fri: 'tempo' }, targets: { squat: { target_reps: 8 } } });
+    // A workout left every week keeps none of the block's targets, which would still apply unseen.
+    const withCore: ProgramBody = { ...legacy, weeks: legacy.weeks.map(week => ({ ...week, targets: { ...week.targets, 'core-slot': { target_sets: 5 } } })) };
+    expect(sortingBlock(withCore, usual, ['lift', 'tempo'], all).weeks[0]!.targets).toEqual({ squat: { target_reps: 8 } });
+    expect(sortingBlock(withCore, usual, ['tempo'], all).weeks[0]!.targets).toBeUndefined();
   });
 
   it('says what a workout asks for in each week', () => {
