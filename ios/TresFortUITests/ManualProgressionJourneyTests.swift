@@ -12,7 +12,19 @@ final class ManualProgressionJourneyTests: XCTestCase {
         XCTAssertEqual(value.value as? String, "3")
         replace(value, with: "5", in: app)
         let later = app.switches["plan.targets.later"]
-        XCTAssertTrue(app.scroll(toReveal: later, searchingUp: true)); later.tap()
+        XCTAssertTrue(app.scroll(toReveal: later, searchingUp: true))
+        // The Switch accessibility frame includes its label; tap the visible
+        // trailing switch, then verify the reviewed scope before saving.
+        later.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+        XCTAssertEqual(later.value as? String, "1")
+        XCTAssertEqual(app.staticTexts["plan.targets.scopeExplanation"].label, "Weeks 2–3 of this block.")
+        for week in [2, 3] {
+            let preview = app.staticTexts.matching(NSPredicate(
+                format: "identifier BEGINSWITH %@ AND label BEGINSWITH %@",
+                "plan.targets.preview.", "Week \(week) · Strength A, Barbell Squat, Sets / rounds:")).firstMatch
+            XCTAssertTrue(app.scroll(toReveal: preview))
+            XCTAssertEqual(preview.label, "Week \(week) · Strength A, Barbell Squat, Sets / rounds: 3 → 5")
+        }
         app.buttons["plan.targets.save"].tapWhenReady()
         assertEditorClosed(app)
         XCTAssertTrue(app.buttons["plan.block.menu"].waitForExistence(timeout: UITestWait.screen))
