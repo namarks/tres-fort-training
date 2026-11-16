@@ -416,17 +416,18 @@ export async function mixedWeekJourney({ page, origin, width, apiCall }) {
     assert.deepEqual(state.plan.schedule.extras[day], [core.id]);
     assert.deepEqual(state.plan.schedule.times[day], { [run.id]: '07:00', [core.id]: '18:00' });
   }
-  const routine = page.getByRole('region', { name: 'Your usual week', exact: true });
+  const routine = page.getByRole('row', { name: 'Every week', exact: true });
   await routine.waitFor();
   assert.match(await routine.innerText(), /Evening core/);
-  await click(routine.getByRole('button', { name: 'Edit Tuesday', exact: true }));
+  await click(routine.getByRole('gridcell', { name: 'Edit Tuesday', exact: true }));
   let edit = page.getByRole('form', { name: 'Edit Tuesday', exact: true });
   await edit.getByLabel('Time for Evening core · optional', { exact: true }).fill('18:30');
   await click(edit.getByRole('button', { name: 'Cancel', exact: true }));
   assert.equal((await apiCall('GET', '/api/state')).plan.version, state.plan.version, 'Cancelling a day edit writes nothing.');
-  await click(routine.getByRole('button', { name: 'Edit Tuesday', exact: true }));
+  await click(routine.getByRole('gridcell', { name: 'Edit Tuesday', exact: true }));
   edit = page.getByRole('form', { name: 'Edit Tuesday', exact: true });
   assert.equal(await edit.getByLabel('Time for Evening core · optional', { exact: true }).inputValue(), '18:00');
+  await screenshot(page, `web-plan-every-tuesday-${width}.png`);
   await edit.getByLabel('Time for Evening core · optional', { exact: true }).fill('18:30');
   await click(edit.getByRole('button', { name: 'Save Tuesday', exact: true }));
   await edit.waitFor({ state: 'detached' });

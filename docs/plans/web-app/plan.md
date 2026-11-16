@@ -211,9 +211,24 @@ partner training are not web features.
     "Take your week to iPhone" and "Build on your week" sections and the
     "Create another workout" button are removed, which retires the
     2026-11-12 handoff and the 2026-11-13 block guidance above. No API
-    change. How the repeating week is laid out on the Schedule tab is the
-    owner's open choice among three mocked options (the week pinned as the
-    calendar's first row is recommended).
+    change.
+  - Then (owner, 2026-11-16, picked from three mocked options: the usual
+    week was shown twice, as calendar rows and as seven "Your usual week"
+    cards over a row of workout chips whose purpose was unclear): the
+    repeating week is the calendar's first row, "Every week", in the same
+    seven columns as the dates and fixed above them while the weeks scroll
+    (`web/src/EveryWeek.tsx`). Choosing a day in it opens "Every Tuesday"
+    beside the calendar: the day's workouts with a time each, Remove, Make
+    main, and a searchable list to add a workout, run or activity. It saves
+    through the same `PUT /api/plan/schedule` write. The seven cards, the
+    chip row and dragging a chip onto a day are removed; "Add to my week"
+    from a workout opens its form at the top of the Schedule tab. No API
+    change. Open (owner, 2026-11-16: the repeating week and training
+    blocks "don't interact well"): inside a block the block's own week
+    still replaces the top row for its dates, and the panel says so. A
+    proposal that the top row always applies, with a block holding only
+    the weeks that differ, is with the owner; it needs an optional flag on
+    the schedule write and so an API release.
 - [ ] **P3 — Trends and progress**
   - Equal in importance to plan editing; it can run alongside P2 once P1 is
     in.
@@ -363,10 +378,13 @@ charts and exact workout correction. Earlier private PR numbers are historical
 source-delivery references, not pending public-repository work.
 
 Plan page simplification (owner, 2026-11-16): the tabs, the Training block
-button and the removed sections are built. Build the repeating week's layout
-on the Schedule tab once the owner picks among the mocked options; it should
-replace the "Your usual week" cards and workout chips rather than add a
-second editor.
+button, the removed sections and the repeating week as the calendar's first
+row are built. Still to build from the picked option: away dates behind a
+button, a shorter date panel (swap, move, skip, and a link to change that
+weekday every week), a mark on dates that differ from the week, and the
+Workouts tab naming the days each workout is on. How a block shows against
+the top row waits for the owner's choice between the proposal above and
+keeping the two separate with clearer labels.
 
 **Later (@agent):** Date-only replacement of scheduled extras still needs a
 shared replacement/lineage contract, as described in member activation P7.

@@ -2,7 +2,8 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, use
 import { addDays, programWeekOn, weekdayOf } from '../../src/calendarProjection';
 import { MAX_SCHEDULE_EXTRAS, WEEKDAYS, type TrainingProgram, type Weekday, type WeeklySchedule } from '../../src/types';
 import type { StateActivity, StateResponse } from './api';
-import { AwayDates, DateActions, RoutineEditor } from './CalendarEditing';
+import { AwayDates, DateActions } from './CalendarEditing';
+import { AddWorkoutToWeek, EveryWeekRow, EveryWeekdayPanel } from './EveryWeek';
 import { RouteMap } from './RouteMapView';
 import { ActivityCharts } from './ActivityChartsView';
 import { chartableActivities } from './activityCharts';
@@ -63,12 +64,13 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 /** Weeks added each time the list reaches its top or bottom. */
 const WEEKS_PER_LOAD = 4;
 
-/** Scrolls the week box so last week sits under the weekday names. False
+/** Scrolls the week box so last week sits under the pinned rows (the
+ * weekday names and the repeating week). False
  * when the box can't scroll that far yet (too few weeks below). */
 function placeLastWeek(box: HTMLElement, thisMonday: string, smooth: boolean): boolean {
   const lastWeek = box.querySelector<HTMLElement>(`[data-monday="${addDays(thisMonday, -7)}"]`)
     ?? box.querySelector<HTMLElement>(`[data-monday="${thisMonday}"]`);
-  const header = box.querySelector<HTMLElement>('.weekdays');
+  const header = box.querySelector<HTMLElement>('.weeks-top') ?? box.querySelector<HTMLElement>('.weekdays');
   const top = Math.max(0, lastWeek
     ? box.scrollTop + lastWeek.getBoundingClientRect().top - box.getBoundingClientRect().top - box.clientTop - (header?.offsetHeight ?? 0)
     : 0);
@@ -192,7 +194,9 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
   const [later, setLater] = useState(0);
   const [starting, setStarting] = useState(!!startBlock);
   const [lighterWeek, setLighterWeek] = useState<number | null>(null);
-  const [routineRequest, setRoutineRequest] = useState<{ day: Weekday; key: number } | null>(null);
+  // The weekday of the repeating week open in the side panel, if any.
+  const [weekday, setWeekday] = useState<Weekday | null>(null);
+  const [addDismissed, setAddDismissed] = useState<string | null>(null);
   const [editSelection, setEditSelection] = useState<DateWorkoutSelection | null>(null);
   const [editBlocked, setEditBlocked] = useState(false);
   useEffect(() => { if (startBlock) setStarting(true); }, [startBlock]);
@@ -232,9 +236,10 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
   const sports = useMemo(() => activitySports(state), [state]);
   const routable = useMemo(() => routableActivityIds(state), [state]);
   const chartable = useMemo(() => chartableActivities(state), [state]);
-  useEffect(() => {
-    if (scheduleWorkoutId) document.getElementById('routine-title')?.scrollIntoView({ block: 'start' });
-  }, [scheduleWorkoutId]);
+  useEffect(() => { setAddDismissed(null); if (scheduleWorkoutId) setWeekday(null); }, [scheduleWorkoutId]);
+  // A newer plan closes the weekday form: its draft was made from the older week.
+  const planVersion = plan?.version;
+  useEffect(() => setWeekday(null), [planVersion]);
   const dateEditPanel = accountId && reload && onSignedOut ? <DateWorkoutEdit key={accountId} selection={editSelection} state={state}
     accountId={accountId} today={today} busy={busy} reload={reload} onSignedOut={onSignedOut}
     onEdit={onEditWorkout} onClose={() => setEditSelection(null)} /> : null;
@@ -254,10 +259,12 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
   const showStart = !active && !starting && routineIsEmpty(plan.schedule);
   const lastIndex = active ? active.draft.weeks.length - 1 : -1;
   const endRow = active ? rows.findIndex((row) => row.week === lastIndex) : -1;
-  const editUsualDay = (day: Weekday) => {
-    setRoutineRequest({ day, key: Date.now() });
-    scrollToId('routine-title');
-  };
+  const adding = scheduleWorkoutId && scheduleWorkoutId !== addDismissed
+    ? [...live.values()].find((workout) => workout.id === scheduleWorkoutId) : undefined;
+  const reviewed = { planId: plan.id, version: plan.version };
+  const weekScope = active
+    ? (active.draft.repeat ? 'Your block has its own weeks, so this week waits until the block ends.' : 'Fills the weeks before and after your block. The block has its own weeks.')
+    : null;
   const selectedWeek = programWeekOn(program, selected);
 
   return (
@@ -268,7 +275,7 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
             <h1 id="plan-title">{active ? (active.draft.name?.trim() || 'Your block') : 'Your plan'}</h1>
             <p className="muted">
               {active ? blockSummary(active.draft, active.thisWeek)
-                : 'Your usual week repeats every week. Choose any day to change it.'}
+                : 'The top row repeats every week. Choose a day in it, or any date.'}
             </p>
           </div>
           <div className="block-actions">
@@ -291,7 +298,11 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
             <button type="button" onClick={block.clear}>Discard unreadable draft</button>
           </div>
         )}
-        {showStart && <PlanStart hasWorkouts={hasWorkouts} onUsualWeek={() => scrollToId('routine-title')}
+        {adding && <AddWorkoutToWeek key={`${plan.id}:${plan.version}:${adding.id}`} workout={adding} workouts={plan.workouts}
+          schedule={plan.schedule} reviewed={reviewed} write={write} busy={busy}
+          onDone={() => { setAddDismissed(adding.id); onScheduled?.(); }}
+          onCancel={() => { setAddDismissed(adding.id); onScheduled?.(); }} />}
+        {showStart && !adding && <PlanStart hasWorkouts={hasWorkouts} onUsualWeek={() => setWeekday('mon')}
           onBlock={() => setStarting(true)} onCreate={() => onEditWorkout(null)} />}
         {(starting || !!newBlockDraft.record || newBlockDraft.unreadable) && (!active || !!newBlockDraft.record || newBlockDraft.unreadable) && (hasWorkouts
           ? <NewBlock accountId={accountId ?? 'none'} state={state} workouts={plan.workouts} write={write} busy={busy} today={today} onCancel={() => setStarting(false)} />
@@ -306,9 +317,13 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
           <button type="button" className="ghost small" onClick={scroller.toThisWeek}>This week</button>
         </div>
         <div className="grid weeks" role="grid" aria-labelledby="plan-title" ref={scroller.boxRef}>
-          <div className="grid-row weekdays" role="row">
-            <div role="columnheader" className="week-col">Week</div>
-            {WEEKDAYS.map((day) => <div key={day} role="columnheader">{WEEKDAY_LABELS[day].slice(0, 3)}</div>)}
+          <div className="weeks-top" role="rowgroup">
+            <div className="grid-row weekdays" role="row">
+              <div role="columnheader" className="week-col">Week</div>
+              {WEEKDAYS.map((day) => <div key={day} role="columnheader">{WEEKDAY_LABELS[day].slice(0, 3)}</div>)}
+            </div>
+            <EveryWeekRow schedule={plan.schedule} workouts={plan.workouts} selected={weekday} disabled={!!adding}
+              onSelect={setWeekday} hint={active ? 'Outside your block' : 'Fills every week below'} />
           </div>
           {scroller.canAdd && (
             <div role="row" className="grid-row weeks-more" ref={scroller.topRef}>
@@ -333,9 +348,9 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
                       activities={state.external_activities}
                       monthLabel={index === 0 && d === 0}
                       isToday={date === today}
-                      isSelected={date === selected}
+                      isSelected={weekday === null && date === selected}
                       sports={sports}
-                      onSelect={() => setSelected(date)}
+                      onSelect={() => { setSelected(date); setWeekday(null); }}
                     />
                   );
                 })}
@@ -371,10 +386,6 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
           <TargetsByWeek draft={active.draft} workouts={workoutsInBlock(active.draft, plan.workouts)} onChange={active.setDraft}
             inputs={active.inputs} onInput={active.editInput} onReset={active.resetInputs} />
         )}
-        <RoutineEditor schedule={plan.schedule} workouts={plan.workouts} write={write} busy={busy}
-          reviewed={{ planId: plan.id, version: plan.version }} selectedWorkoutId={scheduleWorkoutId}
-          onScheduled={onScheduled} onCancelSelection={onScheduled} openDayRequest={routineRequest}
-          hint={active ? 'Your usual week fills every week outside your block.' : undefined} />
         <AwayDates trips={plan.trips ?? []} today={today} version={plan.version} write={write} busy={busy} />
         {active?.dirty && (
           <div className="block-savebar" role="status">
@@ -384,7 +395,13 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
         )}
       </section>
 
-      <DayDetail
+      {weekday ? (
+        <aside className="detail" aria-labelledby="every-day-title">
+          <EveryWeekdayPanel key={`${plan.id}:${weekday}`} day={weekday} schedule={plan.schedule} workouts={plan.workouts}
+            reviewed={reviewed} write={write} busy={busy} onClose={() => setWeekday(null)} onNewWorkout={() => onEditWorkout(null)}
+            scope={weekScope ?? `Fills each ${WEEKDAY_LABELS[weekday]} you haven’t changed on its own date.`} />
+        </aside>
+      ) : <DayDetail
         date={selected}
         cell={selectedCell}
         workout={workoutFor(selectedCell, workouts)}
@@ -420,10 +437,10 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
             )}
             {active && selectedWeek != null
               ? <BlockDayEditor key={`${selected}`} block={active} date={selected} index={selectedWeek} live={live} busy={busy} />
-              : <UsualDay date={selected} schedule={plan.schedule} workouts={workouts} busy={busy} onEdit={editUsualDay} />}
+              : <UsualDay date={selected} schedule={plan.schedule} workouts={workouts} busy={busy} onEdit={setWeekday} />}
           </>
         )}
-      />
+      />}
     </main>
   );
 }
@@ -667,18 +684,18 @@ function DayCell(props: {
     <button type="button" role="gridcell" className={classes} onClick={onSelect} aria-label={label} aria-pressed={isSelected}>
       <span className="day-number">{monthLabel || dayOfMonth === 1 ? `${MONTHS[Number(date.slice(5, 7)) - 1]} ${dayOfMonth}` : dayOfMonth}</span>
       {status === 'unavailable' || status === 'light' ? <span className="chip away">Away</span> : null}
-      {workout && showWorkout ? <span className={`chip lift ${status ?? ''}`}>{nameAt(workout.name, workout.id, status)}</span> : null}
+      {workout && showWorkout ? <span className={`chip lift ${status ?? ''}`}><span>{nameAt(workout.name, workout.id, status)}</span></span> : null}
       {additional.map((session) => (
         <span key={session.id} className={`chip lift ${session.status}`}>
-          {nameAt(session.kind === 'freestyle' ? 'Freestyle' : workouts.get(session.workout_id ?? '')?.name ?? 'Workout', session.workout_id, session.status)}
+          <span>{nameAt(session.kind === 'freestyle' ? 'Freestyle' : workouts.get(session.workout_id ?? '')?.name ?? 'Workout', session.workout_id, session.status)}</span>
         </span>
       ))}
       {extras.map((extra) => (
-        <span key={`planned:${extra.id}`} className="chip lift projected">{nameAt(extra.name, extra.id, 'projected')}</span>
+        <span key={`planned:${extra.id}`} className="chip lift projected"><span>{nameAt(extra.name, extra.id, 'projected')}</span></span>
       ))}
       {cell?.items.map((item) => (
         <span key={item.id} className={`chip endurance ${item.completed ? 'completed' : ''}`}>
-          {itemTitle(item, sports)}
+          <span>{itemTitle(item, sports)}</span>
         </span>
       ))}
     </button>
