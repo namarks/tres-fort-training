@@ -14,6 +14,8 @@ final class ProgrammingDraftJourneyTests: XCTestCase {
         XCTAssertTrue(app.scroll(toReveal: block)); block.tap()
         app.buttons["plan.blockSetup"].tapWhenReady()
         let name = app.textFields["plan.blockSetup.name"]
+        XCTAssertTrue(name.waitForExistence(timeout: UITestWait.screen))
+        let originalName = name.value as? String
         name.tapWhenReady(); name.typeText("Next strength block")
         app.navigationBars["Plan a block"].buttons["Cancel"].tap()
         let alert = app.alerts["Discard block draft?"]
@@ -21,10 +23,22 @@ final class ProgrammingDraftJourneyTests: XCTestCase {
         XCTAssertEqual(name.value as? String, "Next strength block")
         app.navigationBars["Plan a block"].buttons["Cancel"].tap()
         alert.buttons["Discard draft"].tapWhenReady()
-        XCTAssertFalse(app.buttons["plan.blockSetup.save"].exists)
+        // The alert and its presenting sheet dismiss in separate transitions.
+        // Wait for the setup to leave; an immediate snapshot can still contain
+        // its Save control even after the discard action has run.
+        let setupDismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: app.buttons["plan.blockSetup.save"])
+        XCTAssertEqual(XCTWaiter.wait(for: [setupDismissed], timeout: UITestWait.screen), .completed)
+        XCTAssertTrue(block.waitUntilTappable())
         let writes = app.staticTexts["fixture.plan-writes"]
         XCTAssertTrue(writes.waitForExistence(timeout: UITestWait.screen))
         XCTAssertEqual(writes.value as? String, "0")
+        // Prove discard retired the draft, not just hid the sheet.
+        block.tapWhenReady()
+        app.buttons["plan.blockSetup"].tapWhenReady()
+        XCTAssertTrue(name.waitForExistence(timeout: UITestWait.screen))
+        XCTAssertEqual(name.value as? String, originalName)
     }
 
     func testTagsCancelKeepsTextUntilExplicitDiscard() {

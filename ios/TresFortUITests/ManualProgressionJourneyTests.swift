@@ -49,7 +49,8 @@ final class ManualProgressionJourneyTests: XCTestCase {
         let app = launch(conflict: true)
         let menu = app.buttons["plan.block.menu"]
         XCTAssertTrue(app.scroll(toReveal: menu)); menu.tap()
-        app.buttons["plan.block.lighten"].tapWhenReady()
+        // Native menu actions are selected by their visible accessibility labels.
+        app.buttons["Make week lighter"].tapWhenReady()
         let save = app.buttons["plan.targets.save"]
         XCTAssertTrue(save.waitForExistence(timeout: UITestWait.screen))
         let preview = app.otherElements["plan.targets.preview"]
@@ -89,7 +90,7 @@ final class ManualProgressionJourneyTests: XCTestCase {
     private func openTargets(_ app: XCUIApplication) {
         let menu = app.buttons["plan.block.menu"]
         XCTAssertTrue(app.scroll(toReveal: menu)); menu.tap()
-        app.buttons["plan.block.editTargets"].tapWhenReady()
+        app.buttons["Edit week targets"].tapWhenReady()
         XCTAssertTrue(app.buttons["plan.targets.save"].waitForExistence(timeout: UITestWait.screen))
     }
     private func assertPlanWrites(_ expected: String, app: XCUIApplication) {
