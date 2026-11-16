@@ -30,12 +30,12 @@ export function WeekAdjustment({ block, index, workouts, onClose }: {
     </div>
     <p className="muted fine">Use 0 to keep a target. Sets round down, with at least one. Assistance increases; unknown and zero loads stay as they are. Warm-ups and cardio stay unchanged. Mixed cardio groups keep their rounds.</p>
     {!valid && <p role="alert">Use a percentage from 0 to 90.</p>}
-    {valid && preview.rows.length > 0 ? <div className="block-grid-wrap"><table>
+    {valid && preview.rows.length > 0 ? <div className="block-grid-wrap"><table className="block-targets-table">
       <thead><tr><th>Movement</th><th>Target</th><th>Current week target</th><th>Proposed</th></tr></thead>
       <tbody>{preview.rows.map(row => <tr key={row.key}><th scope="row">{row.workout} · {row.exercise}</th>
         <td>{row.field}</td><td>{row.before} {row.unit}</td><td>{row.after} {row.unit}</td></tr>)}</tbody>
     </table></div> : valid ? <p>No lifting targets would change.</p> : null}
-    <div className="actions"><button type="button" className="primary" disabled={blocked} onClick={() => { block.setDraft(preview.program); onClose(); }}>Apply to block draft</button>
+    <div className="form-actions"><button type="button" className="primary" disabled={blocked} onClick={() => { block.setDraft(preview.program); onClose(); }}>Apply to block draft</button>
       <button type="button" className="ghost" onClick={onClose}>Cancel</button></div>
     <p className="muted fine">Review the block, then save its changes.</p>
   </section>;
