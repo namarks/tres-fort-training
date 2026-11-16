@@ -326,7 +326,7 @@ final class MixedWeekSetupJourneyTests: XCTestCase {
             let frame = toggle.frame
             let bars = app.navigationBars.allElementsBoundByIndex.filter { $0.exists && $0.isHittable }
             let top = (bars.map { $0.frame.maxY }.max() ?? app.frame.minY + 60) + 12
-            let bottom = formBottom(in: app)
+            let bottom = self.formBottom(in: app)
             guard frame.minY >= top, frame.maxY <= bottom else {
                 previousFrame = nil
                 return false
