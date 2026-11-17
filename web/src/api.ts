@@ -297,7 +297,7 @@ export const planWrites = {
     request('DELETE', `/api/plan/trips/${id(tripId)}?expected_version=${at.version}`, undefined, at.accountId),
   /** The whole goal event; fields left out are cleared. */
   setEvent: (race: RaceGoal, at: Reviewed) =>
-    request('PUT', '/api/plan/race', { race, expected_version: at.version }, at.accountId),
+    request<{ version?: number }>('PUT', '/api/plan/race', { race, expected_version: at.version }, at.accountId),
   clearEvent: (at: Reviewed) =>
     request('DELETE', `/api/plan/race?expected_version=${at.version}`, undefined, at.accountId),
   /** The whole block of weeks; weeks, days and targets left out are gone.

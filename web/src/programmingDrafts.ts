@@ -1,6 +1,8 @@
 import { newBlock, type ProgramBody } from './blocks';
 import { isBlockDraft } from './blockDrafts';
+import { applyingBuild, EASY_CHOICES, labelingEasyWeeks, usableBuild, weeksToEvent, type BuildRule, type EasyEvery } from './blockBuild';
 import { newLayeredBlock, suggestedBlockWorkouts } from './blockLayers';
+import type { EventDraft } from './event';
 import { parseTags, tagsOf } from './editing';
 import { WEEKDAYS, type Weekday, type WeeklySchedule } from '../../src/types';
 import type { Workout } from './model';
@@ -16,6 +18,16 @@ export interface NewBlockDraft {
   picked?: string[];
   /** Workouts the block adds that the usual week doesn't hold. */
   added?: { id: string; day: Weekday }[];
+  /** The guided setup (docs/plans/web-app P2): which of its three steps is open. */
+  step?: 1 | 2 | 3;
+  /** An event's date sets the block's length, or the member types the weeks. */
+  purpose?: 'event' | 'weeks';
+  /** The event as typed; saved with the block when the purpose is an event. */
+  event?: EventDraft;
+  /** Workout id → how it builds; a workout without one gets its default. */
+  builds?: Record<string, BuildRule>;
+  /** Every Nth week easier, null for none; left out, the block's default. */
+  easy?: EasyEvery;
 }
 export function newBlockDraft(schedule: WeeklySchedule | null | undefined, workouts: Workout[], start: string): NewBlockDraft {
   const source = newBlock(schedule, workouts, { start, weeks: 1, repeat: false });
@@ -32,7 +44,25 @@ export function isNewBlockDraft(value: unknown): value is NewBlockDraft {
     && Object.values(d.workoutNames).every(name => typeof name === 'string')
     && (d.picked === undefined || (Array.isArray(d.picked) && d.picked.every(id => typeof id === 'string')))
     && (d.added === undefined || (Array.isArray(d.added) && d.added.every(entry => !!entry && typeof entry === 'object'
-      && typeof entry.id === 'string' && (WEEKDAYS as readonly string[]).includes(entry.day))));
+      && typeof entry.id === 'string' && (WEEKDAYS as readonly string[]).includes(entry.day))))
+    && (d.step === undefined || d.step === 1 || d.step === 2 || d.step === 3)
+    && (d.purpose === undefined || d.purpose === 'event' || d.purpose === 'weeks')
+    && (d.event === undefined || isEventDraft(d.event))
+    && (d.builds === undefined || (!!d.builds && typeof d.builds === 'object' && !Array.isArray(d.builds)
+      && Object.values(d.builds).every(isBuildRule)))
+    && (d.easy === undefined || (EASY_CHOICES as readonly unknown[]).includes(d.easy));
+}
+const EVENT_FIELDS = ['name', 'date', 'discipline', 'otherDiscipline', 'distanceChoice', 'customAmount', 'customUnit', 'distanceLabel', 'goal'] as const;
+function isEventDraft(value: unknown): value is EventDraft {
+  return !!value && typeof value === 'object' && EVENT_FIELDS.every(field => typeof (value as Record<string, unknown>)[field] === 'string');
+}
+const BUILD_TARGETS = ['reps', 'load', 'sets', 'time', 'repeats', 'run_time', 'run_distance'];
+function isBuildRule(value: unknown): value is BuildRule {
+  if (!value || typeof value !== 'object') return false;
+  const rule = value as { kind?: unknown; target?: unknown; amount?: unknown };
+  if (rule.kind === 'same' || rule.kind === 'manual') return true;
+  return rule.kind === 'add' && BUILD_TARGETS.includes(rule.target as string)
+    && typeof rule.amount === 'number' && Number.isFinite(rule.amount) && rule.amount > 0;
 }
 /** Whether the draft's week count can be saved. */
 export function validBlockWeeks(text: string): boolean {
@@ -48,6 +78,40 @@ export function newBlockRequest(draft: NewBlockDraft, live?: readonly Workout[])
   const body = newLayeredBlock(draft.source.weeks[0]!, known, { name: draft.name, start: draft.start,
     repeat: draft.repeat, weeks: Number(draft.weeks), picked: draft.picked ?? [], added: draft.added ?? [] });
   if (!body.workout_ids?.length) return null;
+  return isBlockDraft({ programId: 'creation', saved: body, draft: body, identities: {} }) ? body : null;
+}
+
+/** How many weeks the setup asks for: up to the event's week, or as typed.
+ * Null while the event has no usable date or the count isn't 1 to 52. */
+export function setupWeeks(draft: NewBlockDraft): number | null {
+  if (draft.purpose === 'event') return draft.event ? weeksToEvent(draft.start, draft.event.date) : null;
+  return validBlockWeeks(draft.weeks) ? Number(draft.weeks) : null;
+}
+/** Which weeks are easier: the member's choice, else every 4th in a block
+ * long enough to have one. */
+export function setupEasy(draft: NewBlockDraft, weeks: number): EasyEvery {
+  const chosen = draft.easy === undefined ? 4 : draft.easy;
+  return chosen != null && weeks >= chosen ? chosen : null;
+}
+/** The block the guided setup saves: its own workouts on their days for the
+ * weeks asked for, each week filled by the workout's build. Null while a
+ * step is unfinished. */
+export function setupBlockRequest(draft: NewBlockDraft, live: readonly Workout[], miles: boolean): ProgramBody | null {
+  const weeks = setupWeeks(draft);
+  if (weeks == null) return null;
+  const name = draft.name.trim() || (draft.purpose === 'event' ? draft.event?.name.trim() ?? '' : '');
+  const base = newBlockRequest({ ...draft, name, weeks: String(weeks) }, live);
+  if (!base) return null;
+  const easyEvery = setupEasy(draft, weeks);
+  let body = base, builds = false;
+  for (const id of base.workout_ids ?? []) {
+    const workout = live.find(entry => entry.id === id);
+    if (!workout) continue;
+    const rule = usableBuild(workout, draft.builds?.[id], miles);
+    builds ||= rule.kind === 'add';
+    body = applyingBuild(body, workout, rule, { easyEvery, miles });
+  }
+  body = labelingEasyWeeks(body, builds ? easyEvery : null);
   return isBlockDraft({ programId: 'creation', saved: body, draft: body, identities: {} }) ? body : null;
 }
 

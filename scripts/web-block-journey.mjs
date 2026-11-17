@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 
 // A training block beside the repeating week (docs/plans/web-app P2): the
-// Block tab starts one from ticked workouts in a single plan version, shapes
-// its days and weeks without touching what repeats every week, and ends it
-// with one week carried on.
+// Block tab starts one in three steps and a single plan version, fills its
+// weeks from each workout's rule, shapes its days and weeks without touching
+// what repeats every week, and ends it with one week carried on.
 export async function blockBesideWeekJourney({ page, origin, apiCall, width = 1280 }) {
   await page.setViewportSize({ width, height: 1000 });
   const meta = state => (typeof state.plan.meta === 'string' ? JSON.parse(state.plan.meta) : state.plan.meta);
@@ -36,15 +36,40 @@ export async function blockBesideWeekJourney({ page, origin, apiCall, width = 12
   await page.getByRole('link', { name: 'Training block', exact: true }).click();
   await page.getByRole('heading', { name: 'No training block', exact: true }).waitFor();
   await page.getByRole('button', { name: 'Start a block', exact: true }).click();
-  const creation = page.locator('.block-intro');
-  // Main workouts are ticked; what sits beside them stays every week.
-  assert(await creation.getByRole('checkbox', { name: /^Strength A/ }).isChecked());
-  assert(await creation.getByRole('checkbox', { name: /^Tempo run/ }).isChecked());
-  assert.equal(await creation.getByRole('checkbox', { name: /^Evening core/ }).isChecked(), false);
-  assert.match(await creation.innerText(), /stays every week/);
+  const creation = page.locator('.block-setup');
+  // Step 1: what it is for. With no event it is a number of weeks, and nothing leaves the Block tab.
+  await creation.getByRole('heading', { name: 'What is this block for?', exact: true }).waitFor();
+  assert(await creation.getByRole('radio', { name: /^A set number of weeks/ }).isChecked());
+  assert.equal(await page.getByRole('link', { name: 'Start one for an event', exact: true }).count(), 0, 'There is one way to start a block.');
   await creation.getByRole('textbox', { name: 'Name (optional)', exact: true }).fill('Spring build');
   await creation.getByRole('spinbutton', { name: 'Weeks', exact: true }).fill('3');
-  await fits('The new block form');
+  await fits('Step 1 of the block setup');
+  await creation.getByRole('button', { name: 'Continue', exact: true }).click();
+  // Step 2: one week. Main workouts start in the block; what sits beside them stays every week.
+  await creation.getByRole('heading', { name: 'What does one week of it look like?', exact: true }).waitFor();
+  const own = creation.locator('.setup-lane.own'), besideLane = creation.locator('.setup-lane.beside');
+  assert.match(await own.innerText(), /Strength A/);
+  assert.match(await own.innerText(), /Tempo run/);
+  assert.doesNotMatch(await own.innerText(), /Evening core/);
+  assert.match(await besideLane.innerText(), /Evening core/);
+  // A workout is added to a block day by type, without leaving the setup.
+  await creation.getByRole('button', { name: 'Add to the block on Saturday', exact: true }).click();
+  const adding = creation.getByRole('region', { name: 'Add to the block on Saturdays', exact: true });
+  await adding.getByRole('button', { name: 'Other', exact: true }).click();
+  await adding.getByRole('textbox', { name: 'What is it?', exact: true }).fill('Hill walk');
+  await adding.getByRole('button', { name: 'Add to Saturday', exact: true }).click();
+  await own.getByText('Hill walk', { exact: true }).waitFor();
+  state = await apiCall('GET', '/api/state');
+  const walk = state.plan.workouts.find(workout => workout.name === 'Hill walk');
+  assert(walk && walk.exercises.length === 0, 'The new activity is saved as a workout.');
+  assert.equal(meta(state).program, undefined, 'Adding to the setup does not start the block.');
+  await creation.getByRole('button', { name: 'Continue', exact: true }).click();
+  // Step 3: how each workout builds. The lift adds a rep a week; the run is kept the same.
+  await creation.getByRole('heading', { name: 'How should it build?', exact: true }).waitFor();
+  assert.equal(await creation.getByRole('combobox', { name: 'Strength A: builds by', exact: true }).inputValue(), 'add:reps');
+  await creation.getByRole('combobox', { name: 'Tempo run: builds by', exact: true }).selectOption('same');
+  assert.match(await creation.locator('.build-table').innerText(), /Hill walk/);
+  if (width > 640) await fits('Step 3 of the block setup');
   const writes = [];
   page.on('request', request => {
     const pathname = new URL(request.url()).pathname;
@@ -56,8 +81,13 @@ export async function blockBesideWeekJourney({ page, origin, apiCall, width = 12
   let after = await apiCall('GET', '/api/state');
   assert.equal(after.plan.version, state.plan.version + 1, 'Starting a block is one plan version.');
   let program = meta(after).program;
-  assert.deepEqual(program.workout_ids, [strength.id, tempo.id]);
+  assert.deepEqual(program.workout_ids, [strength.id, tempo.id, walk.id]);
   assert.equal(program.weeks.length, 3);
+  const benchSlot = strength.exercises[0], baseReps = benchSlot.target_reps;
+  assert.equal(program.weeks[0].targets?.[benchSlot.id], undefined, 'Week 1 starts from the workout’s own targets.');
+  assert.equal(program.weeks[1].targets[benchSlot.id].target_reps, baseReps + 1, 'The rule filled week 2.');
+  assert.equal(program.weeks[2].targets[benchSlot.id].target_reps, baseReps + 2, 'The rule filled week 3.');
+  assert.deepEqual(entries(program.weeks[1], 'sat'), [walk.id]);
   // Stored weeks hold the whole day, so every app shows the block and the week together.
   assert.deepEqual(entries(program.weeks[0], 'mon'), [strength.id, core.id]);
   assert.deepEqual(entries(program.weeks[2], 'fri'), [tempo.id, core.id]);
@@ -67,10 +97,13 @@ export async function blockBesideWeekJourney({ page, origin, apiCall, width = 12
 
   // The Block tab: the block's own workouts by week, and what carries on beside it.
   const table = page.locator('.block-table');
-  assert.equal(await table.getByRole('row').count(), 3, 'Only the block’s own workouts have rows.');
-  const beside = page.getByRole('region', { name: 'Every week, beside this block', exact: true });
+  assert.equal(await table.getByRole('row').count(), 4, 'Only the block’s own workouts have rows.');
+  const beside = page.locator('.block-beside-line');
   assert.match(await beside.innerText(), /Evening core/);
   assert.doesNotMatch(await beside.innerText(), /Strength A/);
+  // Each rule is read back from the weeks it filled.
+  assert.equal(await page.getByRole('combobox', { name: 'Strength A: builds by', exact: true }).inputValue(), 'add:reps');
+  assert.equal(await page.getByRole('combobox', { name: 'Tempo run: builds by', exact: true }).inputValue(), 'same');
   await fits('The Block tab');
 
   // Moving a block workout changes every week of the block and nothing else.
@@ -109,7 +142,7 @@ export async function blockBesideWeekJourney({ page, origin, apiCall, width = 12
     assert.deepEqual(entries(week, 'tue'), [core.id]);
     assert.deepEqual(entries(week, 'thu'), [strength.id]);
   }
-  assert.deepEqual(program.workout_ids, [strength.id, tempo.id]);
+  assert.deepEqual(program.workout_ids, [strength.id, tempo.id, walk.id]);
   await page.reload();
   await page.getByRole('heading', { name: 'Week by week', exact: true }).waitFor();
 

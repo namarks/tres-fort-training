@@ -454,9 +454,9 @@ export async function mixedWeekJourney({ page, origin, width, apiCall }) {
   await page.getByRole('heading', { name: 'No training block', exact: true }).waitFor();
   assert.equal(await sections.getByRole('link', { name: 'Block', exact: true }).getAttribute('aria-current'), 'page');
   await click(page.getByRole('button', { name: 'Start a block', exact: true }));
-  await page.getByRole('heading', { name: 'Start a training block', exact: true }).waitFor();
-  await screenshot(page.locator('.block-intro'), `web-training-block-${width}.png`);
-  await page.getByRole('button', { name: 'Start block', exact: true }).waitFor();
+  await page.getByRole('heading', { name: 'What is this block for?', exact: true }).waitFor();
+  await screenshot(page.locator('.block-setup'), `web-training-block-${width}.png`);
+  await page.getByRole('button', { name: 'Continue', exact: true }).waitFor();
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1), false, 'The block form fits the viewport.');
   assert.equal((await apiCall('GET', '/api/state')).plan.version, beforeGuidance,
     'Opening the block form must not create one or alter the established week.');

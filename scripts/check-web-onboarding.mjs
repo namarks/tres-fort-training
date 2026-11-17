@@ -19,10 +19,11 @@ import { groupMaintenanceJourney } from './web-group-maintenance-journey.mjs';
 import { programmingDraftJourney } from './web-programming-drafts-journey.mjs';
 import { manualProgressionJourney } from './web-manual-progression-journey.mjs';
 import { blockBesideWeekJourney } from './web-block-journey.mjs';
+import { addToDayJourney } from './web-add-to-day-journey.mjs';
 
 // Optional exact journey names keep a diagnosed failure's rerun focused.
 // With no arguments the standard command still runs every journey.
-const journeyNames = [1280, 800, 'account-switch', 'conflict-refresh', 'one-date-edit', 'one-date-account', 'one-date-removed', 'lifting-prescriptions', 'lifting-creation', 'lifting-creation-mobile', 'workout-feedback', 'workout-feedback-mobile', 'strength-review', 'strength-review-mobile', 'group-maintenance', 'group-maintenance-mobile', 'programming-drafts', 'programming-drafts-mobile', 'manual-progression', 'manual-progression-mobile', 'block-beside-week', 'block-beside-week-mobile'];
+const journeyNames = [1280, 800, 'account-switch', 'conflict-refresh', 'one-date-edit', 'one-date-account', 'one-date-removed', 'lifting-prescriptions', 'lifting-creation', 'lifting-creation-mobile', 'workout-feedback', 'workout-feedback-mobile', 'strength-review', 'strength-review-mobile', 'group-maintenance', 'group-maintenance-mobile', 'programming-drafts', 'programming-drafts-mobile', 'manual-progression', 'manual-progression-mobile', 'block-beside-week', 'block-beside-week-mobile', 'add-to-day', 'add-to-day-mobile'];
 const requested = new Set(process.argv.slice(2));
 const known = new Set([...journeyNames.map(String), 'signed-out-1280', 'signed-out-390']);
 assert([...requested].every(name => known.has(name)), 'Unknown browser journey name.');
@@ -162,9 +163,12 @@ try {
         assert(response.ok, `${method} ${pathname}: ${response.status} ${await response.clone().text()}`);
         return response.json();
       };
-      if (width === 'block-beside-week' || width === 'block-beside-week-mobile') {
+      if (width === 'add-to-day' || width === 'add-to-day-mobile') {
+        await addToDayJourney({ page, origin: webOrigin, apiCall, width: width.endsWith('-mobile') ? 390 : 1280 });
+        console.log('PASS: an empty date opens its Add box; a run, a ride, an activity and a saved workout are added by type to a date or to every week without copies; a block for an event starts on the Block tab and a changed rule refills its weeks on save.');
+      } else if (width === 'block-beside-week' || width === 'block-beside-week-mobile') {
         await blockBesideWeekJourney({ page, origin: webOrigin, apiCall, width: width.endsWith('-mobile') ? 390 : 1280 });
-        console.log('PASS: a block starts from ticked workouts in one plan version, keeps the repeating week beside it, changes its own days and a run week without touching either, and ends with one week carried on.');
+        console.log('PASS: a block starts in three steps and one plan version with its weeks filled by rule, keeps the repeating week beside it, changes its own days and a run week without touching either, and ends with one week carried on.');
       } else if (width === 'programming-drafts' || width === 'programming-drafts-mobile') {
         await programmingDraftJourney({ page, origin: webOrigin, apiCall, width: width.endsWith('-mobile') ? 390 : 1280 });
         console.log('PASS: unfinished block setup and workout details survive navigation and conflicts, keep saved data on cancel, and retire only acknowledged drafts.');

@@ -295,7 +295,7 @@ function stepAmount(step: RunStep, miles: boolean): string {
 
 /** A planned run in a few words: its repeats ("5 × 800 m"), else the
  * running it asks for ("25 min", "6.5 mi"), without warm-up or recovery. */
-function runHeadline(items: readonly RunPlanItem[], miles: boolean): string {
+export function runHeadline(items: readonly RunPlanItem[], miles: boolean): string {
   for (const item of items) {
     if (!('repeat' in item)) continue;
     const work = item.steps.find((step) => step.kind === 'work') ?? item.steps[0];

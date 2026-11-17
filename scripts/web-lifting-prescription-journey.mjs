@@ -43,8 +43,10 @@ export async function liftingPrescriptionJourney({ page, origin, apiCall }) {
     await page.getByRole('heading', { name: 'Week by week', exact: true }).waitFor();
   };
   await openBlock();
-  await page.getByRole('button', { name: 'Name and start', exact: true }).click();
+  await page.getByRole('button', { name: 'Change the setup', exact: true }).click();
   await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Reviewed strength block');
+  // A week's target opens that workout's numbers week by week.
+  await page.getByRole('button', { name: /^Upper body, week 1:/ }).click();
   const weeklyLoad = page.getByRole('textbox', { name: 'Week 1 Load', exact: true });
   await weeklyLoad.fill('145.');
   const weeklySets = page.getByRole('textbox', { name: 'Week 1 Sets', exact: true });
@@ -73,7 +75,7 @@ export async function liftingPrescriptionJourney({ page, origin, apiCall }) {
   assert.equal((await apiCall('GET', '/api/state')).plan.workouts[0].exercises[0].target_weight, 50);
 
   await openBlock();
-  await page.getByRole('button', { name: 'Name and start', exact: true }).click();
+  await page.getByRole('button', { name: 'Change the setup', exact: true }).click();
   assert.equal(await page.getByRole('textbox', { name: 'Name', exact: true }).inputValue(), 'Reviewed strength block');
   assert(await page.getByRole('button', { name: 'Save changes', exact: true }).first().isDisabled());
   await page.getByRole('button', { name: 'Use draft with latest block', exact: true }).click();

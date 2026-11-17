@@ -314,11 +314,13 @@ export interface Ramp {
 /** A value as the field takes it: whole sets and reps, loads in 5 lb or 2.5
  * kg steps (1 below 10), times in 15 seconds (5 below two minutes). Steps
  * count from `anchor`, so a ramp's first week keeps its own value (a 53 lb
- * kettlebell stays 53). */
+ * kettlebell stays 53, and 40 lb of assistance stays -40). */
 export function roundFor(field: TargetField, value: number, unit: WeightUnit = 'lb', anchor = 0): number {
   if (field === 'target_sets' || field === 'target_reps') return Math.max(1, Math.round(value));
   const snap = (step: number) => anchor + Math.round((value - anchor) / step) * step;
-  if (field === 'target_weight') return Math.max(0, snap(Math.abs(value) < 10 ? 1 : unit === 'kg' ? 2.5 : 5));
+  // A load that starts below zero is assistance on a bodyweight exercise or
+  // hold, so it keeps its sign; any other load stops at zero.
+  if (field === 'target_weight') return Math.max(anchor < 0 ? Number.NEGATIVE_INFINITY : 0, snap(Math.abs(value) < 10 ? 1 : unit === 'kg' ? 2.5 : 5));
   return Math.max(5, Math.round(snap(value < 120 ? 5 : 15)));
 }
 
@@ -334,7 +336,8 @@ export function rampValues(ramp: Ramp, weeks: number, round: (value: number) => 
     const easy = ramp.easyEvery != null && ramp.easyEvery >= 2 && week % ramp.easyEvery === 0 && week !== ramp.fromWeek;
     let value: number;
     if (easy) {
-      value = last * ramp.easyPercent / 100;
+      // Easier is less load, which for assistance (below zero) is more of it.
+      value = last >= 0 ? last * ramp.easyPercent / 100 : last * (2 - ramp.easyPercent / 100);
     } else {
       value = ramp.step.kind === 'percent'
         ? ramp.start * (1 + ramp.step.value / 100) ** grown

@@ -272,6 +272,65 @@ partner training are not web features.
       week shows only outside the block; keeping a week is refused while
       a workout it would change is in progress. It needs an API release
       before the web one.
+  - Then (owner, 2026-11-17, on the released block start: the tick list
+    did not say whether it placed workouts or named kinds of training,
+    there were two ways to start, the event one left Plan for Analysis,
+    the screen after starting was "a little overwhelming", and an empty
+    day offered only saved workouts; the owner picked the mocked "guided,
+    three questions" option): starting a block is guided, and a day takes
+    a workout by type. Web only, no API change.
+    - One Start a block button opens three steps
+      (`web/src/BlockSetup.tsx`, on the retained new-block draft): what
+      it is for (an event with its date, which sets the number of weeks so
+      the event's week is the last, or a number of weeks), one week of it
+      (two rows over the weekdays: the block's own workouts, and what
+      repeats every week and carries on; a workout moves between them,
+      and "+ Add" on a day makes one), and how it builds. An event is
+      saved first (`PUT /api/plan/race`), then the block and the week its
+      workouts leave in one more version; a block for a number of weeks is
+      still one version. The Schedule tab's start cards point here.
+    - "Builds by" (`web/src/blockBuild.ts`, pure): each block workout is
+      the same every week, adds an amount each week (reps, load, sets or
+      time for a lift or a timed routine; repeats, minutes or distance for
+      a planned run), or is set by hand, with every third, fourth or
+      fifth week easier at 80% of the week before (every fourth by
+      default in a block of four weeks or more). A rule writes ordinary
+      week targets, so nothing new is stored: the rule shown later is
+      read back from the weeks, and one that no longer fits reads "I'll
+      set each week myself". Rules are a starting point and any week can
+      still be changed by hand, as coach-free planning requires.
+    - The Block tab after starting is one table (workout, day, builds
+      by, weeks) with an Easier week choice. A changed rule refills from
+      the current week on and waits for Save changes like any block
+      edit. Name, start, adding or removing a week or a workout and
+      starting over are under "Change the setup"; a workout's own week
+      numbers open when one of its weeks is chosen, with the percent
+      ramp folded away; what repeats every week beside the block is one
+      line with a link to Schedule.
+    - The Add box (`web/src/AddWorkout.tsx`, rules in
+      `web/src/addToDay.ts`) follows the iPhone composer's types: Run
+      (easy, tempo, intervals or long, how long or how far, an optional
+      heart rate or pace range, or the full step editor), Ride and Swim
+      (named "60 min ride" so a synced one counts as it), Lift (search
+      and add exercises), At home (the guided routines), Other (an
+      activity by name) and Saved. One save makes the workout and places
+      it; the same run or activity is used again instead of copied. Each
+      write of that save names the plan version the one before it left,
+      so a change made elsewhere in between answers with a conflict and
+      is never written over. A save that made its workout and could not
+      place it is kept for the page with its choices: the next Add box
+      opens on them and places that workout, never a numbered copy. It
+      opens with an empty date in the Schedule tab, from a double click
+      on any date to come, from "Make a new one" on a weekday of the
+      repeating week, and from "+ Add" in the block setup. On a date it
+      asks "just this date" or "every <weekday>".
+    - Known limits: on one date a choice replaces the date's main
+      workout (a second workout on one date still needs the shared
+      contract under Later); Lift has no starter lists yet; a rule
+      applied partway through a block is recognized while that week is
+      the current one and reads as set by hand afterwards; so does an
+      amount smaller than the steps a load moves in (2 lb on a 5 lb
+      step), once the block is saved and opened again.
 - [ ] **P3 — Trends and progress**
   - Equal in importance to plan editing; it can run alongside P2 once P1 is
     in.
@@ -429,6 +488,10 @@ release followed by the web release, and a check on the phone that a block
 date shows the block's workout together with what repeats every week. The
 iPhone app still starts and edits blocks as whole weeks; teaching it the
 block's own list is later work there.
+
+Guided block start and adding to a day by type (owner, 2026-11-17): built
+(P2). Next for it: the owner merges, then a separately authorized web
+release; it changes no API, so the released API serves it.
 
 **Later (@agent):** Date-only replacement of scheduled extras still needs a
 shared replacement/lineage contract, as described in member activation P7.

@@ -1,7 +1,10 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import type { Trip } from '../../src/types';
+import { weekdayOf } from '../../src/calendarProjection';
+import type { Trip, Weekday } from '../../src/types';
+import { AddWorkout } from './AddWorkout';
 import { dateWrites, planWrites, type StateResponse } from './api';
-import { formatLongDate, type CalendarCell, type Workout } from './model';
+import { shortDate } from './blocks';
+import { formatLongDate, WEEKDAY_LABELS, type CalendarCell, type Workout } from './model';
 import {
   AWAY_KINDS,
   NOTE_LIMIT,
@@ -9,20 +12,33 @@ import {
   awayDraft,
   awayFields,
   awayKindLabel,
-  choosableWorkouts,
   dateChangeBlocked,
   hasWorkout,
   moveBlocked,
+  routineAddingWorkout,
+  routineAddProblem,
+  routineDay,
+  routineDayFull,
   splitTrips,
   type AwayDraft,
 } from './scheduling';
-import type { Write } from './WorkoutEditor';
+import type { Catalog, Write } from './WorkoutEditor';
+
+/** What the Add box needs to make a workout: without it a date can't take one here. */
+export interface Adder { accountId: string; catalog: Catalog; miles: boolean }
 
 type DatePanel = 'change' | 'move' | 'remove' | null;
 
+/** A date nothing is planned on and nothing was chosen for: its Add box opens with it. */
+function emptyDate(cell: CalendarCell | undefined): boolean {
+  return !hasWorkout(cell) && !cell?.real && !cell?.sessions?.length && !cell?.extras?.length && !cell?.items.length
+    && cell?.status !== 'unavailable';
+}
+
 /**
- * This date only: choose or change its workout, move it to another date, or
- * make it rest. The weekly routine and the saved workout stay as they are.
+ * A date's own changes: add or change its workout, move it to another date,
+ * or make it rest. A workout is added by type (a run, a ride, a lift) or
+ * from the saved ones, for this date or for its weekday every week.
  */
 export function DateActions(props: {
   date: string;
@@ -33,14 +49,29 @@ export function DateActions(props: {
   cellFor: (date: string) => CalendarCell | undefined;
   write: Write;
   busy: boolean;
+  adder?: Adder;
+  /** False on a block's dates that the repeating week does not reach. */
+  weekly?: boolean;
+  /** A running block's own workouts, which the repeating week can't hold. */
+  blockIds?: ReadonlySet<string>;
+  /** The latest ask to open a date's Add box (a double click on it). */
+  addAsked?: { date: string } | null;
 }) {
-  const { date, today, cell, workout, state, cellFor, write, busy } = props;
-  const [panel, setPanel] = useState<DatePanel>(null);
+  const { date, today, cell, workout, state, cellFor, write, busy, adder, weekly = true, addAsked = null, blockIds } = props;
+  const empty = !!adder && date >= today && emptyDate(cell);
+  const [panel, setPanel] = useState<DatePanel>(adder && (empty || addAsked?.date === date) ? 'change' : null);
   const sessions = state.sessions;
-  const workouts = choosableWorkouts(state.plan?.workouts ?? []);
   const showsWorkout = hasWorkout(cell) && !!workout;
-  // Another date, or a newer plan, closes any open form.
-  useEffect(() => setPanel(null), [date, state]);
+  // Another date, or a newer plan, closes any open form; an empty date opens with its Add box.
+  const mounted = useRef(false);
+  useEffect(() => {
+    if (mounted.current) setPanel(empty ? 'change' : null);
+    // `empty` follows the date and the plan, so it is not a reason of its own.
+  }, [date, state]);
+  useEffect(() => {
+    if (mounted.current && adder && addAsked?.date === date) setPanel('change');
+  }, [addAsked]);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   if (date < today || !state.plan) return null;
   const blocked = dateChangeBlocked(date, today, cell, sessions);
   if (blocked) return <p className="fine">{blocked}</p>;
@@ -49,26 +80,23 @@ export function DateActions(props: {
   const done = async (saved: Promise<boolean>) => { if (await saved) close(); };
 
   return (
-    <section className="date-actions" aria-label="This date only">
+    <section className="date-actions" aria-label="This date">
       {panel === null && (
         <div className="head-actions">
-          <button type="button" className="ghost small" disabled={busy} onClick={() => setPanel('change')}>
-            {showsWorkout ? 'Change workout' : 'Choose a workout'}
-          </button>
+          {adder && (
+            <button type="button" className={showsWorkout ? 'ghost small' : 'small'} disabled={busy} onClick={() => setPanel('change')}>
+              {showsWorkout ? 'Change workout' : 'Add a workout'}
+            </button>
+          )}
           {showsWorkout && <button type="button" className="ghost small" disabled={busy} onClick={() => setPanel('move')}>Move to another date</button>}
           {(showsWorkout || plannedRow) && cell?.status !== 'rest' && (
             <button type="button" className="ghost small danger" disabled={busy} onClick={() => setPanel('remove')}>Make it a rest day</button>
           )}
         </div>
       )}
-      {panel === 'change' && (
-        <ChooseWorkout
-          workouts={workouts}
-          current={showsWorkout ? workout!.id : null}
-          busy={busy}
-          onCancel={close}
-          onChoose={(workoutId) => done(write(() => dateWrites.setDate(date, workoutId, attemptOn(sessions, date))))}
-        />
+      {panel === 'change' && adder && (
+        <AddToDate key={date} date={date} current={showsWorkout ? workout! : null} state={state} write={write} busy={busy}
+          adder={adder} weekly={weekly} blockIds={blockIds} onClose={close} />
       )}
       {panel === 'move' && workout && (
         <MoveWorkout
@@ -95,37 +123,73 @@ export function DateActions(props: {
   );
 }
 
-function ChooseWorkout(props: {
-  workouts: Workout[];
-  current: string | null;
+/**
+ * The Add box for a date (owner, 2026-11-17): pick what it is, set its
+ * details, and say whether it is for this date or for the weekday every
+ * week. One save makes the workout and places it.
+ */
+function AddToDate({ date, current, state, write, busy, adder, weekly, blockIds, onClose }: {
+  date: string;
+  /** The workout this date shows now, which a choice for the date replaces. */
+  current: Workout | null;
+  state: StateResponse;
+  write: Write;
   busy: boolean;
-  onChoose: (workoutId: string) => void;
-  onCancel: () => void;
+  adder: Adder;
+  weekly: boolean;
+  blockIds?: ReadonlySet<string>;
+  onClose: () => void;
 }) {
-  const { workouts, current, busy, onChoose, onCancel } = props;
-  const [choice, setChoice] = useState(workouts.find((workout) => workout.id !== current)?.id ?? '');
+  const plan = state.plan!;
+  const day = weekdayOf(date) as Weekday;
+  const dayName = WEEKDAY_LABELS[day];
+  const short = shortDate(date);
+  const [when, setWhen] = useState<'date' | 'weekly'>('date');
+  const [time, setTime] = useState('');
   const id = useId();
-  if (workouts.length === 0) {
-    return (
-      <div className="panel">
-        <p className="muted">There are no workouts to choose. Build one in Workouts first.</p>
-        <div className="form-actions"><button type="button" className="ghost" onClick={onCancel}>Cancel</button></div>
-      </div>
-    );
-  }
+  const everyWeek = weekly && when === 'weekly';
+  const held = routineDay(plan.schedule, day);
   return (
-    <form className="panel" onSubmit={(event) => { event.preventDefault(); if (choice) onChoose(choice); }}>
-      <label htmlFor={id}>Workout for this date only</label>
-      <select id={id} value={choice} onChange={(event) => setChoice(event.target.value)} autoFocus>
-        {workouts.map((workout) => (
-          <option key={workout.id} value={workout.id}>{workout.name}{workout.id === current ? ' (now)' : ''}</option>
-        ))}
-      </select>
-      <div className="form-actions">
-        <button type="submit" disabled={busy || !choice || choice === current}>Save</button>
-        <button type="button" className="ghost" onClick={onCancel}>Cancel</button>
-      </div>
-    </form>
+    <AddWorkout
+      title={current ? `Change ${short}` : `Add to ${short}`}
+      action={everyWeek ? `Add to every ${dayName}` : current ? `Use on ${short}` : `Add to ${short}`}
+      state={state} accountId={adder.accountId} catalog={adder.catalog} miles={adder.miles} write={write} busy={busy}
+      // A block places its own workouts, so the repeating week can't take them.
+      unavailable={(workout) => everyWeek ? blockIds?.has(workout.id) ? 'In your block' : routineAddProblem(plan.schedule, day, workout.id)
+        : workout.id === current?.id ? 'On this date now' : null}
+      blocked={everyWeek && routineDayFull(held) ? `${dayName} already has five workouts every week.` : null}
+      onPlace={async (workoutId, at) => {
+        if (!everyWeek) { await dateWrites.setDate(date, workoutId, attemptOn(state.sessions, date)); return; }
+        // One made in this save is not in the reviewed list yet.
+        const known = plan.workouts.some((workout) => workout.id === workoutId) ? plan.workouts
+          : [...plan.workouts, { id: workoutId, name: '', order_index: Number.MAX_SAFE_INTEGER, exercises: [] } as unknown as Workout];
+        const result = routineAddingWorkout(plan.schedule, [day], workoutId, time, known);
+        if (!result.ok) throw new Error(result.error);
+        await planWrites.setRoutine(result.schedule, at);
+      }}
+      onCancel={onClose}
+    >
+      {weekly && (
+        <fieldset className="add-when">
+          <legend>When</legend>
+          <label className="check">
+            <input type="radio" name={`${id}-when`} checked={when === 'date'} onChange={() => setWhen('date')} />
+            <span>Just {short}{current ? <small className="muted">Instead of {current.name}, on this date only.</small> : null}</span>
+          </label>
+          <label className="check">
+            <input type="radio" name={`${id}-when`} checked={when === 'weekly'} onChange={() => setWhen('weekly')} />
+            <span>Every {dayName}{held.primary ? <small className="muted">Alongside what is already on {dayName}s.</small> : null}</span>
+          </label>
+          {everyWeek && (
+            <div className="field">
+              <label htmlFor={`${id}-time`}>Time · optional</label>
+              <input id={`${id}-time`} type="time" value={time} onChange={(event) => setTime(event.target.value)} />
+            </div>
+          )}
+        </fieldset>
+      )}
+      {!weekly && current && <p className="fine muted">Instead of {current.name}, on {short} only.</p>}
+    </AddWorkout>
   );
 }
 
