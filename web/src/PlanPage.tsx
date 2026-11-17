@@ -402,7 +402,7 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
           <>
             <DateActions date={selected} today={today} cell={selectedCell} workout={workoutFor(selectedCell, workouts)}
               state={state} cellFor={cellFor} write={write} busy={busy} adder={adder}
-              weekly={selectedWeek == null || layered} addAsked={addAsked} />
+              weekly={selectedWeek == null || layered} addAsked={addAsked} blockIds={blockIds} />
             {program && selectedWeek != null && (
               <BlockDate program={program} index={selectedWeek} date={selected} layered={layered} />
             )}

@@ -237,4 +237,16 @@ export async function addToDayJourney({ page, origin, apiCall, width = 1280 }) {
   assert.equal(changed.weeks[1].targets[bench.id].target_reps, bench.target_reps + 2);
   assert.equal(changed.weeks[4].targets[bench.id].target_reps, bench.target_reps + 6);
   await fits('The Block tab');
+
+  // The block places its own workouts, so a date's "every week" choice can't take one.
+  await page.goto(`${origin}/#plan`);
+  await page.getByRole('heading', { name: 'Your plan', exact: true }).waitFor();
+  await cell('tue').dblclick();
+  await box.getByRole('button', { name: 'Saved', exact: true }).click();
+  assert.equal(await box.getByRole('button', { name: /^Add to Tue, .*: Strength A$/ }).isDisabled(), false, 'One date can take a block workout.');
+  await box.getByRole('radio', { name: /^Every Tuesday/ }).check();
+  const blockOwned = box.getByRole('button', { name: 'Add to every Tuesday: Strength A', exact: true });
+  assert.equal(await blockOwned.isDisabled(), true);
+  assert.match(await box.locator('li').filter({ hasText: 'Strength A' }).innerText(), /In your block/);
+  assert.equal(await box.getByRole('button', { name: 'Add to every Tuesday: Soccer', exact: true }).isDisabled(), false);
 }

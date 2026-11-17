@@ -233,8 +233,13 @@ export function applyingBuild<P extends ProgramBody>(
   let values: number[];
   let change: (value: number) => RunPlanItem;
   if (rule.target === 'repeats' && 'repeat' in item) {
+    // A run holds a limited number of steps once its repeats are counted
+    // out, so the repeats stop where the rest of the run leaves room.
+    const others = items.reduce((sum, other, index) => sum + (index === at ? 0 : 'repeat' in other ? other.repeat * other.steps.length : 1), 0);
+    const most = Math.max(1, Math.min(RUN_STEP_LIMITS.repeat,
+      Math.floor((RUN_STEP_LIMITS.expandedSteps - others) / Math.max(1, item.steps.length))));
     values = series(item.repeat, rule.amount, from, count, options.easyEvery,
-      (value) => Math.min(RUN_STEP_LIMITS.repeat, Math.max(1, Math.round(value))));
+      (value) => Math.min(most, Math.max(1, Math.round(value))));
     change = (value) => ({ ...item, repeat: value });
   } else if (rule.target === 'run_time' && !('repeat' in item) && item.duration_s !== undefined) {
     const start = item.duration_s;

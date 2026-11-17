@@ -103,8 +103,17 @@ export function AddWorkout(props: {
   const needsCatalog = kind === 'lift' || kind === 'home';
   const choose = (next: AddKind) => { setKind(next); setTyped(''); setRenaming(false); setShowErrors(false); setEditingSteps(false); setQuery(''); };
 
-  /** What Add would save, against the plan as `at` has it. */
+  /** What Add would save, against the plan as `at` has it. A workout that
+   * is already saved is used as it is, so it has to be one that can go here. */
   const build = (at: { planId: string; version: number }): CreationResult | null => {
+    const made = shape(at);
+    if (!made?.ok || (made.creation.kind !== 'existing' && made.creation.kind !== 'steps')) return made;
+    const id = made.creation.workoutId;
+    const there = workouts.find((workout) => workout.id === id);
+    const reason = there ? unavailable?.(there) ?? null : null;
+    return reason ? { ok: false, error: `You already have ${made.name}, and it can’t be added here: ${reason.charAt(0).toLowerCase()}${reason.slice(1)}.` } : made;
+  };
+  const shape = (at: { planId: string; version: number }): CreationResult | null => {
     if (!kind || kind === 'saved') return null;
     if (kind === 'run') return runCreation(run, typed, workouts, miles, at);
     if (kind === 'ride' || kind === 'swim') {

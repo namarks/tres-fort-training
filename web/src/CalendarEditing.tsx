@@ -52,10 +52,12 @@ export function DateActions(props: {
   adder?: Adder;
   /** False on a block's dates that the repeating week does not reach. */
   weekly?: boolean;
+  /** A running block's own workouts, which the repeating week can't hold. */
+  blockIds?: ReadonlySet<string>;
   /** The latest ask to open a date's Add box (a double click on it). */
   addAsked?: { date: string } | null;
 }) {
-  const { date, today, cell, workout, state, cellFor, write, busy, adder, weekly = true, addAsked = null } = props;
+  const { date, today, cell, workout, state, cellFor, write, busy, adder, weekly = true, addAsked = null, blockIds } = props;
   const empty = !!adder && date >= today && emptyDate(cell);
   const [panel, setPanel] = useState<DatePanel>(adder && (empty || addAsked?.date === date) ? 'change' : null);
   const sessions = state.sessions;
@@ -94,7 +96,7 @@ export function DateActions(props: {
       )}
       {panel === 'change' && adder && (
         <AddToDate key={date} date={date} current={showsWorkout ? workout! : null} state={state} write={write} busy={busy}
-          adder={adder} weekly={weekly} onClose={close} />
+          adder={adder} weekly={weekly} blockIds={blockIds} onClose={close} />
       )}
       {panel === 'move' && workout && (
         <MoveWorkout
@@ -126,7 +128,7 @@ export function DateActions(props: {
  * details, and say whether it is for this date or for the weekday every
  * week. One save makes the workout and places it.
  */
-function AddToDate({ date, current, state, write, busy, adder, weekly, onClose }: {
+function AddToDate({ date, current, state, write, busy, adder, weekly, blockIds, onClose }: {
   date: string;
   /** The workout this date shows now, which a choice for the date replaces. */
   current: Workout | null;
@@ -135,6 +137,7 @@ function AddToDate({ date, current, state, write, busy, adder, weekly, onClose }
   busy: boolean;
   adder: Adder;
   weekly: boolean;
+  blockIds?: ReadonlySet<string>;
   onClose: () => void;
 }) {
   const plan = state.plan!;
@@ -151,7 +154,9 @@ function AddToDate({ date, current, state, write, busy, adder, weekly, onClose }
       title={current ? `Change ${short}` : `Add to ${short}`}
       action={everyWeek ? `Add to every ${dayName}` : current ? `Use on ${short}` : `Add to ${short}`}
       state={state} accountId={adder.accountId} catalog={adder.catalog} miles={adder.miles} write={write} busy={busy}
-      unavailable={(workout) => everyWeek ? routineAddProblem(plan.schedule, day, workout.id) : workout.id === current?.id ? 'On this date now' : null}
+      // A block places its own workouts, so the repeating week can't take them.
+      unavailable={(workout) => everyWeek ? blockIds?.has(workout.id) ? 'In your block' : routineAddProblem(plan.schedule, day, workout.id)
+        : workout.id === current?.id ? 'On this date now' : null}
       blocked={everyWeek && routineDayFull(held) ? `${dayName} already has five workouts every week.` : null}
       onPlace={async (workoutId, at) => {
         if (!everyWeek) { await dateWrites.setDate(date, workoutId, attemptOn(state.sessions, date)); return; }

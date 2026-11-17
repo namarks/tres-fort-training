@@ -134,4 +134,18 @@ describe('how a block workout builds', () => {
     expect(weeksToEvent('2026-11-16', '2028-01-01')).toBeNull();
     expect(weeksToEvent('2026-11-16', '')).toBeNull();
   });
+
+  it('stops adding repeats where the run has no room for more steps', () => {
+    // 18 repeats of ten steps with a warm-up and cool-down: 182 of 200 steps.
+    const steps = Array.from({ length: 10 }, (_, index) => ({ kind: index % 2 ? 'recovery' : 'work', duration_s: 60 }));
+    const big = workout('big', 'Long intervals', [run('big-slot', [{ kind: 'warmup', duration_s: 600 }, { repeat: 18, steps }, { kind: 'cooldown', duration_s: 600 }])]);
+    const program = applyingBuild({ ...block(4), workout_ids: ['big'] }, big, add('repeats', 1), { easyEvery: null, miles: true });
+    const repeats = program.weeks.map((week) => {
+      const raw = week.targets?.['big-slot']?.run_steps;
+      const items = raw ? JSON.parse(raw as string) as Array<{ repeat?: number }> : null;
+      return items ? items[1]!.repeat : 18;
+    });
+    // 19 repeats is 192 steps; 20 would be 202, over what a run can hold.
+    expect(repeats).toEqual([18, 19, 19, 19]);
+  });
 });
