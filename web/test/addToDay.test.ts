@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  activityCreation, ADD_KINDS, availableName, enduranceDraft, enduranceName, runCreation, runDraft, runItems, runName, runStyled,
+  activityCreation, ADD_KINDS, availableName, enduranceDraft, enduranceName, receiptIsOurs, resumable, runCreation, runDraft, runItems, runName,
+  runStyled, sameSteps, versionAfterOwnWrites, type Unplaced,
 } from '../src/addToDay';
 import type { Slot, Workout } from '../src/model';
 
@@ -92,5 +93,49 @@ describe('adding to a day by type', () => {
     // Archived and one-date workouts never stand in for a new one.
     expect(activityCreation('Soccer', [workout('old', 'Soccer', [], { archived_at: 1 })])).toMatchObject({ creation: { kind: 'activity' } });
     expect(availableName('Soccer', [soccer, workout('s2', 'Soccer 2')])).toBe('Soccer 3');
+  });
+
+  it('names the version its own write left, never one read back', () => {
+    // Nothing of this save is in yet: the page's version.
+    expect(versionAfterOwnWrites(7, null)).toBe(7);
+    // The workout saved at 7, so placing it names 8. A change made elsewhere
+    // in between left the plan at 9, and the placement is refused.
+    expect(versionAfterOwnWrites(7, 8)).toBe(8);
+    // After a conflict the page reloads and shows a later version.
+    expect(versionAfterOwnWrites(9, 8)).toBe(9);
+  });
+
+  it('builds on a repeated receipt only when nothing else moved the plan', () => {
+    expect(receiptIsOurs(7, 8, 7)).toBe(true);
+    // The same request again, after the page caught up.
+    expect(receiptIsOurs(7, 8, 8)).toBe(true);
+    // The request again while another device also wrote: the page is behind.
+    expect(receiptIsOurs(7, 9, 7)).toBe(false);
+    expect(receiptIsOurs(7, 9, 8)).toBe(false);
+    // The page already shows that version, so nothing is written over.
+    expect(receiptIsOurs(7, 9, 9)).toBe(true);
+  });
+
+  it('finishes a save that stopped before the workout was placed', () => {
+    const held: Unplaced = { signature: 'lift', creation: { kind: 'activity', name: 'Yoga' }, workoutId: 'yoga', version: 8, stepsSaved: false };
+    // The page has not reloaded since: the workout is not in its list yet.
+    expect(resumable(held, 'lift', [], 7)).toBe(held);
+    // After a reload it is there, and Add places that one.
+    expect(resumable(held, 'lift', [workout('yoga', 'Yoga')], 9)).toBe(held);
+    // Different choices are a different workout.
+    expect(resumable(held, 'run', [workout('yoga', 'Yoga')], 9)).toBeNull();
+    // Deleted or archived elsewhere since: start again.
+    expect(resumable(held, 'lift', [], 9)).toBeNull();
+    expect(resumable(held, 'lift', [workout('yoga', 'Yoga', [], { archived_at: 1 })], 9)).toBeNull();
+    // Not acknowledged yet: the same request is sent again.
+    expect(resumable({ ...held, workoutId: null, version: null }, 'lift', [], 9)).toMatchObject({ workoutId: null });
+    expect(resumable(null, 'lift', [], 9)).toBeNull();
+  });
+
+  it('knows a run whose steps are already saved', () => {
+    const items = [{ kind: 'work' as const, duration_s: 1800 }];
+    expect(sameSteps(JSON.stringify(items), items)).toBe(true);
+    expect(sameSteps(null, items)).toBe(false);
+    expect(sameSteps(JSON.stringify([{ kind: 'work', duration_s: 2400 }]), items)).toBe(false);
   });
 });

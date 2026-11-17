@@ -314,7 +314,12 @@ partner training are not web features.
       (named "60 min ride" so a synced one counts as it), Lift (search
       and add exercises), At home (the guided routines), Other (an
       activity by name) and Saved. One save makes the workout and places
-      it; the same run or activity is used again instead of copied. It
+      it; the same run or activity is used again instead of copied. Each
+      write of that save names the plan version the one before it left,
+      so a change made elsewhere in between answers with a conflict and
+      is never written over. A save that made its workout and could not
+      place it is kept for the page with its choices: the next Add box
+      opens on them and places that workout, never a numbered copy. It
       opens with an empty date in the Schedule tab, from a double click
       on any date to come, from "Make a new one" on a weekday of the
       repeating week, and from "+ Add" in the block setup. On a date it

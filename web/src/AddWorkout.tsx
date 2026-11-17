@@ -1,6 +1,6 @@
-import { useId, useMemo, useState, type ReactNode } from 'react';
+import { useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { RunPlanItem } from '../../src/runSteps';
-import { createPrescribedWorkout, fetchPlanVersion, planWrites, type Reviewed, type StateResponse } from './api';
+import { ApiError, createPrescribedWorkout, planWrites, type Reviewed, type StateResponse } from './api';
 import {
   activityCreation,
   ADD_KINDS,
@@ -8,18 +8,23 @@ import {
   enduranceDraft,
   enduranceName,
   enduranceUnit,
+  existingNamed,
   OTHER_SUGGESTIONS,
+  receiptIsOurs,
+  resumable,
   RUN_STYLES,
   runCreation,
   runDraft,
   runItems,
   runName,
   runStyled,
+  sameSteps,
+  versionAfterOwnWrites,
   type AddKind,
-  type Creation,
   type CreationResult,
   type EnduranceDraft,
   type RunDraft,
+  type Unplaced,
 } from './addToDay';
 import { factsOfCatalog, searchCatalog } from './editing';
 import { workoutSummary } from './EveryWeek';
@@ -32,6 +37,19 @@ import { choosableWorkouts } from './scheduling';
 import { SlotFields } from './SlotFields';
 import { preferredUnit, type Catalog, type Write } from './WorkoutEditor';
 import './setup.css';
+
+/** The choices an Add box holds, as they were when a save began. */
+interface Choices {
+  kind: AddKind | null; typed: string; run: RunDraft; ride: EnduranceDraft; swim: EnduranceDraft;
+  home: GuidedDraft; homeStart: HomeStart; lift: LiftingDraft;
+}
+
+// A save that made its workout and could not place it, with the choices it
+// came from. It outlives the box, which closes when the plan reloads after a
+// conflict: the next Add box for the same plan opens on those choices, and
+// Add places the workout already saved instead of making a numbered copy.
+// Kept for this page only; after a reload the workout is under Saved.
+let kept: { key: string; held: Unplaced; choices: Choices } | null = null;
 
 /**
  * The Add box (owner, 2026-11-17: "on this day I want to do a run, and then
@@ -65,16 +83,18 @@ export function AddWorkout(props: {
   const plan = state.plan;
   const workouts = useMemo(() => (plan?.workouts ?? []) as Workout[], [plan]);
   const saved = useMemo(() => choosableWorkouts(workouts), [workouts]);
-  const [kind, setKind] = useState<AddKind | null>(props.initialKind ?? null);
-  const [typed, setTyped] = useState('');
+  const key = `${accountId}:${plan?.id ?? ''}`;
+  const [restored] = useState(() => (kept?.key === key ? kept : null));
+  const [kind, setKind] = useState<AddKind | null>(restored?.choices.kind ?? props.initialKind ?? null);
+  const [typed, setTyped] = useState(restored?.choices.typed ?? '');
   const [renaming, setRenaming] = useState(false);
-  const [run, setRun] = useState<RunDraft>(() => runDraft('easy', miles));
+  const [run, setRun] = useState<RunDraft>(() => restored?.choices.run ?? runDraft('easy', miles));
   const [editingSteps, setEditingSteps] = useState(false);
-  const [ride, setRide] = useState<EnduranceDraft>(() => enduranceDraft('ride', miles));
-  const [swim, setSwim] = useState<EnduranceDraft>(() => enduranceDraft('swim', miles));
-  const [home, setHome] = useState<GuidedDraft>(() => initialGuidedDraft('core'));
-  const [homeStart, setHomeStart] = useState<HomeStart>('core');
-  const [lift, setLift] = useState<LiftingDraft>(() => initialLiftingDraft());
+  const [ride, setRide] = useState<EnduranceDraft>(() => restored?.choices.ride ?? enduranceDraft('ride', miles));
+  const [swim, setSwim] = useState<EnduranceDraft>(() => restored?.choices.swim ?? enduranceDraft('swim', miles));
+  const [home, setHome] = useState<GuidedDraft>(() => restored?.choices.home ?? initialGuidedDraft('core'));
+  const [homeStart, setHomeStart] = useState<HomeStart>(restored?.choices.homeStart ?? 'core');
+  const [lift, setLift] = useState<LiftingDraft>(() => restored?.choices.lift ?? initialLiftingDraft());
   const [query, setQuery] = useState('');
   const [search, setSearch] = useState('');
   const [showErrors, setShowErrors] = useState(false);
@@ -108,45 +128,101 @@ export function AddWorkout(props: {
   };
   const preview = plan ? build({ planId: plan.id, version: plan.version }) : null;
 
-  /** Saves what a creation asks for; the id of the workout and the plan
-   * version after it. */
-  const make = async (creation: Creation, at: Reviewed): Promise<{ id: string; at: Reviewed }> => {
-    if (creation.kind === 'existing') return { id: creation.workoutId, at };
-    if (creation.kind === 'activity') {
-      const row = await planWrites.addWorkout(creation.name, at);
-      return { id: row.id, at: { ...at, version: await fetchPlanVersion(at) } };
+  // A save that made its workout and then could not place it. Pressing Add
+  // again finishes that save; it never makes a second workout.
+  const heldNameOf = (held: Unplaced | null) => (held?.workoutId && held.creation.kind !== 'steps'
+    ? { signature: held.signature, name: held.creation.kind === 'activity' ? held.creation.name : held.creation.request.name } : null);
+  const unplaced = useRef<Unplaced | null>(restored?.held ?? null);
+  const [heldName, setHeldName] = useState(() => heldNameOf(restored?.held ?? null));
+  const hold = (next: Unplaced | null): Unplaced | null => {
+    unplaced.current = next;
+    kept = next ? { key, held: next, choices: { kind, typed, run, ride, swim, home, homeStart, lift } } : null;
+    setHeldName(heldNameOf(next));
+    return next;
+  };
+  const signature = JSON.stringify([kind, typed.trim(), miles,
+    kind === 'run' ? run : kind === 'ride' ? ride : kind === 'swim' ? swim : kind === 'home' ? home : kind === 'lift' ? lift : null]);
+
+  /**
+   * Finishes a save: the workout, a run's steps, and the plan version to
+   * place it at. Every write names the version the one before it left, never
+   * a version read back from the server, so a change made elsewhere in
+   * between is a conflict rather than something to write over.
+   */
+  const make = async (start: Unplaced, at: Reviewed): Promise<{ id: string; at: Reviewed }> => {
+    let held = start;
+    const creation = held.creation;
+    let version = versionAfterOwnWrites(at.version, held.version);
+    let id = held.workoutId;
+    if (!id && creation.kind === 'activity') {
+      // An answer that never arrived may still have saved it: use that one.
+      const there = existingNamed(workouts, creation.name);
+      if (there) id = there.id;
+      else {
+        const row = await planWrites.addWorkout(creation.name, { ...at, version });
+        if (!row?.id) throw new Error('unreadable_workout_receipt');
+        id = row.id;
+        version += 1;
+      }
+      held = hold({ ...held, workoutId: id, version })!;
     }
-    if (creation.kind === 'steps') {
-      await planWrites.updateSlot(creation.workoutId, creation.slotId, { run_steps: creation.items }, at);
-      return { id: creation.workoutId, at: { ...at, version: await fetchPlanVersion(at) } };
+    if (!id && creation.kind === 'prescribed') {
+      let receipt;
+      try {
+        receipt = await createPrescribedWorkout(creation.request, accountId);
+      } catch (error) {
+        // A refusal means this request never saved and never will.
+        if (error instanceof ApiError && error.status < 500) hold(null);
+        throw error;
+      }
+      id = receipt.workout_id;
+      version = receipt.version;
+      held = hold({ ...held, workoutId: id, version })!;
+      if (!receiptIsOurs(creation.request.expected_version, receipt.version, at.version)) {
+        throw new ApiError(409, { conflict: true, current_version: receipt.version });
+      }
     }
-    const receipt = await createPrescribedWorkout(creation.request, accountId);
-    let version = receipt.version;
-    if (creation.steps) {
-      await planWrites.updateSlot(receipt.workout_id, creation.steps.slotId, { run_steps: creation.steps.items }, { ...at, version });
-      version = await fetchPlanVersion(at);
+    if (!id) throw new Error('add_not_ready');
+    const steps = creation.kind === 'prescribed' ? creation.steps : creation.kind === 'steps' ? creation : undefined;
+    if (steps && !held.stepsSaved) {
+      const slot = workouts.find((workout) => workout.id === id)?.exercises.find((entry) => entry.id === steps.slotId);
+      if (!slot || !sameSteps(slot.run_steps, steps.items)) {
+        await planWrites.updateSlot(id, steps.slotId, { run_steps: steps.items }, { ...at, version });
+        version += 1;
+      }
+      hold({ ...held, stepsSaved: true, version });
     }
-    return { id: receipt.workout_id, at: { ...at, version } };
+    return { id, at: { ...at, version } };
   };
 
   const add = async (existing?: Workout) => {
     if (busy || blocked) return;
-    if (!existing && (!preview || !preview.ok)) { setShowErrors(true); return; }
+    const resuming = !existing && resumable(unplaced.current, signature, workouts, plan?.version ?? 0) !== null;
+    if (!existing && !resuming && (!preview || !preview.ok)) { setShowErrors(true); return; }
     let placed: string | null = null;
     const ok = await write(async (at) => {
-      let creation: Creation;
-      if (existing) creation = { kind: 'existing', workoutId: existing.id, name: existing.name };
+      let result: { id: string; at: Reviewed } | null = null;
+      if (existing) result = { id: existing.id, at };
       else {
-        const made = build(at);
-        if (!made?.ok) throw new Error('add_not_ready');
-        creation = made.creation;
+        let held = resumable(unplaced.current, signature, workouts, at.version);
+        if (!held) {
+          hold(null);
+          const made = build(at);
+          if (!made?.ok) throw new Error('add_not_ready');
+          const creation = made.creation;
+          if (creation.kind === 'existing') result = { id: creation.workoutId, at };
+          else held = hold({ signature, creation, workoutId: creation.kind === 'steps' ? creation.workoutId : null, version: null, stepsSaved: false });
+        }
+        if (held) result = await make(held, at);
       }
-      const result = await make(creation, at);
+      if (!result) throw new Error('add_not_ready');
       await onPlace(result.id, result.at);
+      hold(null);
       placed = result.id;
     });
     if (ok && placed) onDone?.(placed);
   };
+  const unfinished = heldName && heldName.signature === signature ? heldName.name : null;
 
   const strip = (
     <div className="add-kinds" role="group" aria-label="What to add">
@@ -157,7 +233,17 @@ export function AddWorkout(props: {
     </div>
   );
 
-  const nameLine = preview?.ok && kind !== 'other' && kind !== 'saved' && (
+  const leave = () => {
+    hold(null);
+    setKind(props.initialKind ?? null); setTyped(''); setRenaming(false); setShowErrors(false);
+    setHome(initialGuidedDraft('core')); setHomeStart('core'); setLift(initialLiftingDraft());
+  };
+  const nameLine = unfinished && kind !== 'saved' ? (
+    <p className="add-name fine" role="status">
+      “{unfinished}” is saved to Workouts and not placed yet. {props.action} finishes it.
+      {' '}<button type="button" className="link" disabled={busy} onClick={leave}>Leave it in Workouts</button>
+    </p>
+  ) : preview?.ok && kind !== 'other' && kind !== 'saved' && (
     <p className="add-name fine">
       {preview.creation.kind === 'existing' ? preview.note : <>Saved to Workouts as “{preview.name}”.{preview.note ? ` ${preview.note}` : ''}</>}
       {' '}{!renaming && preview.creation.kind !== 'existing' && (
@@ -165,7 +251,7 @@ export function AddWorkout(props: {
       )}
     </p>
   );
-  const nameField = renaming && kind !== 'other' && (
+  const nameField = renaming && !unfinished && kind !== 'other' && (
     <div className="field">
       <label htmlFor={`${ids}-name`}>Name</label>
       <input id={`${ids}-name`} value={typed} maxLength={80} onChange={(event) => setTyped(event.target.value)} />
@@ -204,7 +290,7 @@ export function AddWorkout(props: {
             ))}
           </div>
           <p className="fine muted">An activity has no sets to log. On the day, the iPhone app offers to log it, or counts a synced one.</p>
-          {preview?.ok && preview.note && <p className="fine">{preview.note}</p>}
+          {!unfinished && preview?.ok && preview.note && <p className="fine">{preview.note}</p>}
         </div>
       )}
       {needsCatalog && catalog.kind === 'loading' && <p className="muted">Loading exercises…</p>}
@@ -268,7 +354,7 @@ export function AddWorkout(props: {
           {!renaming && (
             <div className="field">
               <label htmlFor={`${ids}-lift-name`}>Name</label>
-              <input id={`${ids}-lift-name`} value={typed} maxLength={80} placeholder={availableName(lift.name, workouts)}
+              <input id={`${ids}-lift-name`} value={typed} maxLength={80} placeholder={unfinished ?? availableName(lift.name, workouts)}
                 onChange={(event) => setTyped(event.target.value)} />
             </div>
           )}

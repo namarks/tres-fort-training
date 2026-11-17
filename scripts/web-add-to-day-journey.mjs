@@ -111,6 +111,74 @@ export async function addToDayJourney({ page, origin, apiCall, width = 1280 }) {
   assert.equal((await onDate('wed'))?.workout_id, made.id);
   await fits('The Schedule tab');
 
+  // Another device changes the week while a new workout is being saved here.
+  // The save stops instead of writing over that change, and Add again
+  // finishes the same save without making a second workout.
+  const routine = page.getByRole('row', { name: 'Every week', exact: true });
+  const makeOnMonday = async () => {
+    await routine.getByRole('gridcell', { name: 'Edit Monday', exact: true }).click();
+    await detail.getByRole('button', { name: '+ Add a workout to Monday', exact: true }).click();
+    await detail.getByRole('button', { name: 'Make a new one', exact: true }).click();
+    await box.getByRole('heading', { name: 'Add to every Monday', exact: true }).waitFor();
+  };
+  const elsewhere = async time => {
+    const now = await apiCall('GET', '/api/state');
+    await apiCall('PUT', '/api/plan/schedule', { week: now.plan.schedule.week, extras: now.plan.schedule.extras,
+      times: { mon: { [soccer.id]: time } }, expected_plan_id: now.plan.id, expected_version: now.plan.version });
+  };
+  const named = async pattern => (await apiCall('GET', '/api/state')).plan.workouts.filter(workout => pattern.test(workout.name));
+  const addToMonday = box.getByRole('button', { name: 'Add to every Monday', exact: true });
+
+  // The other change lands between the new activity and where it goes.
+  await makeOnMonday();
+  await box.getByRole('button', { name: 'Other', exact: true }).click();
+  await box.getByRole('textbox', { name: 'What is it?', exact: true }).fill('Yoga');
+  await page.route('**/api/workouts', async route => {
+    const response = await route.fetch();
+    await elsewhere('18:30');
+    await route.fulfill({ response });
+  }, { times: 1 });
+  await addToMonday.click();
+  await page.locator('.notice.conflict').waitFor();
+  state = await apiCall('GET', '/api/state');
+  assert.equal(state.plan.schedule.times.mon[soccer.id], '18:30', 'A change made elsewhere during the save is not written over.');
+  assert.deepEqual(state.plan.schedule.extras.mon, [soccer.id], 'The stopped save placed nothing.');
+  // The reloaded plan closes the weekday; its Add box opens on the same choice.
+  await makeOnMonday();
+  assert.equal(await box.getByRole('textbox', { name: 'What is it?', exact: true }).inputValue(), 'Yoga');
+  await addToMonday.click();
+  await routine.getByText('Yoga', { exact: true }).waitFor();
+  state = await apiCall('GET', '/api/state');
+  const yoga = await named(/^Yoga/);
+  assert.equal(yoga.length, 1, 'Add again places the activity already saved.');
+  assert.deepEqual(state.plan.schedule.extras.mon, [soccer.id, yoga[0].id]);
+  assert.equal(state.plan.schedule.times.mon[soccer.id], '18:30');
+
+  // A lift is saved, then the week changes elsewhere before it is placed.
+  await makeOnMonday();
+  await box.getByRole('button', { name: 'Lift', exact: true }).click();
+  await box.getByRole('searchbox', { name: 'Add an exercise', exact: true }).fill('squat');
+  await box.locator('.matches button').first().click();
+  await box.getByText(/Saved to Workouts as “Lifting workout”/).waitFor();
+  await page.route('**/api/plan/schedule', async route => {
+    await elsewhere('18:00');
+    await route.continue();
+  }, { times: 1 });
+  await addToMonday.click();
+  await page.locator('.notice.conflict').waitFor();
+  assert.equal((await named(/^Lifting workout/)).length, 1);
+  await makeOnMonday();
+  await box.getByText(/“Lifting workout” is saved to Workouts and not placed yet/).waitFor();
+  assert.equal(await box.locator('.add-exercises li').count(), 1, 'The exercises chosen are still there.');
+  await addToMonday.click();
+  await routine.getByText('Lifting workout', { exact: true }).waitFor();
+  state = await apiCall('GET', '/api/state');
+  const lifting = await named(/^Lifting workout/);
+  assert.equal(lifting.length, 1, 'Add again places the lift already saved instead of making a numbered copy.');
+  assert.equal(lifting[0].exercises.length, 1);
+  assert.deepEqual(state.plan.schedule.extras.mon, [soccer.id, yoga[0].id, lifting[0].id]);
+  assert.equal(state.plan.schedule.times.mon[soccer.id], '18:00');
+
   // An event is the first step of a block, and nothing leaves the Block tab.
   await page.goto(`${origin}/#block`);
   await page.getByRole('button', { name: 'Start a block', exact: true }).click();

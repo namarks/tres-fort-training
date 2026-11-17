@@ -140,7 +140,8 @@ export function runName(draft: RunDraft, items: readonly RunPlanItem[], miles: b
   return amount ? `${style} · ${amount}` : style;
 }
 
-function sameSteps(raw: string | null | undefined, items: readonly RunPlanItem[]): boolean {
+/** Whether a slot's saved steps are these ones. */
+export function sameSteps(raw: string | null | undefined, items: readonly RunPlanItem[]): boolean {
   if (!raw) return false;
   const stored = parseRunSteps(raw);
   return stored.ok && JSON.stringify(stored.items) === JSON.stringify(items);
@@ -262,4 +263,58 @@ export function activityCreation(name: string, workouts: readonly Workout[]): Cr
       creation: { kind: 'existing', workoutId: existing.id, name: existing.name } };
   }
   return { ok: true, name: name.trim(), creation: { kind: 'activity', name: name.trim() } };
+}
+
+// ---- a save that stopped part way ---------------------------------------------
+
+/**
+ * A workout this Add box began saving and has not placed yet. It keeps the
+ * creation with every id, so pressing Add again finishes the same save
+ * (the workout, a run's steps, then where it goes) instead of making another
+ * workout under a numbered name.
+ */
+export interface Unplaced {
+  /** The choices it was made from; different choices start a new save. */
+  signature: string;
+  creation: Exclude<Creation, { kind: 'existing' }>;
+  /** The workout, once the API has named it. */
+  workoutId: string | null;
+  /** The plan version after the last of this save's writes known to be in. */
+  version: number | null;
+  stepsSaved: boolean;
+}
+
+/**
+ * The version the next write of a save names. Each write that is known to
+ * be in moved the plan one version on from the one it named, so the next
+ * names that one: a change made anywhere else in between then answers with
+ * a conflict instead of being written over. The page's own version is used
+ * once it has caught up.
+ */
+export function versionAfterOwnWrites(pageVersion: number, known: number | null): number {
+  return known === null ? pageVersion : Math.max(pageVersion, known);
+}
+
+/**
+ * Whether a prescribed workout's receipt can be built on. A first answer is
+ * one version on from the request. A repeated request answers with the plan
+ * as it is now, which is safe only when nothing but this save moved it, or
+ * when the page already shows that version.
+ */
+export function receiptIsOurs(expectedVersion: number, receiptVersion: number, pageVersion: number): boolean {
+  return receiptVersion === expectedVersion + 1 || receiptVersion === pageVersion;
+}
+
+/**
+ * The unfinished save Add should resume, or null to start a new one: the
+ * choices are the same, and the workout it made is still in the plan once
+ * the page shows a version that includes it.
+ */
+export function resumable(
+  held: Unplaced | null, signature: string, workouts: readonly Workout[], pageVersion: number,
+): Unplaced | null {
+  if (!held || held.signature !== signature) return null;
+  if (held.workoutId !== null && held.version !== null && pageVersion >= held.version
+      && !workouts.some((workout) => workout.id === held.workoutId && !workout.archived_at)) return null;
+  return held;
 }

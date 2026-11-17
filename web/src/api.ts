@@ -237,15 +237,6 @@ export async function createPrescribedWorkout(input: WorkoutPrescription, accoun
   return result;
 }
 
-/** The plan's version right now, for a change that follows another in the
- * same action (a new workout, then where it goes). Throws when the active
- * plan is no longer the one reviewed. */
-export async function fetchPlanVersion(at: Reviewed): Promise<number> {
-  const plan = await request<{ id?: unknown; version?: unknown }>('GET', '/api/plan/active', undefined, at.accountId);
-  if (!plan || plan.id !== at.planId || !Number.isSafeInteger(plan.version)) throw new Error('plan_changed');
-  return plan.version as number;
-}
-
 const id = encodeURIComponent;
 
 /** Every plan write names the version the member saw; a newer plan answers 409. */
