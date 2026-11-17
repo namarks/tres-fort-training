@@ -1,6 +1,8 @@
 import { useEffect, useId, useMemo, useState } from 'react';
 import { MAX_SCHEDULE_EXTRAS, WEEKDAYS, type Weekday } from '../../src/types';
-import { planWrites, type Reviewed } from './api';
+import { AddWorkout } from './AddWorkout';
+import { planWrites, type Reviewed, type StateResponse } from './api';
+import type { Adder } from './CalendarEditing';
 import { formatScheduleTime, isRunOnlyWorkout, WEEKDAY_LABELS, type Workout } from './model';
 import {
   choosableWorkouts,
@@ -84,8 +86,12 @@ export function EveryWeekdayPanel(props: {
   onDirty?: (dirty: boolean) => void;
   /** A running block's own workouts: placed in the Block tab, not here. */
   blockIds?: ReadonlySet<string>;
+  /** With these, a new workout is made here by type and added to the day. */
+  state?: StateResponse;
+  adder?: Adder;
 }) {
-  const { day, write, busy, onClose, onDirty, blockIds } = props;
+  const { day, write, busy, onClose, onDirty, blockIds, state, adder } = props;
+  const [making, setMaking] = useState(false);
   const workouts = useMemo(() => choosableWorkouts(props.workouts), [props.workouts]);
   // The week as reviewed when this weekday was opened.
   const [review] = useState<RoutineReview>(() => ({ schedule: structuredClone(props.schedule), at: { ...props.reviewed } }));
@@ -116,6 +122,28 @@ export function EveryWeekdayPanel(props: {
     ...draft, primary: id, extras: [...(draft.primary ? [draft.primary] : []), ...draft.extras.filter((entry) => entry !== id)],
   });
   const setTime = (id: string, time: string) => setDraft({ ...draft, times: { ...draft.times, [id]: time } });
+
+  // Making a new workout saves it and adds it to the saved day in one go,
+  // so it is offered only while the day has no unsaved changes.
+  if (making && state && adder) {
+    return (
+      <div className="every-day">
+        <p className="kicker">Every week</p>
+        <AddWorkout title={`Add to every ${name}`} action={`Add to every ${name}`} state={state} accountId={adder.accountId}
+          catalog={adder.catalog} miles={adder.miles} write={write} busy={busy}
+          unavailable={(workout) => blockIds?.has(workout.id) ? 'In your block' : routineAddProblem(props.schedule, day, workout.id)}
+          blocked={routineDayFull(routineDay(props.schedule, day)) ? `${name} already has five workouts every week.` : null}
+          onPlace={async (workoutId, at) => {
+            const known = props.workouts.some((workout) => workout.id === workoutId) ? props.workouts
+              : [...props.workouts, { id: workoutId, name: '', order_index: Number.MAX_SAFE_INTEGER, exercises: [] } as unknown as Workout];
+            const result = routineAddingWorkout(props.schedule, [day], workoutId, '', known);
+            if (!result.ok) throw new Error(result.error);
+            await planWrites.setRoutine(result.schedule, at);
+          }}
+          onCancel={() => setMaking(false)} />
+      </div>
+    );
+  }
 
   return (
     <form className="every-day" aria-label={`Edit ${name}`} onSubmit={async (event) => {
@@ -175,7 +203,10 @@ export function EveryWeekdayPanel(props: {
           {available.length === 0 && <p className="muted">{search.trim() ? 'No workout matches that search.' : 'Every saved workout is already on this day.'}</p>}
           {blockIds && blockIds.size > 0 && <p className="fine muted">Your block’s own workouts are placed in the <a href="#block">Block tab</a>.</p>}
           <div className="head-actions">
-            <button type="button" className="ghost small" onClick={props.onNewWorkout}>New workout</button>
+            {state && adder
+              ? <button type="button" className="ghost small" disabled={dirty} title={dirty ? `Save ${name} first` : undefined}
+                onClick={() => setMaking(true)}>Make a new one</button>
+              : <button type="button" className="ghost small" onClick={props.onNewWorkout}>New workout</button>}
             <button type="button" className="ghost small" onClick={() => { setAdding(false); setSearch(''); }}>Close list</button>
           </div>
         </section>

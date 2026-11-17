@@ -14,12 +14,13 @@ export async function programmingDraftJourney({ page, origin, apiCall, width = 1
   await page.goto(`${origin}/#block`);
   await page.getByRole('heading', { name: 'No training block', exact: true }).waitFor();
   await page.getByRole('button', { name: 'Start a block', exact: true }).click();
-  const creation = page.locator('.block-intro');
+  const creation = page.locator('.block-setup');
   const block = page.getByRole('navigation', { name: 'Plan sections', exact: true }).getByRole('link', { name: 'Block', exact: true });
   const name = creation.getByRole('textbox', { name: 'Name (optional)', exact: true });
   const weeks = creation.getByRole('spinbutton', { name: 'Weeks', exact: true });
+  const next = creation.getByRole('button', { name: 'Continue', exact: true });
+  const start = creation.getByRole('button', { name: 'Start block', exact: true });
   await name.fill('My retained block'); await weeks.fill('');
-  assert(await creation.getByRole('checkbox', { name: /^Strength draft/ }).isChecked(), 'A weekday’s main workout is ticked for the block to train.');
   await page.getByRole('link', { name: 'Workouts', exact: true }).click();
   // An unfinished block opens again from the Block tab.
   await block.click();
@@ -28,27 +29,34 @@ export async function programmingDraftJourney({ page, origin, apiCall, width = 1
   page.once('dialog', dialog => dialog.accept()); await page.reload();
   assert.equal(await name.inputValue(), 'My retained block');
   assert.equal(await weeks.inputValue(), '');
-  assert(await creation.getByRole('button', { name: 'Start block', exact: true }).isDisabled());
+  // An unfinished step says what it needs and goes no further.
+  await next.click();
+  await creation.getByText('Enter between 1 and 52 whole weeks.', { exact: true }).waitFor();
   await weeks.fill('3');
+  await next.click();
+  assert.match(await creation.locator('.setup-lane.own').innerText(), /Strength draft/, 'A weekday’s main workout starts in the block.');
+  await next.click();
+  await start.waitFor();
+  // The step reached is kept with the draft.
+  page.once('dialog', dialog => dialog.accept()); await page.reload();
+  await start.waitFor();
   await setWeek({ tue: workout.id });
-  await creation.getByRole('button', { name: 'Start block', exact: true }).click();
-  const review = creation.getByRole('button', { name: 'Use current week with my choices', exact: true });
+  await start.click();
+  const review = creation.getByRole('button', { name: 'Use the week as it is now', exact: true });
   await review.waitFor();
-  assert.equal(await name.inputValue(), 'My retained block');
-  assert(await creation.getByRole('button', { name: 'Start block', exact: true }).isDisabled());
-  assert.match(await creation.innerText(), /Previously reviewed/);
+  assert(await start.isDisabled());
+  assert.match(await creation.innerText(), /Your every-week row changed since you began/);
   await review.click();
 
   // A block created elsewhere is never replaced by this retained new-block draft.
   state = await apiCall('GET', '/api/state');
   await apiCall('PUT', '/api/plan/program', { program: { name: 'Other device block', start: '2026-11-16', repeat: false, weeks: [{ week: { wed: workout.id } }] }, expected_version: state.plan.version });
-  await creation.getByRole('button', { name: 'Start block', exact: true }).click();
+  await start.click();
   await creation.getByText(/A block has been saved since you started/).waitFor();
-  assert.equal(await name.inputValue(), 'My retained block');
-  assert(await creation.getByRole('button', { name: 'Start block', exact: true }).isDisabled());
+  assert(await start.isDisabled());
   assert.equal(JSON.parse((await apiCall('GET', '/api/state')).plan.meta).program.name, 'Other device block');
   page.once('dialog', dialog => dialog.accept());
-  await creation.getByRole('button', { name: 'Discard new-block draft', exact: true }).click();
+  await creation.getByRole('button', { name: 'Discard this block', exact: true }).click();
   await creation.waitFor({ state: 'hidden' });
 
   state = await apiCall('GET', '/api/state');
@@ -56,10 +64,11 @@ export async function programmingDraftJourney({ page, origin, apiCall, width = 1
   await page.reload();
   await page.getByRole('button', { name: 'Start a block', exact: true }).click();
   await name.fill('Acknowledged block'); await weeks.fill('2');
+  await next.click(); await next.click();
   let programWrites = 0;
   page.on('request', request => { if (request.method() === 'PUT' && new URL(request.url()).pathname === '/api/plan/program') programWrites++; });
   await page.route('**/api/state', route => route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"synthetic_refresh_failure"}' }));
-  await creation.getByRole('button', { name: 'Start block', exact: true }).click();
+  await start.click();
   await page.getByText('Saved. Refresh your plan to see the change.', { exact: true }).waitFor();
   await creation.waitFor({ state: 'hidden' });
   assert.equal(programWrites, 1);
@@ -67,8 +76,8 @@ export async function programmingDraftJourney({ page, origin, apiCall, width = 1
   assert.equal(created.name, 'Acknowledged block'); assert.equal(created.weeks.length, 2);
   assert.equal(created.weeks[0].week.tue, workout.id);
   assert.equal(created.weeks[0].week.mon, null);
-  // The block keeps the ticked workout as its own, and the same write took
-  // it out of what repeats every week.
+  // The block keeps its workout as its own, and the same write took it out
+  // of what repeats every week.
   assert.deepEqual(created.workout_ids, [workout.id]);
   assert.equal(created.repeat, false);
   assert.equal((await apiCall('GET', '/api/state')).plan.schedule.week.tue, null);

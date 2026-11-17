@@ -231,10 +231,10 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
-  // The exercise list names exercises for editing and on the Activity page,
-  // so it loads with either view.
+  // The exercise list names exercises for editing, for adding a lift to a
+  // day and on the Activity page, so it loads with any of those views.
   useEffect(() => {
-    if (view.kind === 'plan' || view.kind === 'block' || (view.kind === 'analysis' && view.page !== 'strength') || view.kind === 'diagnostics' || view.kind === 'members' || catalog) return;
+    if ((view.kind === 'analysis' && view.page !== 'strength') || view.kind === 'diagnostics' || view.kind === 'members' || catalog) return;
     setCatalog({ kind: 'loading' });
     fetchExercises()
       .then((exercises) => setCatalog({ kind: 'ready', exercises }))
@@ -346,7 +346,8 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
         /></>
       ) : view.kind === 'block' ? (
         <><PlanTabs current="block" /><BlockPage key={`${me.id}:${state.plan?.id ?? 'none'}`} state={state} write={write} busy={busy}
-          accountId={me.id} onEditWorkout={(workoutId) => go({ kind: 'workouts', workoutId })} /></>
+          accountId={me.id} catalog={catalog ?? { kind: 'loading' }} miles={prefersMiles()}
+          onEditWorkout={(workoutId) => go({ kind: 'workouts', workoutId })} /></>
       ) : view.kind === 'activity' ? (
         <ActivityPage key={view.entryKey ?? ''} state={state} catalog={catalog?.kind === 'ready' ? catalog.exercises : null} initialKey={view.entryKey}
           accountId={me.id} reload={reload} onSignedOut={onSignedOut} onFeedbackSaved={onFeedbackSaved} />
@@ -355,7 +356,7 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
           catalog={catalog ?? { kind: 'loading' }} retryCatalog={() => setCatalog(null)} />
       ) : (
         <><PlanTabs current="schedule" /><PlanPage key={`${me.id}:${state.plan?.id ?? 'none'}`} state={state} write={write} busy={busy} accountId={me.id}
-          reload={reload} onSignedOut={onSignedOut}
+          reload={reload} onSignedOut={onSignedOut} catalog={catalog ?? { kind: 'loading' }}
           scheduleWorkoutId={view.kind === 'plan' ? view.scheduleWorkoutId : null}
           onScheduled={() => go({ kind: 'plan' })}
           onEditWorkout={(workoutId) => go({ kind: 'workouts', workoutId })} /></>

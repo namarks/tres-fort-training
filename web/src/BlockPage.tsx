@@ -3,7 +3,10 @@ import { addDays } from '../../src/calendarProjection';
 import { dayEntries } from '../../src/programLayers';
 import { WEEKDAYS, type Weekday } from '../../src/types';
 import type { StateResponse } from './api';
-import { BlockReview, BlockSettings, NewBlock, TargetsByWeek, useBlockEditor, type ActiveBlock } from './BlockEditor';
+import { BlockReview, BlockSettings, TargetsByWeek, useBlockEditor, type ActiveBlock } from './BlockEditor';
+import { applyingBuild, detectedBuild, EASY_CHOICES, labelingEasyWeeks, type BuildRule, type EasyEvery } from './blockBuild';
+import { BlockSetup, BuildsBy, listed } from './BlockSetup';
+import { eventOf } from './event';
 import {
   addingToBlock,
   besideBlock,
@@ -25,24 +28,26 @@ import {
 } from './blockLayers';
 import { addingWeek, copyingDown, liveWorkouts, MAX_PROGRAM_WEEKS, relabeling, removingLastWeek, settingRunSteps, shortDate, weekStart, workoutsInBlock } from './blocks';
 import { applySlotTargets } from '../../src/programTargets';
-import { formatScheduleTime, localToday, prefersMiles, WEEKDAY_LABELS, type Slot, type Workout } from './model';
+import { localToday, WEEKDAY_LABELS, type Slot, type Workout } from './model';
 import { RunPlanEditor } from './RunPlanEditor';
 import { isNewBlockDraft, NEW_BLOCK_DOCUMENT } from './programmingDrafts';
 import { useEditorDraft } from './useEditorDraft';
 import { WeekAdjustment } from './WeekAdjustmentPanel';
-import type { Write } from './WorkoutEditor';
+import type { Catalog, Write } from './WorkoutEditor';
 
 /**
  * The Block tab of Plan: the one place a training block is started, shaped
  * and ended (owner, 2026-11-16). A block holds its own workouts; what the
  * member does every week stays in the Schedule tab's top row and carries on
- * beside it.
+ * beside it. Starting one is three questions (owner, 2026-11-17).
  */
-export function BlockPage({ state, write, busy, accountId, onEditWorkout }: {
+export function BlockPage({ state, write, busy, accountId, catalog, miles, onEditWorkout }: {
   state: StateResponse;
   write: Write;
   busy: boolean;
   accountId: string;
+  catalog: Catalog;
+  miles: boolean;
   onEditWorkout: (id: string | null) => void;
 }) {
   const today = useMemo(() => localToday(), []);
@@ -51,13 +56,12 @@ export function BlockPage({ state, write, busy, accountId, onEditWorkout }: {
   const newDraft = useEditorDraft({ accountId, planId: plan?.id ?? 'none', documentId: NEW_BLOCK_DOCUMENT }, isNewBlockDraft);
   const block = useBlockEditor({ state, write, busy, today, accountId });
   const active = block.kind === 'block' ? block : null;
-  const hasWorkouts = liveWorkouts(plan?.workouts ?? []).size > 0;
   const startOpen = (starting || !!newDraft.record || newDraft.unreadable) && (!active || !!newDraft.record || newDraft.unreadable);
 
   if (!plan) {
     return (
       <main className="block-page">
-        <NoBlock hasWorkouts={false} onStart={() => undefined} onCreate={() => onEditWorkout(null)} />
+        <NoBlock onCreate={() => onEditWorkout(null)} />
       </main>
     );
   }
@@ -69,27 +73,29 @@ export function BlockPage({ state, write, busy, accountId, onEditWorkout }: {
           <button type="button" onClick={block.clear}>Discard unreadable draft</button>
         </div>
       )}
-      {startOpen && (hasWorkouts
-        ? <NewBlock accountId={accountId} state={state} workouts={plan.workouts} write={write} busy={busy} today={today} onCancel={() => setStarting(false)} />
-        : <div className="panel"><p>A block is made of your workouts. Create one first.</p>
-          <button type="button" onClick={() => onEditWorkout(null)}>Create a workout</button></div>)}
-      {!active && !startOpen && block.kind !== 'unreadable'
-        && <NoBlock hasWorkouts={hasWorkouts} onStart={() => setStarting(true)} onCreate={() => onEditWorkout(null)} />}
-      {active && <RunningBlock block={active} state={state} today={today} busy={busy} />}
+      {startOpen && <BlockSetup accountId={accountId} state={state} write={write} busy={busy} today={today}
+        catalog={catalog} miles={miles} onCancel={() => setStarting(false)} />}
+      {!active && !startOpen && block.kind !== 'unreadable' && <NoBlock onStart={() => setStarting(true)} />}
+      {active && <RunningBlock block={active} state={state} today={today} busy={busy} miles={miles} />}
     </main>
   );
 }
 
-function NoBlock({ hasWorkouts, onStart, onCreate }: { hasWorkouts: boolean; onStart: () => void; onCreate: () => void }) {
+/** No block yet: one way in. A member with no plan makes a workout first. */
+function NoBlock({ onStart, onCreate }: { onStart?: () => void; onCreate?: () => void }) {
   return (
     <section className="panel block-none" aria-labelledby="block-none-title">
       <h1 id="block-none-title">No training block</h1>
-      <p>A block is your main training for a set number of weeks, with targets that change from week to week. What you do every week carries on beside it.</p>
+      <p>A block is a few weeks of training that build toward something: an event, or just a stretch of getting fitter. What you do every week carries on beside it.</p>
+      <ol className="block-none-steps">
+        <li>Say what it is for: an event date, or a number of weeks.</li>
+        <li>Lay out one week of it.</li>
+        <li>Pick how each workout builds, and the weeks fill in.</li>
+      </ol>
       <div className="form-actions">
-        {hasWorkouts
+        {onStart
           ? <button type="button" className="primary" onClick={onStart}>Start a block</button>
           : <button type="button" className="primary" onClick={onCreate}>Create a workout first</button>}
-        <a className="ghost" href="#analysis/event">Start one for an event</a>
       </div>
     </section>
   );
@@ -103,14 +109,26 @@ function blockPosition(block: ActiveBlock, today: string): string {
   return `Ended ${shortDate(addDays(draft.start, draft.weeks.length * 7 - 1))}`;
 }
 
-function RunningBlock({ block, state, today, busy }: { block: ActiveBlock; state: StateResponse; today: string; busy: boolean }) {
+const ordinal = (n: number) => (n === 3 ? '3rd' : `${n}th`);
+
+function RunningBlock({ block, state, today, busy, miles }: { block: ActiveBlock; state: StateResponse; today: string; busy: boolean; miles: boolean }) {
   const plan = state.plan!;
   const { draft, setDraft } = block;
-  const miles = useMemo(() => prefersMiles(), []);
-  const [settings, setSettings] = useState(false);
+  const [setup, setSetup] = useState(false);
   const [lighterWeek, setLighterWeek] = useState<number | null>(null);
   const [ending, setEnding] = useState(false);
-  const [targetsFor, setTargetsFor] = useState<string | null>(null);
+  // Typed targets not yet saved open with the page, so they are never out of sight.
+  const [targetsFor, setTargetsFor] = useState<string | null>(() => {
+    for (const key of Object.keys(block.inputs)) {
+      let slotId: unknown;
+      try { slotId = (JSON.parse(key) as unknown[])[0]; } catch { continue; }
+      const owner = plan.workouts.find((workout) => workout.exercises.some((slot) => slot.id === slotId));
+      if (owner) return owner.id;
+    }
+    return null;
+  });
+  // Workouts the member chose to set week by week, until a rule is picked again.
+  const [byHand, setByHand] = useState<string[]>([]);
   const rows = blockWorkouts(draft, plan.workouts);
   const lastDay = addDays(draft.start, draft.weeks.length * 7 - 1);
   const [runFor, setRunFor] = useState<{ workoutId: string; index: number } | null>(null);
@@ -118,6 +136,7 @@ function RunningBlock({ block, state, today, busy }: { block: ActiveBlock; state
   // A planned run's week opens its steps; anything else, the week-by-week numbers.
   const openTargets = (workout: Workout, index: number) => {
     if (isPlannedRun(headlineSlot(workout, draft))) {
+      setTargetsFor(null);
       setRunFor({ workoutId: workout.id, index });
       reveal('block-run-week');
     } else {
@@ -128,6 +147,37 @@ function RunningBlock({ block, state, today, busy }: { block: ActiveBlock; state
   };
   const runWorkout = runFor ? rows.find((workout) => workout.id === runFor.workoutId) : undefined;
   const runSlot = runWorkout ? headlineSlot(runWorkout, draft) : undefined;
+  // A rule changed while the block runs fills from this week on; earlier weeks keep what they asked for.
+  const from = block.thisWeek ?? 0;
+  const draftKey = JSON.stringify(draft);
+  const builds = useMemo(
+    () => new Map(rows.map((workout) => [workout.id, detectedBuild(draft, workout, miles, from)])),
+    // The draft is a new object each render; its text says when it changed.
+    [draftKey, plan.workouts, miles, from],
+  );
+  const easyEvery: EasyEvery = [...builds.values()].find((build) => build.rule.kind === 'add' && build.easyEvery != null)?.easyEvery ?? null;
+  const ruleOf = (workout: Workout): BuildRule => byHand.includes(workout.id) ? { kind: 'manual' } : builds.get(workout.id)?.rule ?? { kind: 'manual' };
+  const setRule = (workout: Workout, rule: BuildRule) => {
+    if (rule.kind === 'manual') {
+      setByHand([...byHand.filter((id) => id !== workout.id), workout.id]);
+      openTargets(workout, from);
+      return;
+    }
+    setByHand(byHand.filter((id) => id !== workout.id));
+    setDraft(applyingBuild(draft, workout, rule, { easyEvery, from, miles }));
+  };
+  const setEasy = (next: EasyEvery) => {
+    let changed = draft;
+    for (const workout of rows) {
+      const rule = ruleOf(workout);
+      if (rule.kind === 'add') changed = applyingBuild(changed, workout, rule, { easyEvery: next, from, miles });
+    }
+    setDraft(labelingEasyWeeks(changed, next));
+  };
+  const anyBuilding = rows.some((workout) => ruleOf(workout).kind === 'add');
+  const race = eventOf(state);
+  const event = race && race.date >= draft.start && race.date <= lastDay ? race : null;
+  const beside = block.layered ? besideBlock(draft, plan.schedule, plan.workouts) : [];
   return (
     <>
       <header className="block-head">
@@ -136,53 +186,101 @@ function RunningBlock({ block, state, today, busy }: { block: ActiveBlock; state
           <h1 id="block-title">{draft.name?.trim() || 'Your block'}</h1>
           <p className="muted">
             {shortDate(draft.start)} to {shortDate(lastDay)} · {rows.length} {rows.length === 1 ? 'workout' : 'workouts'} a week
+            {event ? ` · for ${event.name} on ${shortDate(event.date)}` : ''}
             {draft.repeat ? ' · starts over when it ends' : ''}
           </p>
         </div>
         <div className="block-actions">
-          <button type="button" className="primary" disabled={!block.canSave} onClick={block.save}>Save changes</button>
-          <button type="button" className="ghost" disabled={!block.dirty || busy} onClick={block.discard}>Discard</button>
-          <button type="button" className="ghost" aria-expanded={settings} onClick={() => setSettings(!settings)}>Name and start</button>
-          <button type="button" className="ghost" disabled={busy || draft.weeks.length >= MAX_PROGRAM_WEEKS}
-            onClick={() => { const next = addingWeek(draft); if (next) setDraft(next); }}>Add a week</button>
-          <button type="button" className="ghost" disabled={busy || draft.weeks.length <= 1}
-            onClick={() => { const next = removingLastWeek(draft); if (next) setDraft(next); }}>Remove the last week</button>
+          {block.dirty && <button type="button" className="primary" disabled={!block.canSave} onClick={block.save}>Save changes</button>}
+          {block.dirty && <button type="button" className="ghost" disabled={busy} onClick={block.discard}>Discard</button>}
+          <button type="button" className="ghost" aria-expanded={setup} onClick={() => setSetup(!setup)}>Change the setup</button>
           <button type="button" className="ghost danger" aria-expanded={ending} disabled={busy || !!block.problem} onClick={() => setEnding(!ending)}>End block</button>
         </div>
       </header>
       <BlockReview block={block} busy={busy} />
-      {settings && <BlockSettings block={block} today={today} />}
+      {setup && (
+        <section className="panel block-setup-change" aria-labelledby="block-change-title">
+          <h2 id="block-change-title">Change the setup</h2>
+          <BlockSettings block={block} today={today} />
+          <div className="form-actions">
+            <button type="button" className="ghost" disabled={busy || draft.weeks.length >= MAX_PROGRAM_WEEKS}
+              onClick={() => { const next = addingWeek(draft); if (next) setDraft(next); }}>Add a week</button>
+            <button type="button" className="ghost" disabled={busy || draft.weeks.length <= 1}
+              onClick={() => { const next = removingLastWeek(draft); if (next) setDraft(next); }}>Remove the last week</button>
+          </div>
+          {block.layered && <AddToBlock block={block} state={state} busy={busy} />}
+          <label className="check">
+            <input type="checkbox" checked={draft.repeat} disabled={busy} onChange={(e) => setDraft({ ...draft, repeat: e.target.checked })} />
+            Start over at week 1 when it ends
+          </label>
+          <p className="muted fine">
+            {draft.repeat
+              ? `After week ${draft.weeks.length} the block starts over, until you end it.`
+              : block.layered
+                ? `After ${shortDate(lastDay)}, what you do every week carries on by itself. To keep one of its weeks going instead, choose End block when you get there.`
+                : `After ${shortDate(lastDay)}, your every-week row takes over again.`}
+          </p>
+          <div className="form-actions">
+            <button type="button" className="ghost" onClick={() => setSetup(false)}>Done</button>
+            <span className="muted fine">Nothing is saved until you choose Save changes.</span>
+          </div>
+        </section>
+      )}
       {ending && <EndBlock block={block} busy={busy} onClose={() => setEnding(false)} />}
       {!block.layered && <SortBlock block={block} state={state} busy={busy} />}
       {lighterWeek != null && draft.weeks[lighterWeek]
         && <WeekAdjustment key={`${block.programId}:${lighterWeek}`} block={block} index={lighterWeek} workouts={plan.workouts} onClose={() => setLighterWeek(null)} />}
 
       <section className="panel block-weeks" aria-labelledby="block-weeks-title">
-        <h2 id="block-weeks-title">Week by week</h2>
-        <p className="muted">What each block workout asks for in each week. Choose a target to change it, move a workout to another day, or make a whole week lighter.</p>
+        <div className="block-weeks-head">
+          <div>
+            <h2 id="block-weeks-title">Week by week</h2>
+            <p className="muted">Pick how each workout builds and its weeks fill in. Choose any week’s target to change just that week.</p>
+          </div>
+          {block.layered && (anyBuilding || easyEvery != null) && (
+            <div className="setup-easy">
+              <label htmlFor="block-easy">Easier week</label>
+              <select id="block-easy" value={easyEvery ?? 0} disabled={busy} onChange={(e) => setEasy((Number(e.target.value) || null) as EasyEvery)}>
+                {EASY_CHOICES.map((choice) => (
+                  <option key={choice ?? 0} value={choice ?? 0} disabled={choice != null && draft.weeks.length < choice}>
+                    {choice == null ? 'None' : `Every ${ordinal(choice)} week`}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+        </div>
         <div className="block-grid-wrap">
           <table className="block-table">
             <thead>
               <tr>
                 <th scope="col">Workout</th>
                 <th scope="col">Day</th>
+                {block.layered && <th scope="col" className="block-col">Builds by</th>}
                 {draft.weeks.map((week, index) => (
                   <WeekColumn key={index} block={block} index={index} today={today} onLighten={setLighterWeek} />
                 ))}
-                <th scope="col"><span className="visually-hidden">Remove</span></th>
               </tr>
             </thead>
             <tbody>
               {rows.map((workout) => (
-                <BlockRow key={workout.id} block={block} workout={workout} miles={miles} busy={busy} onTargets={openTargets} />
+                <BlockRow key={workout.id} block={block} workout={workout} miles={miles} busy={busy} onTargets={openTargets}
+                  rule={ruleOf(workout)} onRule={(rule) => setRule(workout, rule)} />
               ))}
               {rows.length === 0 && (
-                <tr><td colSpan={draft.weeks.length + 3} className="muted">This block has no workouts of its own yet.</td></tr>
+                <tr><td colSpan={draft.weeks.length + 3} className="muted">This block has no workouts of its own yet. Choose Change the setup to add one.</td></tr>
               )}
             </tbody>
           </table>
         </div>
-        {block.layered && <AddToBlock block={block} state={state} busy={busy} />}
+        {block.layered && (
+          <p className="fine muted block-beside-line">
+            {beside.length > 0
+              ? <>Beside this block every week: {listed(beside.map(({ workout, days }) => `${workout.name} (${daysLabel(days)})`))}. </>
+              : <>Nothing repeats every week beside this block yet. </>}
+            <a href="#plan">Change in Schedule</a>
+          </p>
+        )}
       </section>
 
       {runFor && runWorkout && isPlannedRun(runSlot) && draft.weeks[runFor.index] && (
@@ -192,28 +290,11 @@ function RunningBlock({ block, state, today, busy }: { block: ActiveBlock; state
         </section>
       )}
 
-      <div className="block-aside">
-        {block.layered && <BesideBlock block={block} state={state} />}
-        <section className="panel" aria-labelledby="block-after-title">
-          <h2 id="block-after-title">When it ends</h2>
-          <p className="muted">
-            {draft.repeat
-              ? `After week ${draft.weeks.length} the block starts over at week 1, until you end it.`
-              : block.layered
-                ? `After ${shortDate(lastDay)}, what you do every week carries on by itself.`
-                : `After ${shortDate(lastDay)}, your every-week row takes over again.`}
-          </p>
-          <label className="check">
-            <input type="checkbox" checked={draft.repeat} disabled={busy} onChange={(e) => setDraft({ ...draft, repeat: e.target.checked })} />
-            Start over when it ends
-          </label>
-          <p className="muted fine">To keep a week going every week instead, choose End block when you get there.</p>
-        </section>
-      </div>
-
-      <TargetsByWeek key={targetsFor ?? 'first'} initialWorkoutId={targetsFor ?? undefined} draft={draft}
-        workouts={block.layered ? rows : workoutsInBlock(draft, plan.workouts)} onChange={setDraft}
-        inputs={block.inputs} onInput={block.editInput} onReset={block.resetInputs} />
+      {targetsFor && (
+        <TargetsByWeek key={targetsFor} initialWorkoutId={targetsFor} draft={draft}
+          workouts={block.layered ? rows : workoutsInBlock(draft, plan.workouts)} onChange={setDraft}
+          inputs={block.inputs} onInput={block.editInput} onReset={block.resetInputs} onClose={() => setTargetsFor(null)} />
+      )}
       {block.dirty && (
         <div className="block-savebar" role="status">
           <span>Unsaved changes to your block.</span>
@@ -258,8 +339,9 @@ function WeekColumn({ block, index, today, onLighten }: { block: ActiveBlock; in
 }
 
 /** One block workout: its weekdays, and what each week asks of it. */
-function BlockRow({ block, workout, miles, busy, onTargets }: {
+function BlockRow({ block, workout, miles, busy, onTargets, rule, onRule }: {
   block: ActiveBlock; workout: Workout; miles: boolean; busy: boolean; onTargets: (workout: Workout, index: number) => void;
+  rule: BuildRule; onRule: (rule: BuildRule) => void;
 }) {
   const draft = block.draft;
   const { days, varies } = blockDays(draft, workout.id);
@@ -283,6 +365,7 @@ function BlockRow({ block, workout, miles, busy, onTargets }: {
               onClick={() => setDaysOpen(!daysOpen)}>{daysText}</button>
           ) : <span>{daysText}</span>}
         </td>
+        {block.layered && <td className="builds-cell"><BuildsBy workout={workout} rule={rule} miles={miles} disabled={busy} onChange={onRule} /></td>}
         {draft.weeks.map((_, index) => {
           const on = daysIn(draft, index, workout.id).length > 0;
           const text = on ? weekHeadline(workout, draft, index, miles) : '';
@@ -297,12 +380,6 @@ function BlockRow({ block, workout, miles, busy, onTargets }: {
             </td>
           );
         })}
-        <td>
-          {block.layered && (
-            <button type="button" className="ghost small" disabled={busy} aria-label={`Remove ${workout.name} from the block`}
-              onClick={() => block.setDraft(removingFromBlock(draft, workout))}>Remove</button>
-          )}
-        </td>
       </tr>
       {block.layered && daysOpen && (
         <tr className="block-days-row">
@@ -324,10 +401,12 @@ function BlockRow({ block, workout, miles, busy, onTargets }: {
                   );
                 })}
                 <button type="button" className="ghost small" onClick={() => setDaysOpen(false)}>Done</button>
+                <button type="button" className="ghost small danger" disabled={busy} aria-label={`Remove ${workout.name} from the block`}
+                  onClick={() => block.setDraft(removingFromBlock(draft, workout))}>Remove from block</button>
               </div>
               {varies && <p className="fine muted">The weeks differ now. A change here puts it on the same days in all of them.</p>}
               {crowded.length > 0 && <p role="status" className="fine muted">{crowded.map((day) => WEEKDAY_LABELS[day]).join(', ')} already {crowded.length === 1 ? 'has' : 'have'} five workouts in some weeks, so this can’t go there in every week. Untick {crowded.length === 1 ? 'it' : 'them'} to change the other days.</p>}
-              {days.length === 1 && <p className="fine muted">To take it out of the block, choose Remove.</p>}
+              {days.length === 1 && <p className="fine muted">To take it out of the block, choose Remove from block.</p>}
             </fieldset>
           </td>
         </tr>
@@ -391,33 +470,6 @@ function AddToBlock({ block, state, busy }: { block: ActiveBlock; state: StateRe
       )}
       {full && <p className="fine problem">That day already has five workouts in one of the weeks.</p>}
     </div>
-  );
-}
-
-/** What the member does every week, shown so the block's edges are clear. */
-function BesideBlock({ block, state }: { block: ActiveBlock; state: StateResponse }) {
-  const plan = state.plan!;
-  const beside = besideBlock(block.draft, plan.schedule, plan.workouts);
-  return (
-    <section className="panel" aria-labelledby="block-beside-title">
-      <h2 id="block-beside-title">Every week, beside this block</h2>
-      <p className="muted">These carry on while the block runs. The block never changes them.</p>
-      {beside.length === 0 ? <p className="muted">Nothing yet. Soccer on Mondays or core every night would go here.</p> : (
-        <ul className="block-beside">
-          {beside.map(({ workout, days }) => {
-            const times = new Set(days.map((day) => plan.schedule.times?.[day]?.[workout.id] ?? ''));
-            const time = times.size === 1 ? [...times][0] : '';
-            return (
-              <li key={workout.id}>
-                <strong>{workout.name}</strong>
-                <small className="muted">{daysLabel(days)}{time ? ` · ${formatScheduleTime(time)}` : ''}</small>
-              </li>
-            );
-          })}
-        </ul>
-      )}
-      <a href="#plan">Change these in Schedule</a>
-    </section>
   );
 }
 

@@ -54,7 +54,7 @@ export type Catalog =
 const UNIT_KEY = 'tresfort.weightUnit';
 
 /** The unit a new slot starts in: the member's last choice, else their region's. */
-function preferredUnit(miles: boolean): WeightUnit {
+export function preferredUnit(miles: boolean): WeightUnit {
   try {
     const saved = localStorage.getItem(UNIT_KEY);
     if (saved === 'lb' || saved === 'kg') return saved;
