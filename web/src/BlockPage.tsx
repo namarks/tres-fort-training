@@ -26,7 +26,7 @@ import {
   suggestedSorting,
   weekHeadline,
 } from './blockLayers';
-import { addingWeek, copyingDown, liveWorkouts, MAX_PROGRAM_WEEKS, relabeling, removingLastWeek, settingRunSteps, shortDate, weekStart, workoutsInBlock } from './blocks';
+import { addingWeek, copyingDown, liveWorkouts, MAX_PROGRAM_WEEKS, relabeling, removingLastWeek, settingRunSteps, shortDate, weekStart, workoutsInBlock, type ProgramBody } from './blocks';
 import { applySlotTargets } from '../../src/programTargets';
 import { localToday, WEEKDAY_LABELS, type Slot, type Workout } from './model';
 import { RunPlanEditor } from './RunPlanEditor';
@@ -111,6 +111,17 @@ function blockPosition(block: ActiveBlock, today: string): string {
 
 const ordinal = (n: number) => (n === 3 ? '3rd' : `${n}th`);
 
+/** A rule as the member picked it, and the weeks it filled for its workout. */
+interface Picked { rule: BuildRule; easyEvery: EasyEvery; weeks: string }
+
+/** One workout's targets in every week, as text: changes when any of them does. */
+function weeksOf(program: ProgramBody, workout: Workout): string {
+  return JSON.stringify(program.weeks.map((week) => workout.exercises.map((slot) => {
+    const targets = week.targets?.[slot.id];
+    return targets ? Object.entries(targets).sort(([a], [b]) => a.localeCompare(b)) : null;
+  })));
+}
+
 function RunningBlock({ block, state, today, busy, miles }: { block: ActiveBlock; state: StateResponse; today: string; busy: boolean; miles: boolean }) {
   const plan = state.plan!;
   const { draft, setDraft } = block;
@@ -155,8 +166,20 @@ function RunningBlock({ block, state, today, busy, miles }: { block: ActiveBlock
     // The draft is a new object each render; its text says when it changed.
     [draftKey, plan.workouts, miles, from],
   );
-  const easyEvery: EasyEvery = [...builds.values()].find((build) => build.rule.kind === 'add' && build.easyEvery != null)?.easyEvery ?? null;
-  const ruleOf = (workout: Workout): BuildRule => byHand.includes(workout.id) ? { kind: 'manual' } : builds.get(workout.id)?.rule ?? { kind: 'manual' };
+  // A rule picked here stays as picked while the weeks it filled stand. Read
+  // back from those weeks it can come out different: a small amount rounds
+  // to the steps a load moves in, so "+2" on the way to "+2.5" would
+  // otherwise turn into "set by hand" and take the field away mid-typing.
+  const [picked, setPicked] = useState<Record<string, Picked>>({});
+  const pickedFor = (workout: Workout): Picked | null => {
+    const entry = picked[workout.id];
+    return entry && entry.weeks === weeksOf(draft, workout) ? entry : null;
+  };
+  const standing = rows.map(pickedFor).find((entry) => entry?.rule.kind === 'add');
+  const easyEvery: EasyEvery = standing ? standing.easyEvery
+    : [...builds.values()].find((build) => build.rule.kind === 'add' && build.easyEvery != null)?.easyEvery ?? null;
+  const ruleOf = (workout: Workout): BuildRule => byHand.includes(workout.id) ? { kind: 'manual' }
+    : pickedFor(workout)?.rule ?? builds.get(workout.id)?.rule ?? { kind: 'manual' };
   const setRule = (workout: Workout, rule: BuildRule) => {
     if (rule.kind === 'manual') {
       setByHand([...byHand.filter((id) => id !== workout.id), workout.id]);
@@ -164,14 +187,24 @@ function RunningBlock({ block, state, today, busy, miles }: { block: ActiveBlock
       return;
     }
     setByHand(byHand.filter((id) => id !== workout.id));
-    setDraft(applyingBuild(draft, workout, rule, { easyEvery, from, miles }));
+    const next = applyingBuild(draft, workout, rule, { easyEvery, from, miles });
+    setPicked({ ...picked, [workout.id]: { rule, easyEvery, weeks: weeksOf(next, workout) } });
+    setDraft(next);
   };
   const setEasy = (next: EasyEvery) => {
     let changed = draft;
+    const kept: Record<string, Picked> = {};
     for (const workout of rows) {
       const rule = ruleOf(workout);
-      if (rule.kind === 'add') changed = applyingBuild(changed, workout, rule, { easyEvery: next, from, miles });
+      if (rule.kind === 'add') {
+        changed = applyingBuild(changed, workout, rule, { easyEvery: next, from, miles });
+        kept[workout.id] = { rule, easyEvery: next, weeks: weeksOf(changed, workout) };
+      } else {
+        const entry = pickedFor(workout);
+        if (entry) kept[workout.id] = entry;
+      }
     }
+    setPicked(kept);
     setDraft(labelingEasyWeeks(changed, next));
   };
   const anyBuilding = rows.some((workout) => ruleOf(workout).kind === 'add');

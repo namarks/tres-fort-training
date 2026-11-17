@@ -238,6 +238,25 @@ export async function addToDayJourney({ page, origin, apiCall, width = 1280 }) {
   assert.equal(changed.weeks[4].targets[bench.id].target_reps, bench.target_reps + 6);
   await fits('The Block tab');
 
+  // A small amount rounds to the steps a load moves in, so the weeks alone no
+  // longer say which rule filled them. The choice stays as picked while typed.
+  state = await apiCall('GET', '/api/state');
+  await apiCall('PATCH', `/api/workouts/${made.id}/exercises/${bench.id}`, { target_weight: 100, expected_version: state.plan.version });
+  await page.reload();
+  await page.getByRole('heading', { name: 'Week by week', exact: true }).waitFor();
+  const buildsBy = page.getByRole('combobox', { name: 'Strength A: builds by', exact: true });
+  await buildsBy.selectOption('add:load');
+  const loadAmount = page.getByRole('textbox', { name: /^Strength A: load added each week/ });
+  assert.equal(await loadAmount.inputValue(), '5');
+  await loadAmount.fill('2');
+  assert.equal(await buildsBy.inputValue(), 'add:load', 'A typed amount keeps the rule that was picked.');
+  await loadAmount.pressSequentially('.5');
+  assert.equal(await loadAmount.inputValue(), '2.5');
+  assert.equal(await buildsBy.inputValue(), 'add:load');
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: 'Discard', exact: true }).click();
+  await page.getByText('Unsaved changes to your block.', { exact: true }).waitFor({ state: 'hidden' });
+
   // The block places its own workouts, so a date's "every week" choice can't take one.
   await page.goto(`${origin}/#plan`);
   await page.getByRole('heading', { name: 'Your plan', exact: true }).waitFor();
