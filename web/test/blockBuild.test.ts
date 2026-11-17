@@ -148,4 +148,15 @@ describe('how a block workout builds', () => {
     // 19 repeats is 192 steps; 20 would be 202, over what a run can hold.
     expect(repeats).toEqual([18, 19, 19, 19]);
   });
+
+  it('keeps assistance when a bodyweight load builds', () => {
+    // 40 lb of assistance is a load of -40: less of it each week, more in an easier week.
+    const pull = workout('pull', 'Pull-ups', [slot({ id: 'pull-slot', exercise_id: 'ex_pullup', exercise_name: 'Pull-Up', exercise_modality: 'bw', target_weight: -40 })]);
+    const program = applyingBuild({ ...block(6), workout_ids: ['pull'] }, pull, add('load', 5), { easyEvery: 4, miles: true });
+    expect(program.weeks.map((week) => week.targets?.['pull-slot']?.target_weight ?? -40)).toEqual([-40, -35, -30, -35, -25, -20]);
+    expect(detectedBuild(program, pull, true)).toMatchObject({ rule: add('load', 5), easyEvery: 4 });
+    // Past bodyweight it becomes added load.
+    const far = applyingBuild({ ...block(4), workout_ids: ['pull'] }, { ...pull, exercises: [{ ...pull.exercises[0]!, target_weight: -5 }] }, add('load', 5), { easyEvery: null, miles: true });
+    expect(far.weeks.map((week) => week.targets?.['pull-slot']?.target_weight ?? -5)).toEqual([-5, 0, 5, 10]);
+  });
 });
