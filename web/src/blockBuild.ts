@@ -83,6 +83,8 @@ function mainStepIndex(items: readonly RunPlanItem[]): number {
 
 const repeatIndex = (items: readonly RunPlanItem[]) => items.findIndex((item) => 'repeat' in item);
 
+const KG_IN_LB = 0.45359237;
+
 /** What this workout can add each week, the likeliest first. Empty for an
  * activity or a run with no length to grow. */
 export function buildOptions(workout: Workout, miles: boolean): BuildOption[] {
@@ -212,12 +214,18 @@ export function applyingBuild<P extends ProgramBody>(
   const count = program.weeks.length;
   const field = FIELD_OF[rule.target];
   if (field) {
+    const first = buildSlot(workout);
+    const stated = first ? slotUnit(first) : 'lb';
     for (const slot of workingSlots(workout)) {
       if (slot.exercise_id === RUN_EXERCISE_ID || !editableFields(slot).includes(field)) continue;
       const start = weekValue(next, from, slot, field);
       if (start == null || (field === 'target_weight' && slot.target_weight == null)) continue;
       const unit = slotUnit(slot);
-      const values = series(start, rule.amount, from, count, options.easyEvery,
+      // A load's amount is in the unit the choice shows (the first
+      // exercise's), so an exercise in the other unit gets the same weight.
+      const amount = field === 'target_weight' && unit !== stated
+        ? (stated === 'lb' ? rule.amount * KG_IN_LB : rule.amount / KG_IN_LB) : rule.amount;
+      const values = series(start, amount, from, count, options.easyEvery,
         (value) => field === 'target_duration_s' ? roundTime(value, start, rule.amount) : roundFor(field, value, unit, start));
       values.forEach((value, offset) => { next = settingTarget(next, from + offset, workout, slot, field, value); });
     }

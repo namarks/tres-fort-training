@@ -159,4 +159,19 @@ describe('how a block workout builds', () => {
     const far = applyingBuild({ ...block(4), workout_ids: ['pull'] }, { ...pull, exercises: [{ ...pull.exercises[0]!, target_weight: -5 }] }, add('load', 5), { easyEvery: null, miles: true });
     expect(far.weeks.map((week) => week.targets?.['pull-slot']?.target_weight ?? -5)).toEqual([-5, 0, 5, 10]);
   });
+
+  it('adds the same weight to exercises in pounds and in kilograms', () => {
+    const mixed = workout('mixed', 'Mixed units', [
+      slot({ id: 'press', target_weight: 100 }),
+      slot({ id: 'squat', order_index: 1, target_weight: 50, target_weight_unit: 'kg' }),
+    ]);
+    expect(buildOptions(mixed, true).find((option) => option.target === 'load')).toMatchObject({ unit: 'lb', amount: 5 });
+    const program = applyingBuild({ ...block(4), workout_ids: ['mixed'] }, mixed, add('load', 5), { easyEvery: null, miles: true });
+    const loads = (id: string, own: number) => program.weeks.map((week) => week.targets?.[id]?.target_weight ?? own);
+    expect(loads('press', 100)).toEqual([100, 105, 110, 115]);
+    // 5 lb is about 2.3 kg, on the 2.5 kg steps a kilogram load moves in: never 5 kg a week.
+    expect(loads('squat', 50)).toEqual([50, 52.5, 55, 57.5]);
+    expect(program.weeks.every((week) => week.targets?.squat?.target_weight_unit === undefined)).toBe(true);
+    expect(detectedBuild(program, mixed, true)).toMatchObject({ rule: add('load', 5) });
+  });
 });
