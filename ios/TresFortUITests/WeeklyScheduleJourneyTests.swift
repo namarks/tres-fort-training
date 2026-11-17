@@ -124,6 +124,8 @@ final class WeeklyScheduleJourneyTests: XCTestCase {
         let idea = app.buttons["composer.idea.Soccer"]
         XCTAssertTrue(idea.waitForExistence(timeout: UITestWait.screen))
         XCTAssertTrue(app.buttons["composer.kind.sport"].isSelected)
+        XCTAssertTrue(sheet.exists, "The composer opens in place on the day")
+        app.openComposerWhen()
         XCTAssertTrue(app.buttons["composer.day.mon"].isSelected, "The day it came from is chosen")
         idea.tap()
         let save = app.buttons["composer.save"]
@@ -250,10 +252,13 @@ final class WeeklyScheduleJourneyTests: XCTestCase {
         XCTAssertTrue(addExtra.waitForExistence(timeout: UITestWait.screen))
         addExtra.tap()
         XCTAssertTrue(app.buttons["composer.kind.home"].isSelected)
-        app.revealComposerKind("sport").tapWhenReady()
+        // Change folds the composer back into the day's tiles.
+        app.buttons["composer.kind.home"].tap(until: app.buttons["weekday.newActivity"])
+        app.buttons["weekday.newActivity"].tapWhenReady()
         let idea = app.buttons["composer.idea.Stretching"]
         XCTAssertTrue(idea.waitForExistence(timeout: UITestWait.screen))
         XCTAssertTrue(app.buttons["composer.kind.sport"].isSelected)
+        app.openComposerWhen()
         XCTAssertTrue(app.buttons["composer.day.thu"].isSelected)
         idea.tap()
         app.buttons["composer.core.logOnly"].tap()

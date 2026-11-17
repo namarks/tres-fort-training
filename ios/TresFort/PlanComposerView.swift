@@ -375,14 +375,29 @@ enum PlanComposer {
 /// "Add to your week": pick what (a run, a ride, a swim, a lift, a routine at
 /// home, an activity or a saved workout), say how far or how long for a run,
 /// ride or swim, pick the weekdays and, if wanted, a time to be reminded,
-/// then add. Opened from the Plan tab with no day chosen, or from a weekday
-/// with that day chosen.
+/// then add. Opened from the Plan tab with no day chosen, or in place on a
+/// weekday's sheet with that day chosen (`day`).
 struct PlanComposerView: View {
+    /// The weekday sheet the composer opens in, in place of its tiles
+    /// (app-design-pass P28). The sheet keeps its title, arrows, Done and
+    /// week strip; the picked tile folds into one line with Change, and the
+    /// days and time wait, closed, beside the add button.
+    struct DayContext {
+        /// The tiles' header it keeps: "New for every Tuesday".
+        let header: String
+        /// Change: back to the sheet's tiles.
+        let onChangeKind: () -> Void
+        /// Tells the sheet when a save is out, so it holds Done and Change.
+        let onSavingChange: (Bool) -> Void
+    }
+
     @ObservedObject var sync: SyncModel
     /// Closes the whole flow once the week holds the new item.
     var onFinished: () -> Void
-    /// Shows Cancel; false when pushed from a weekday sheet, which has Back.
+    /// Shows Cancel; false when opened on a weekday sheet, which has Done.
     var isRoot = false
+    /// Set when the composer opens on a weekday's sheet.
+    var day: DayContext?
 
     @State private var kind: PlanComposer.Kind
     @State private var days: Set<String>
@@ -410,6 +425,8 @@ struct PlanComposerView: View {
     /// An optional time of day, set on every chosen day, with a reminder.
     @State private var timed = false
     @State private var timeOfDay = Date()
+    /// On a weekday's sheet: the days and time are open at the bottom.
+    @State private var whenOpen = false
     /// The tiles' order: the kind it opened on first, then the member's most
     /// frequent, fixed while the sheet is open so a sync doesn't move a tile
     /// under a finger.
@@ -428,7 +445,7 @@ struct PlanComposerView: View {
     private struct Planning { let workoutID: String; let slot: TemplateExercise; let version: Int }
 
     init(sync: SyncModel, kind: PlanComposer.Kind = .run, days: Set<String> = [],
-         isRoot: Bool = false, onFinished: @escaping () -> Void) {
+         isRoot: Bool = false, day: DayContext? = nil, onFinished: @escaping () -> Void) {
         _sync = ObservedObject(wrappedValue: sync)
         _kind = State(initialValue: kind)
         _days = State(initialValue: days)
@@ -440,19 +457,32 @@ struct PlanComposerView: View {
         _order = State(initialValue: PlanComposer.Kind.strip(PlanComposer.ranked(for: sync), selected: kind))
         _home = State(initialValue: HomeRoutineBuilder(catalog: sync.catalog))
         self.isRoot = isRoot
+        self.day = day
         self.onFinished = onFinished
     }
 
     var body: some View {
-        Group {
-            if let planning {
-                RunPlanEditorView(sync: sync, dayID: planning.workoutID, slot: planning.slot,
-                                  expectedVersion: planning.version, onFinished: onFinished)
-                    .navigationBarBackButtonHidden(true)
-            } else {
-                form
-            }
+        if day != nil {
+            // On a weekday's sheet the step planner is its own page: the
+            // sheet's title and toolbar belong to the day.
+            form.navigationDestination(isPresented: planningShown) { planningEditor }
+        } else if planning != nil {
+            planningEditor
+        } else {
+            form
         }
+    }
+
+    @ViewBuilder private var planningEditor: some View {
+        if let planning {
+            RunPlanEditorView(sync: sync, dayID: planning.workoutID, slot: planning.slot,
+                              expectedVersion: planning.version, onFinished: onFinished)
+                .navigationBarBackButtonHidden(true)
+        }
+    }
+
+    private var planningShown: Binding<Bool> {
+        Binding(get: { planning != nil }, set: { if !$0 { planning = nil } })
     }
 
     // MARK: - Form
@@ -462,19 +492,47 @@ struct PlanComposerView: View {
     private var busy: Bool { saving || sync.isRoutineMutationInFlight || sync.plan == nil }
 
     private var form: some View {
+        ScrollViewReader { proxy in
+            formContent
+                .onChange(of: whenOpen) { _, open in
+                    guard open else { return }
+                    // After the section is laid out, bring its days up.
+                    DispatchQueue.main.async {
+                        withAnimation(.snappy) { proxy.scrollTo(Self.whenAnchor, anchor: .top) }
+                    }
+                }
+        }
+    }
+
+    private static let whenAnchor = "composer.whenSection"
+
+    private var formContent: some View {
         Form {
-            // The tiles sit in a header, not a row: a row's rounded corners
-            // clipped the outer tiles.
-            Section {
-            } header: {
-                kindPicker
+            if let day {
+                // The tile tapped on the weekday's sheet, folded into one
+                // line where the tiles were (P28).
+                Section {
+                } header: {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(day.header)
+                        foldedKind(day)
+                    }
                     .textCase(nil)
-                    .padding(.vertical, 4)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                }
+            } else {
+                // The tiles sit in a header, not a row: a row's rounded
+                // corners clipped the outer tiles.
+                Section {
+                } header: {
+                    kindPicker
+                        .textCase(nil)
+                        .padding(.vertical, 4)
+                        .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                }
+                // From the Plan tab no day is chosen yet, so when comes
+                // before what (P27).
+                whenSection
             }
-            // When comes before what: the day and time are what the member
-            // came to set, so they sit above the fold (P27).
-            whenSection
             switch kind {
             case .run: runSections
             case .ride, .swim: enduranceSections
@@ -491,14 +549,18 @@ struct PlanComposerView: View {
             case .home: nameSection(placeholder: homeAutoName)
             case .lift, .sport, .saved: EmptyView()
             }
+            // On a weekday's sheet the day is already chosen; other days
+            // and a time are optional, so they open last (P28).
+            if day != nil, whenOpen {
+                whenSection
+            }
         }
         .scrollContentBackground(.hidden)
         // The add button stays in view below the form: with seven tiles and
         // a time, it would otherwise sit below the fold on an iPhone.
         .safeAreaInset(edge: .bottom, spacing: 0) { saveBar }
         .background(Theme.background)
-        .navigationTitle("Add to your week")
-        .navigationBarTitleDisplayMode(.inline)
+        .modifier(ComposerTitle(shows: day == nil))
         .navigationBarBackButtonHidden(saving)
         .toolbar {
             if isRoot {
@@ -529,7 +591,69 @@ struct PlanComposerView: View {
             if !timed { timeOfDay = Self.date(minutes: PlanComposer.defaultTimeOfDay(for: newKind)) }
         }
         .onChange(of: typedName) { _, _ in logOnlyConfirmed = false }
+        .onChange(of: saving) { _, now in day?.onSavingChange(now) }
         .interactiveDismissDisabled(saving)
+    }
+
+    /// The kind picked on the weekday's sheet, in the place its tile was,
+    /// with Change to pick another (P28).
+    private func foldedKind(_ day: DayContext) -> some View {
+        Button { day.onChangeKind() } label: {
+            HStack(spacing: 12) {
+                Image(systemName: kind.glyph).font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+                    .frame(width: 34, height: 34)
+                    .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                Text(kind.title).font(Theme.mono(15, .bold)).foregroundStyle(Theme.text)
+                Spacer(minLength: 8)
+                Text("Change").font(Theme.mono(14, .bold)).foregroundStyle(Theme.accent)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .frame(maxWidth: .infinity, minHeight: 52)
+            .background(Theme.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.accent, lineWidth: 2))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(locked || saving)
+        .accessibilityLabel(kind.title)
+        .accessibilityHint("Change what you're adding")
+        .accessibilityAddTraits(.isSelected)
+        .accessibilityIdentifier("composer.kind.\(kind.rawValue)")
+    }
+
+    /// The days and time in a few words, by the add button on a weekday's
+    /// sheet: "Every Tuesday · no set time", "Tue, Thu · 8:00 PM".
+    private var whenSummary: String {
+        let ordered = PlanSchedule.weekdayKeys.filter(days.contains)
+        let daysPart: String
+        switch ordered.count {
+        case 0: daysPart = "No day"
+        case 1: daysPart = "Every \(WorkoutLibraryPolicy.weekdayNames[ordered[0]] ?? ordered[0])"
+        case 7: daysPart = "Every day"
+        default: daysPart = ordered.map(\.capitalized).joined(separator: ", ")
+        }
+        let parts = Calendar.current.dateComponents([.hour, .minute], from: timeOfDay)
+        let timePart = timed ? ScheduleTimes.display((parts.hour ?? 0) * 60 + (parts.minute ?? 0)) : "no set time"
+        let besidePart = daysHoldOther ? (alongside ? " · beside what's there" : " · replaces what's there") : ""
+        return "\(daysPart) · \(timePart)\(besidePart)"
+    }
+
+    private var whenLine: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(whenSummary).font(Theme.mono(13)).foregroundStyle(Theme.muted)
+                .accessibilityIdentifier("composer.whenSummary")
+            Spacer(minLength: 8)
+            Button(whenOpen ? "Close" : "Time and days") {
+                nameFocused = false
+                withAnimation(.snappy) { whenOpen.toggle() }
+            }
+            .font(Theme.mono(14, .bold)).foregroundStyle(Theme.accent)
+            .frame(minHeight: 44)
+            .disabled(saving)
+            .accessibilityLabel(whenOpen ? "Close time and days" : "Time and days")
+            .accessibilityIdentifier("composer.when")
+        }
     }
 
     /// The add button, with the name note and any save error above it so
@@ -555,6 +679,7 @@ struct PlanComposerView: View {
             if let note = nameNote {
                 Text(note).font(.footnote).foregroundStyle(nameTaken ? Theme.danger : Theme.muted)
             }
+            if day != nil { whenLine }
             Button(buttonTitle) { save() }
                 .buttonStyle(WorkoutPrimaryButtonStyle())
                 .disabled(!canSave)
@@ -786,19 +911,19 @@ struct PlanComposerView: View {
             return note
         }
         return PlanComposer.replacing(days, with: knownChoiceID, plan: sync.plan)
-            ?? "Repeats every week. Outlined days already have something; picking one swaps it."
+            ?? "Repeats every week."
     }
 
-    /// When it happens: the weekdays and an optional time of day, right
-    /// under the tiles (P27). With a time the app reminds the member then
-    /// (P19); without, nothing changes.
+    /// When it happens: the weekdays and an optional time of day, under the
+    /// tiles from the Plan tab (P27), last and opened on request on a
+    /// weekday's sheet (P28). A day that already holds something is named
+    /// in the note below, not outlined. With a time the app reminds the
+    /// member then (P19); without, nothing changes.
     private var whenSection: some View {
         Section {
             HStack(spacing: 6) {
                 ForEach(PlanSchedule.weekdayKeys, id: \.self) { key in
                     let on = days.contains(key)
-                    let holds = WorkoutLibraryPolicy.weekRows(plan: sync.plan)
-                        .first { $0.weekdayKey == key }?.workoutID != nil
                     Button {
                         if on { days.remove(key) } else { days.insert(key) }
                     } label: {
@@ -807,7 +932,6 @@ struct PlanComposerView: View {
                             .foregroundStyle(on ? Theme.onAccent : Theme.muted)
                             .frame(maxWidth: .infinity, minHeight: 44)
                             .background(on ? Theme.accent : Theme.surface, in: Capsule())
-                            .overlay(Capsule().strokeBorder(holds && !on ? Theme.dim : Color.clear, lineWidth: 1))
                             .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)
@@ -819,6 +943,7 @@ struct PlanComposerView: View {
             }
             .listRowBackground(Color.clear)
             .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+            .id(Self.whenAnchor)
             Toggle("At a set time", isOn: $timed)
                 .font(Theme.mono(14))
                 .tint(Theme.accent)
@@ -1250,5 +1375,18 @@ struct PlanComposerView: View {
             return
         }
         planning = Planning(workoutID: workoutID, slot: slot, version: version)
+    }
+}
+
+/// The composer's own title, kept off a weekday's sheet, whose title is the
+/// day (P28).
+private struct ComposerTitle: ViewModifier {
+    let shows: Bool
+    func body(content: Content) -> some View {
+        if shows {
+            content.navigationTitle("Add to your week").navigationBarTitleDisplayMode(.inline)
+        } else {
+            content
+        }
     }
 }

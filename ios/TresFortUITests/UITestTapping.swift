@@ -49,6 +49,18 @@ extension XCUIElement {
 }
 
 extension XCUIApplication {
+    /// Opens Time and days on a composer opened on a weekday's sheet, where
+    /// the days, time and "Keep what's on those days" wait closed by the add
+    /// button (app-design-pass P28). Add to your week from the Plan tab
+    /// shows them already, so this does nothing there.
+    func openComposerWhen() {
+        let days = buttons["composer.day.mon"]
+        guard !days.exists else { return }
+        let when = buttons["composer.when"]
+        guard when.waitForExistence(timeout: UITestWait.screen), when.label == "Time and days" else { return }
+        when.tap(until: days)
+    }
+
     /// Brings a kind tile on Add to your week into view. The tiles are one
     /// row that scrolls sideways (app-design-pass P27), so a vertical swipe
     /// never reveals one past the screen's edge: drag the row instead, in

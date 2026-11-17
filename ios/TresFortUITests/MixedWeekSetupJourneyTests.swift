@@ -67,7 +67,8 @@ final class MixedWeekSetupJourneyTests: XCTestCase {
         XCTAssertFalse(app.navigationBars["Core routine"].exists)
         let retry = app.buttons["composer.save"]
         XCTAssertEqual(retry.label, "Try again")
-        XCTAssertTrue(app.scroll(toReveal: app.buttons["composer.day.tue"], searchingUp: true))
+        app.openComposerWhen()
+        XCTAssertTrue(app.scroll(toReveal: app.buttons["composer.day.tue"]))
         XCTAssertTrue(app.buttons["composer.day.tue"].isSelected)
         XCTAssertFalse(app.buttons["composer.day.thu"].isSelected)
         XCTAssertTrue(app.scroll(toReveal: app.switches["composer.alongside"]))
@@ -207,6 +208,8 @@ final class MixedWeekSetupJourneyTests: XCTestCase {
         XCTAssertTrue(app.buttons["composer.kind.home"].isSelected)
         XCTAssertTrue(app.scroll(toReveal: app.buttons["composer.home.core"]))
         XCTAssertTrue(app.buttons["composer.home.core"].isSelected)
+        XCTAssertTrue(app.navigationBars["Tuesday"].exists, "The composer opens in place on the day")
+        app.openComposerWhen()
         XCTAssertTrue(app.scroll(toReveal: app.buttons["composer.day.tue"]))
         XCTAssertTrue(app.buttons["composer.day.tue"].isSelected)
         if alsoThursday { revealAndTap(app.buttons["composer.day.thu"], in: app) }
@@ -214,8 +217,9 @@ final class MixedWeekSetupJourneyTests: XCTestCase {
         XCTAssertTrue(app.scroll(toReveal: alongside))
         XCTAssertEqual(alongside.value as? String, "1", "A separate core routine keeps the run")
         if withReminder { enable("composer.time.toggle", in: app) }
-        // The suggestion is the member's to change right in its list; the
-        // shared sets and rests open in their own sheet.
+        // The suggestion is the member's to change right in its list, with
+        // its shared sets and rest; a circuit and its timers open in their
+        // own sheet.
         XCTAssertEqual(app.buttons["composer.save"].label, alsoThursday ? "Add to Tue, Thu" : "Add to Tuesdays")
         XCTAssertTrue(app.buttons["composer.home.add"].exists || app.scroll(toReveal: app.buttons["composer.home.add"]))
         revealAndTap(app.buttons["composer.home.timing"], in: app)
@@ -407,9 +411,9 @@ final class MixedWeekSetupJourneyTests: XCTestCase {
         XCTAssertEqual(field.value as? String, text, file: file, line: line)
     }
 
-    /// The routine's Sets and rests sheet, opened from its list on Add to
-    /// your week (app-design-pass P27).
-    private let timingSheet = "Sets and rests"
+    /// The routine's Circuit and timers sheet, opened from its list on Add
+    /// to your week (app-design-pass P27, P28).
+    private let timingSheet = "Circuit and timers"
 
     /// Where a form's visible rows end: above the pinned add button, or
     /// near the screen's bottom in the timing sheet, and above a keyboard.

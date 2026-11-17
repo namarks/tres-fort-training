@@ -36,11 +36,18 @@ final class SetupReachabilityJourneyTests: XCTestCase {
         revealAndTap(app.buttons["plan.week.mon"], in: app)
         XCTAssertTrue(app.navigationBars["Monday"].waitForExistence(timeout: UITestWait.screen))
         revealAndTap(app.buttons["weekday.newRun"], in: app)
-        XCTAssertTrue(app.navigationBars["Add to your week"].waitForExistence(timeout: UITestWait.screen))
+        // The composer opens in place: the day keeps its title and Done,
+        // and the tile folds into one line (app-design-pass P28).
+        XCTAssertTrue(app.buttons["composer.kind.run"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertTrue(app.navigationBars["Monday"].exists)
+        XCTAssertFalse(app.navigationBars["Add to your week"].exists)
+        XCTAssertTrue(app.staticTexts["composer.whenSummary"].label.hasPrefix("Every Monday"))
+        app.openComposerWhen()
         XCTAssertTrue(app.scroll(toReveal: app.buttons["composer.day.mon"]))
         XCTAssertTrue(app.buttons["composer.day.mon"].isSelected)
         XCTAssertFalse(app.buttons["composer.day.tue"].isSelected)
-        app.navigationBars["Add to your week"].backButton.tapWhenReady()
+        // Change brings the tiles back where they were.
+        app.buttons["composer.kind.run"].tap(until: app.buttons["weekday.newRun"])
         app.buttons["weekday.done"].tapWhenReady()
         XCTAssertTrue(app.navigationBars["Plan"].waitForExistence(timeout: UITestWait.screen))
         assertWrites(in: app, workouts: 0, schedules: 0)

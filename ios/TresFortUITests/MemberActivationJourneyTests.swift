@@ -241,6 +241,8 @@ final class MemberActivationJourneyTests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Monday"].waitForExistence(timeout: UITestWait.screen))
         tap(app.buttons["weekday.newActivity"], in: app)
         tap(app.buttons["composer.idea.Soccer"], in: app)
+        XCTAssertTrue(app.navigationBars["Monday"].exists, "The composer opens in place on the day")
+        app.openComposerWhen()
         XCTAssertTrue(app.buttons["composer.day.mon"].isSelected)
         tap(app.buttons["composer.save"], in: app)
         expectation(for: NSPredicate(format: "label CONTAINS 'Soccer'"), evaluatedWith: monday)
