@@ -46,7 +46,9 @@ final class SetupReachabilityJourneyTests: XCTestCase {
         XCTAssertTrue(app.scroll(toReveal: app.buttons["composer.day.mon"]))
         XCTAssertTrue(app.buttons["composer.day.mon"].isSelected)
         XCTAssertFalse(app.buttons["composer.day.tue"].isSelected)
-        // Change brings the tiles back where they were.
+        // Change brings the tiles back where they were. Opening Time and
+        // days scrolled down to the days, so bring the folded line back up.
+        XCTAssertTrue(app.scroll(toReveal: app.buttons["composer.kind.run"], searchingUp: true))
         app.buttons["composer.kind.run"].tap(until: app.buttons["weekday.newRun"])
         app.buttons["weekday.done"].tapWhenReady()
         XCTAssertTrue(app.navigationBars["Plan"].waitForExistence(timeout: UITestWait.screen))
