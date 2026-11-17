@@ -328,7 +328,9 @@ partner training are not web features.
       workout (a second workout on one date still needs the shared
       contract under Later); Lift has no starter lists yet; a rule
       applied partway through a block is recognized while that week is
-      the current one and reads as set by hand afterwards.
+      the current one and reads as set by hand afterwards; so does an
+      amount smaller than the steps a load moves in (2 lb on a 5 lb
+      step), once the block is saved and opened again.
 - [ ] **P3 — Trends and progress**
   - Equal in importance to plan editing; it can run alongside P2 once P1 is
     in.
