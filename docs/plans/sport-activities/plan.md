@@ -1,6 +1,6 @@
 # Capture every sport properly
 
-Slug: sport-activities · Status: active · Updated: 2026-11-09 · Theme: connected-training
+Slug: sport-activities · Status: active · Updated: 2026-11-18 · Theme: connected-training
 
 ## Goal
 
@@ -169,7 +169,6 @@ means:
 | Local phase | Relationship | Target | Reason |
 |---|---|---|---|
 | P0 | coordinates_with | plan:activity-integration-integrity | Both change `external_activities` rows; dedup rules stay owned there and keep matching on `kind`. |
-| P2 | coordinates_with | plan:endurance-training-load#P6 | This phase delivers that phase for every sport; it closes there when this merges. |
 | P5 | gated_by | external:owner-new-health-permission | Reading Apple Watch's effort score is a new Apple Health permission (owner's go-ahead 2026-11-09). |
 | P4 | gated_by | external:owner-new-health-permission | Swim stroke counts are a new Apple Health permission (owner's go-ahead 2026-11-09). |
 
@@ -183,7 +182,7 @@ release, run-recorder plan), and P4's swim detail and
 P5 are in TestFlight 1.2 (76). P4's `.fit`, intervals.icu and
 swim-threshold work follows P3.
 
-**Owner:** check an Apple Watch swim on build 76 or later: the pool,
+**Owner:** check an Apple Watch swim on build 76 or later (83 is current): the pool,
 lengths, strokes and sets in the day view, an open-water swim's map, and a
 load from Apple Watch's effort score. Builds 55 and 70 keep working: they
 never send `swim` or `provider_effort`.

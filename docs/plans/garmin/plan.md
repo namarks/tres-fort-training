@@ -1,6 +1,6 @@
 # Garmin data in Tres Fort
 
-Slug: garmin · Status: active · Updated: 2026-11-08 · Theme: connected-training
+Slug: garmin · Status: active · Updated: 2026-11-18 · Theme: connected-training
 
 ## Goal
 
@@ -92,7 +92,6 @@ coach. Done means:
 |---|---|---|---|
 | P1 | coordinates_with | plan:whoop | Reuses and extends the WHOOP connection tables and connect flow. |
 | P2 | coordinates_with | plan:activity-integration-integrity | Changes cross-source dedup, which that plan owns. |
-| P2 | coordinates_with | plan:endurance-training-load#P5 | This plan delivers that phase's Garmin activity files. |
 | P3 | gated_by | external:owner-garmin-release | Secrets, portal endpoint setup, migration, deploys and TestFlight each need the owner. |
 
 ## Next step
@@ -100,8 +99,9 @@ coach. Done means:
 **Now (@owner):** members get Garmin no earlier than 2026-12-08, after
 Garmin's launch requirements are met (details stay in the private
 maintainer records). The owner connected a Garmin account on the internal
-beta; next, check a run, a ride and a disconnect, and update the App Store
-privacy answers before an App Store version ships Garmin.
+beta; next, check a run, a ride and a disconnect on TestFlight 83 or later,
+and update the App Store privacy answers before an App Store version ships
+Garmin. App Store 1.2 must keep Garmin hidden until then.
 
 ## Notes / open questions
 

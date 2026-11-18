@@ -1,6 +1,6 @@
 # First App Store Submission
 
-Slug: app-store-submission · Status: active · Updated: 2026-11-08 · Theme: release
+Slug: app-store-submission · Status: active · Updated: 2026-11-18 · Theme: release
 
 ## Goal
 
@@ -129,26 +129,35 @@ distribution is not that evidence.
 ## Next step
 
 **Now (@owner):** **Très Fort 1.1 (70) is live** as of 2026-11-09
-(release 70), with Precise Location declared and the
-new subtitle, keywords and redesigned screenshots. Next is **1.2 with the run
-recorder**, after its [device checks (P3)](../run-recorder/plan.md) pass on a
-TestFlight build. Shipping 1.2 then needs these changes in the App Store build:
+(release 70), with Precise Location declared and the new subtitle, keywords
+and redesigned screenshots. Next is **1.2 with the run recorder**; the owner
+chose on 2026-11-16 to hold it until the recorder is ready. TestFlight 1.2
+(83), built from public main on 2026-11-17 after a full release check,
+is with internal and external testers. The recorder fixes merged on
+2026-11-18 (quicker auto-pause, 3-2-1 beeps, short step cues) need one more
+TestFlight build and the owner's interval run
+([run recorder](../run-recorder/plan.md) P3, P4, P8, P9). Shipping 1.2 then
+needs these changes in the App Store build:
 
 - remove the recorder gate
 - allow saving runs to Apple Health
-- justify background location in the review notes
+- justify background location in the review notes, and finish the location
+  and Bluetooth permission text
+- keep Garmin hidden until its launch (no earlier than 2026-12-08)
+- update the App Store privacy answers for what 1.2 adds (WHOOP, swim
+  strokes and Apple Watch's effort score, Garmin if shown)
 - add a recorder screenshot
 
 **Also:**
-- **Camera beta 71:** comes from later main and depends on backend
-  changes that are not yet deployed.
-- **WHOOP beta 72:** internal beta; its backend
-  (migration 0070, Worker) is deployed. Not for an App Store version.
-- **Garmin beta 73:** internal beta; its backend
-  (migration 0071, Worker) is deployed. Not for an App Store version.
-- **Release check (@agent):** fix the `TodayNavigationJourneyTests` scroll-direction
-  defect so the nightly release check passes (details).
-  Confirm the check on the exact commit before every upload.
+- **WHOOP and Garmin betas (72, 73):** internal only, never for an App Store
+  version; their backends are deployed.
+- **Release check (@agent):** the 2026-11-17 nightly on main (`b17202d`,
+  whose app is identical to build 83's) failed one iPhone shard on
+  `MixedWeekSetupJourneyTests.testCoreScheduleFailureRetriesSavedPrescriptionWithoutCreatingAnotherWorkout`
+  (`composer.home.timeEveryExercise` and `composer.home.circuit` never became
+  tappable); public PR #9 also saw a mixed-week core-setup journey pass
+  only on retry. Make it reliable so the next upload has a clean full run. Confirm
+  the check on the exact commit before every upload.
 - **Still open:** run the waived device checks on the live build.
 
 **Backend constraint:** the live 1.1 (70) client, and 1.0 (55) until users update, must

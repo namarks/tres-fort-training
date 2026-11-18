@@ -12,8 +12,9 @@ state, dependencies, execution frontier, and next step.
 This repository started on 2026-11-15 as a cleaned snapshot of the original,
 private repository. Current plans were carried over without release receipts,
 production identifiers, tester details or confidential provider material;
-completed plans, release records and reviews stay in the maintainer's private
-records. PR and commit references dated before 2026-11-15 refer to the original
+plans completed before then, release records and reviews stay in the
+maintainer's private records. Plans finished here move to
+[`completed/`](completed/). PR and commit references dated before 2026-11-15 refer to the original
 repository. Record only information suitable for publication, and use
 synthetic data for evidence.
 
@@ -96,14 +97,16 @@ until their named authority, evidence, or activation condition is satisfied.
 
 ### Release (`release`)
 
-- [Public contribution preparation](public-repository/plan.md) — **active**;
-  make this public repository the single development repository, qualify
-  hosted CI on published `main`, then archive the original only with the
-  owner's authorization.
+- [Public contribution preparation](public-repository/plan.md) — **gated**;
+  this repository is the single development repository, published `main`
+  passed the full hosted release check, and the owner archived the original
+  on 2026-11-16. Left: the first outside fork PR and confirming an official
+  build carries the licensed artwork.
 - [First App Store submission](app-store-submission/plan.md) — **active**;
   Très Fort 1.1 (70) is live on the App Store (free, US-only) as of 2026-11-09.
-  1.2 with the run recorder follows its device checks. The waived device checks
-  and the backend-compatibility obligation for live clients remain open.
+  1.2 waits for the run recorder (owner, 2026-11-16); TestFlight 1.2 (83) is
+  with testers. The waived device checks and the backend-compatibility
+  obligation for live clients remain open.
 
 ### Coaching (`coaching`)
 
@@ -118,8 +121,10 @@ remains a separately authorized release follow-up.
 - [Bring your own AI coach](bring-your-own-ai-coach/plan.md) — **gated**;
   complete real-provider verification and consumer linking. P5 plans contextual
   workout/exercise requests, with delivery chosen after a measured prototype.
-  P6 lists Très Fort in Claude's Connectors Directory. P8 shortens phone setup:
-  one screen and one tap to open Claude, and approval returns to Claude itself.
+  P6 lists Très Fort in Claude's Connectors Directory (submitted 2026-11-08).
+  P4 lists it in ChatGPT's directory (demo video and submission left). P8
+  shortens phone setup: one screen and one tap to open Claude, and approval
+  returns to Claude itself (device check on TestFlight 83).
   P9 (done) found why Claude asked before every read: a connector added before
   the read-only labels; re-adding it fixes that.
 
@@ -128,44 +133,43 @@ remains a separately authorized release follow-up.
 Let a person create and execute a workout confidently, whether or not they use
 AI coaching.
 
-- [iPad workout station](ipad-workout-station/plan.md) — camera trial and large
-  workout display; an opt-in iPhone link now lets the iPad's count log the
-  current set instantly, with Undo. Paired-device validation and measured
-  accuracy come before relying on it beyond an opt-in trial.
+- [iPad workout station](ipad-workout-station/plan.md) — **gated**; camera
+  trial and large workout display; an opt-in iPhone link lets the iPad's
+  count log the current set instantly, with Undo, and a linked iPad can move
+  the iPhone's workout. The owner's paired-device trial and measured accuracy
+  come before relying on it beyond an opt-in trial.
 
-The selected [core lifting pass](../initiatives/gym-floor-experience.md) orders
-session flexibility, unfinished programming and manual week progression. Each
+The selected [core lifting pass](../initiatives/gym-floor-experience.md) ordered
+session flexibility, unfinished programming and manual week progression; public
+PR #9 delivered it on 2026-11-16 and the 2026-11-17 releases carry it. Each
 linked plan owns its phase status and acceptance evidence.
 
-- [Workout library](workout-library/plan.md) — **active**; P0.14 adds grouped
-  rounds/rest changes during solo sessions; P0.15 protects new-block and
-  workout-details drafts. Existing creation, history/correction, saved-group
-  editing and one-time primary workouts are foundations. Live/device gates
-  remain separate from repository delivery.
-- [Plan over blocks and cycles](progressive-plans/plan.md) — **active**;
-  blocks, per-week targets, native scheduling, run builders and the web designer
-  exist. P6 brings manual week/future-target editing to the phone; P5 retains
-  release and device acceptance.
+- [Workout library](workout-library/plan.md) — **gated**; P0.14 (extra
+  grouped rounds and rest changes during solo sessions) and P0.15 (new-block
+  and workout-detail drafts) are delivered and released. Creation,
+  history/correction, saved-group editing and one-time workouts are
+  foundations. The owner's device acceptance (P0.2(b), P0.7(b)) remains.
+- [Plan over blocks and cycles](progressive-plans/plan.md) — **gated**;
+  blocks, per-week targets, native scheduling, run builders, the web designer
+  and P6's week targets from the phone are delivered and released. P5 is the
+  owner's check on the phone, web, Today and calendar.
 - [Plan without an AI coach](coach-free-planning/plan.md) — **active**;
-  P2 adds a reviewed lighter week using block targets, with explicit cycle
-  scope. Standalone native event editing, training phases and remaining
-  coach-only metadata edits follow.
+  away dates and P2's reviewed lighter week are delivered. Next, P1's native
+  event editor and training phases, then P3's remaining coach-only edits.
 - [Partner training on one iPad](partner-training/plan.md) — **active**;
   manual two-person training and accurate exercise instructions exist. The
-  physical trial remains open; shared ending/invitation recovery follows the
-  selected ordinary lifting pass. Camera counting stays separate.
+  physical trial remains open; P0.2, shared ending and invitation recovery, is
+  the next lifting candidate now that the core lifting pass has landed.
+  Camera counting stays separate.
 - [Member activation and adherence](member-activation-and-adherence/plan.md) —
   **paused**; bounded onboarding, mixed-week setup, reminders and widget
   implementation is delivered. P4 progress empty states needs activation;
   date-only replacement of a scheduled extra remains a documented gap.
 - [Workouts and multi-session days](workouts-and-multi-session/plan.md) —
-  **active**; the owner retired legacy-client support. P0(c) removed old wire
-  contracts and physical-schema adaptation, preserving historical data. The
-  canonical Worker and internal client are released through
-  build 49; authenticated workout checks
-  remain gated. Ordered sessions per date (P1, #413) are merged and their
-  server and web release (migration 0073) is live as of 2026-11-09; the
-  test-member check and TestFlight remain.
+  **gated**; the owner retired legacy-client support. P0(c) removed old wire
+  contracts and physical-schema adaptation, preserving historical data.
+  Ordered sessions per date (P1) are live on the server and web (migration
+  0073, 2026-11-09) and in TestFlight 1.2 (83); the test-member check remains.
 Supersets and circuits are retained
 as completed repository history: shared coach/member authoring, alternating
 round execution and recovery, separate transition/round rests, and compatible
@@ -196,59 +200,34 @@ integration or social breadth.
   and notifications, and essential group controls.
 - [Run recorder on iPhone](run-recorder/plan.md) — **active**; record
   outdoor runs in the app instead of Strava, save them to Apple Health and
-  upload them to intervals.icu as files. P0's upload endpoint, P1's
-  iOS 26 recorder (beta build only) and P2's Lock Screen controls and
-  spoken splits are in the repository. Real runs are
-  checked on the owner's iPhone. P4 adds auto-pause and a glanceable
-  running display. P5 has Tres Fort keep each recorded run and its GPS
-  route itself, with intervals.icu an optional copy. P6 maps runs the app
-  didn't record. P7 keeps a strap's heart rate live on the run summary,
-  records how far it falls one and two minutes after the stop, and shows
-  the run's training load and its climb from the iPhone's barometer. P8
-  puts a step's time left first on the Lock Screen and on swipeable pages
-  in the recorder, with the map a swipe away P9 beeps 3-2-1 before a timed
-  step ends and opens each step's cue with what to do, short for a short
-  step.
-- [Run detail charts](run-detail-charts/plan.md) — **active**; pace, heart
-  rate and elevation charts for a run in the app and on the web, from
-  intervals.icu streams read live or the route Tres Fort keeps, with a
-  private heart-rate series kept for recorded runs and Apple Health and
-.fit workouts. P0 to P3 (endpoint, app and web charts, kept heart rate)
-  are in the repository, and P5 moves a dot along the app's route map as a
-  chart is touched and opens the map full screen; P6 adds a ride's power
-  and cadence charts, best efforts and time in power zones, and P7 keeps
-  a ride's power series from `.fit`, Garmin and Apple Health (migration
-  0074) so those rides chart power without intervals.icu. P6 and P7 are
-  live on the server and web and in TestFlight 79 since 2026-11-11; P4's
-  device checks remain.
+  keep them in Tres Fort with their route, with intervals.icu an optional
+  copy. P0 to P2 (upload, recorder, Lock Screen and spoken splits), P5's
+  kept runs and routes, P6's maps for other runs, P7's summary and heart
+  rate recovery and P8's time left in the step are in TestFlight 1.2 (83).
+  P4's quicker auto-pause and P9's 3-2-1 beeps and short step cues merged on
+  2026-11-18 and need the next TestFlight build and one interval run with
+  stops and music. App Store 1.2 waits for this.
+- [Run detail charts](run-detail-charts/plan.md) — **gated**; pace, heart
+  rate and elevation charts for a run in the app and on the web, the map
+  following the chart, and a ride's power, cadence, best efforts and time in
+  zones, kept for `.fit`, Garmin and Apple Health rides. P0 to P3 and P5 to
+  P7 are released and in TestFlight 1.2 (83); P4's device checks remain,
+  then this plan is archived.
 - [Planned runs with pace and heart rate targets](planned-runs/plan.md) —
   **active**; the coach or the member plans runs with steps and pace or
   heart rate targets in the Tres Fort plan, and the recorder follows them
-  with spoken on/off-target cues. Completed runs upload to intervals.icu
-  when it is connected. P0's step format, migration 0058 and MCP tools,
-  P1's display in the app with a Start run button, P2's step-by-step
-  guidance while recording, P3's spoken step and target cues, P5's in-app
-  step editor, P6's watch-style step layout, P7's finished run (marked
-  done, a run-aware record, intervals.icu optional), P8's "New run" from
-  a weekday, P9's laps for each step on the run's detail and P10's
-  step changes for one day from a run's details are in the repository;
-  P4 is the owner's real runs.
+  with spoken on/off-target cues. P0 to P3 and P5 to P9 (format, app
+  display, guidance, cues, step editor, watch-style layout, finished run,
+  "New run" from a weekday, laps per step) are released and in TestFlight
+  1.2 (83). P10, changing a day's run from its details, merged on
+  2026-11-18 and needs the next TestFlight build; P4 is the owner's
+  interval runs.
 - [Runs on Apple Watch](apple-watch/plan.md) — **paused**; the rest timer
   and run stats laid out for the Watch, planned runs sent to Apple's Workout
   app and brought back as recorded runs, then a Tres Fort Watch app that
   records runs with GPS, wrist heart rate and haptic step cues and saves them
   through the iPhone. P0's wrist layouts are in the repository. Paused
   until a member who runs with an Apple Watch can test P1 onward.
-- [Real training load for endurance workouts](endurance-training-load/plan.md) —
-  **active**; members set FTP, threshold heart rate and threshold pace in the
-  app, and one Worker load engine gives every run, ride and swim a labeled
-  power, heart-rate or pace load from Apple Health, the recorder, `.fit`
-  uploads and later Garmin, keeping intervals.icu's figure when it has one.
-  P0's thresholds store and engine, P1's loads on imported workouts, P2's
-  thresholds screen and load display, P3's Apple Health heart-rate and
-  power streams, P4's `.fit` file import, P6's effort estimate (built as
-  sport-activities P2) and P7's suggestions from intervals.icu are in the
-  repository; P5 is built by the Garmin plan.
 - [Capture every sport properly](sport-activities/plan.md) — **active**;
   soccer, tennis, climbing, swims and every other sport land as that sport
   from Apple Health, intervals.icu, `.fit` files or hand entry, with
@@ -258,41 +237,40 @@ integration or social breadth.
   load for any sport, and P2, a one-tap effort rating when there is no data
   (migration 0066), are live, and so are P4's Apple Health swim detail and
   P5, Apple Watch's effort score (migration 0072, released 2026-11-09, in
-  TestFlight 76; the App Store privacy label already covers them); P3,
-  logging any sport by hand, is next.
+  TestFlight 76 and later; the App Store privacy label already covers them);
+  P3, logging any sport by hand, is next.
 - [WHOOP data in Tres Fort](whoop/plan.md) — **active**; a direct WHOOP
   connection brings WHOOP workouts in once with a heart-rate load and
   WHOOP's strain, and each morning's recovery, HRV, resting heart rate and
   sleep onto Today, private to the member (owner, 2026-11-08). P2 and P3
-  (migration 0070) shipped on 2026-11-08 with beta 1.1 (72); next, a
-  WHOOP wearer tests connect, a workout, recovery and disconnect.
+  (migration 0070) shipped on 2026-11-08; connect was fixed on 2026-11-14
+  and works end to end. Next, an active WHOOP wearer checks a workout,
+  recovery and disconnect.
 - [Garmin data in Tres Fort](garmin/plan.md) — **active**; a direct Garmin
   connection on the approved Starter app brings each new Garmin workout in
   once with its activity file's detail and a load, private and out of the
   coach until Garmin's terms are read (owner, 2026-11-08). P1 and P2
-  (migration 0071) shipped on 2026-11-08 with beta 1.1 (73); next, the
-  owner sends Garmin's launch notice and tests a run, a ride and a disconnect.
+  (migration 0071) shipped on 2026-11-08 and the launch notice was sent;
+  members get Garmin no earlier than 2026-12-08. Next, the owner tests a
+  run, a ride and a disconnect.
 
 ### Platform (`platform`)
 
-- [Positioning](positioning-and-open-source/plan.md) — **active**; lead every
+- [Positioning](positioning-and-open-source/plan.md) — **gated**; lead every
   surface with "Everything you train. One plan." and AI as optional.
-  Repository and website copy are live (PR #296); a website refresh with App
-  Store and web app links is in review; in-app copy is next and the
-  App Store listing waits for the version after 1.0. The source was
-  published as this repository on 2026-11-15.
+  Repository, website and in-app copy are done, and 1.1 shipped the new
+  subtitle and keywords; the App Store description comes with 1.2. The
+  source was published as this repository on 2026-11-15.
 - [Plan on the web](web-app/plan.md) — **active**; sign in at
   `app.tresfort.app` with the same Apple account to plan training and analyze
-  trends with a big screen and a mouse. The calendar and plan editing are
-  live, as is the Activity page (this week, highlights, eight weeks and the
-  whole history). An Analysis section for going deep on training data is
-  starting with its Overview (fitness, fatigue and form, time by week and by
-  sport, against the period before) and an Event page (a goal event with a
-  finish estimate and the weeks heading in); Strength, Running, Recovery and
-  Records pages and settings follow. Training stays on the iPhone.
-- [Reliability and service boundaries](reliability-and-service-boundaries/plan.md) —
-  **active**; complete the owner-approved performance/quality follow-up to #201,
-  including canonical-only clients, durable offline recovery and reproducible checks.
+  trends with a big screen and a mouse. The calendar, plan editing, the
+  Activity page and the Analysis Overview, Event and Strength pages are live.
+  The Plan page's tabs, the repeating week as its first row and a training
+  block beside it with its own Block tab were released on 2026-11-17; the
+  guided block start and adding to a day by type (public PR #13) are merged
+  and wait for a web release. Running, Recovery and Records pages follow.
+  Training stays on the iPhone.
+
 ### Member experience (`member-experience`)
 
 Give a member honest, private views of their own body and training trends
@@ -333,11 +311,14 @@ without adding provider accounts, server collection or new data stores.
   TestFlight 79; an owner device check remains. P26 makes the list under
   the calendar follow the month it shows, in the order each day happened,
   with distance and pace, after a tester's years of Apple Health rides
-  read as one unordered list.
+  read as one unordered list. P27 makes Add to your week read top down,
+  and P28 changes the weekday sheet in place instead of opening a new page.
+  TestFlight 1.2 (83) carries everything through P27; P28 merged on
+  2026-11-18 and needs the next build.
 - [Progress and Apple Health weight](apple-health-weight/plan.md) — **gated**;
-  the private weight view and Progress tab are merged and included in internal
-  TestFlight build 42. Owner verification on a real iPhone with Health readings
-  remains. P5 makes Progress lead with a consistency streak and day grid.
+  the private weight view and Progress tab are in TestFlight (build 42 and
+  later, 83 current). Owner verification on a real iPhone with Health
+  readings remains. P5 makes Progress lead with a consistency streak and day grid.
 
 ### Review-driven ordering
 
@@ -366,6 +347,16 @@ approval only; canonical frontiers and release gates remain authoritative. Alrea
 delivered runner, swap, catalog, starter and progress capabilities are reused.
 
 ## Completed foundations
+
+[Real training load for endurance workouts](completed/endurance-training-load/plan.md)
+gives every run, ride and swim a labeled power, heart-rate, pace or effort
+load from one Worker engine and the member's thresholds, across Apple Health,
+the recorder, `.fit` files and Garmin (completed 2026-11-18).
+
+[Reliability and service boundaries](completed/reliability-and-service-boundaries/plan.md)
+delivered the follow-up to original PR #201: consistent workout edits,
+cohesive service and runner-recovery boundaries, certified offline start and
+the canonical cutover (completed 2026-11-18).
 
 App quality and maintainability
 provides reproducible current-iPhone CI, basic usability improvements, measured

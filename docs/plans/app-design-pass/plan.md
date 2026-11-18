@@ -1,6 +1,6 @@
 # App design pass
 
-Slug: app-design-pass · Status: active · Updated: 2026-11-14 · Theme: member-experience
+Slug: app-design-pass · Status: active · Updated: 2026-11-18 · Theme: member-experience
 
 ## Goal
 
@@ -707,17 +707,19 @@ The owner chose to keep importing all Health history. P26 addresses that.
 
 ## Next step
 
-**Now (@agent):** Land P28 (adding to a weekday changes in place) with
-green CI and a clean Codex review, then capture the real weekday sheet on
-the Mac mini along with P27's Add to your week and P25's Today card,
-Details and Swap.
+**Now (@owner):** On the next TestFlight build (after 83, on the owner's
+go-ahead), add something to a weekday from the Plan tab and check that P28's
+sheet changes in place: the picked type folds into one line, nothing jumps,
+and the day and time sit by the Add button. P28 merged on 2026-11-18 (public
+PR #14). TestFlight 1.2 (83), built from main on 2026-11-17, already carries
+everything through P27 (Add to your week reads top down), P26 (the calendar's
+list follows its month) and P25 (Details, Swap and Skip from Today), so those
+can be looked at now. Earlier builds carry P0 to P24 (P24 since build 79).
 
-**Then (@owner):** TestFlight builds since 66 carry P0 to P8. Try them on the
-iPhone. P9 to P19 are in TestFlight 1.2 (75); P20 reaches the phone with the next TestFlight build,
-which needs its own go-ahead. P24 (rides, swims, routines at home and a
-time while adding) is in TestFlight 79 and needs the same
-look. P25 reaches the phone with the next TestFlight build after it merges.
-P26 (the calendar's list follows its month) reaches it the same way. P27 (Add to your week reads top down) does too. P28 (adding to a weekday changes in place) does too.
+**Then (@agent):** With a Remote Control session on the Mac mini, capture
+the real weekday sheet (P28), Add to your week (P27) and P25's Today card,
+Details and Swap from a simulator build of main, with synthetic data, for the
+owner's comparison with the mocks.
 
 ## Notes / open questions
 

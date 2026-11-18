@@ -1,6 +1,6 @@
 # WHOOP data in Tres Fort
 
-Slug: whoop · Status: active · Updated: 2026-11-09 · Theme: connected-training
+Slug: whoop · Status: active · Updated: 2026-11-18 · Theme: connected-training
 
 ## Goal
 
@@ -116,22 +116,32 @@ the plan, all in the app without an AI coach. Done means:
 | P1 | coordinates_with | plan:activity-integration-integrity | Changes cross-source dedup, which that plan owns. |
 | P1 | coordinates_with | plan:sport-activities#P1 | Reuses that plan's sport names and heart-rate load for every sport. |
 | P2 | gated_by | external:owner-whoop-developer-app | The app is registered under a WHOOP membership in WHOOP's developer dashboard, with its secret set by `wrangler secret put`. |
-| P2 | coordinates_with | plan:endurance-training-load | WHOOP workouts are scored by the same load engine. |
 | P3 | gated_by | external:owner-whoop-developer-app | Recovery comes from the same WHOOP connection, so it needs the registered app and its secrets. |
 | P4 | gated_by | external:owner-whoop-developer-app | Approval is requested from the same developer app. |
 
 ## Next step
 
-**Now (@owner):** a member who wears a WHOOP installs the latest TestFlight
-beta, connects WHOOP under Profile → Connections, and checks a workout, a
-day's recovery and a disconnect. They also turn on Apple Health in Tres Fort
-with WHOOP allowed to write workouts to Health, to check that a WHOOP
-workout shows a heart-rate chart and how dense its readings are, and record
-one run with WHOOP's Heart Rate Broadcast on. The WHOOP developer app is registered
-(name Tres Fort, privacy policy `https://tresfort.app/privacy`, redirect
+**Now (@owner):** a member who wears a WHOOP, on TestFlight 1.2 (83) or
+later, connects WHOOP under Profile → Connections and checks a workout, the
+next morning's recovery and a disconnect. They also turn on Apple Health in
+Tres Fort with WHOOP allowed to write workouts to Health, to check that a
+WHOOP workout shows a heart-rate chart and how dense its readings are, and
+record one run with WHOOP's Heart Rate Broadcast on.
+
+**Connect fixed (2026-11-14):** the first wearer's connect attempt failed
+because the Worker's `WHOOP_CLIENT_ID` secret held a wrong value. The owner
+reset it, then connected a WHOOP account end to end the same day, so the
+OAuth round trip and token exchange work in production. The WHOOP developer
+app is registered (name Tres Fort, privacy policy
+`https://tresfort.app/privacy`, redirect
 `https://tres-fort.nmarkspdx.workers.dev/auth/whoop/callback`, webhook v2
 `https://tres-fort.nmarkspdx.workers.dev/webhooks/whoop`, every read scope
-plus `offline`) and its secrets are set.
+plus `offline`).
+
+**Before App Store 1.2:** the app has no switch to hide WHOOP while WHOOP
+allows only 10 members before P4's approval, and the App Store privacy
+answers need WHOOP's data added (see the
+[App Store plan](../app-store-submission/plan.md)).
 
 **Shipped (2026-11-08):** with the owner's go-ahead, migration 0070, Worker, the website's WHOOP privacy text and beta
 1.1 (72) (release 72).

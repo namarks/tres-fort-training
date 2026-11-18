@@ -1,6 +1,6 @@
 # Member Activation and Adherence
 
-Slug: member-activation-and-adherence · Status: paused · Updated: 2026-11-15 · Theme: gym-floor
+Slug: member-activation-and-adherence · Status: paused · Updated: 2026-11-18 · Theme: gym-floor
 
 ## Goal
 
@@ -279,8 +279,7 @@ how to populate an empty progress view without needing another setup flow.
 
 ## Next step
 
-**Now (@owner):** On the next separately authorized TestFlight candidate,
-try new-member setup from Profile > Account: Get started; plan a mixed week,
+**Now (@owner):** On TestFlight 1.2 (83) or later, try new-member setup from Profile > Account: Get started; plan a mixed week,
 connect an optional app, reach Today and return with “Back to my account”.
 Verify reminder permissions and the Today widget on a real device. The bounded
 onboarding implementations P0–P3 and P5–P7 are in the public source; no old

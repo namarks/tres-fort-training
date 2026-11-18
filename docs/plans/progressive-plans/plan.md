@@ -1,6 +1,6 @@
 # Plan over blocks and cycles, not just one week
 
-Slug: progressive-plans · Status: active · Updated: 2026-11-15 · Theme: gym-floor
+Slug: progressive-plans · Status: gated · Updated: 2026-11-18 · Theme: gym-floor
 
 ## Goal
 
@@ -102,7 +102,7 @@ spec.md holds the data format, the date rule and the limits.
 - [ ] **P5 — Release and owner check**
   - Worker deploy and a TestFlight build on the owner's go-ahead, then the
     owner sets up a block on the iPhone and checks Today and the calendar.
-- [ ] **P6 — Manual week targets from the phone**
+- [x] **P6 — Manual week targets from the phone**
   - Edit a selected workout's sets/rounds, reps or duration and load for one
     block week or that week through the end. Show the reusable target beside
     the effective week target and allow removing an override.
@@ -122,10 +122,13 @@ spec.md holds the data format, the date rule and the limits.
   - Reuse the existing whole-program writer and web target/ramp editor. Share
     the reviewed lighter-week path with coach-free planning P2; do not add
     automatic post-workout weight suggestions.
+  - Delivered with coach-free planning P2 in public PR #9, which Nick merged
+    on 2026-11-16. The API with the active-workout guard was released on
+    2026-11-17 before the web app and TestFlight 1.2 (83), both from the same
+    commit. Device acceptance belongs to P5.
 
 ## Execution frontier
 
-- P6
 - P5
 
 ## Dependencies
@@ -139,21 +142,19 @@ spec.md holds the data format, the date rule and the limits.
 
 ## Next step
 
-**Now (@agent):** Qualify and deliver P6 on `codex/lifting-core-ux` in the public
-repository, together with coach-free planning P2. Implementation includes native
-target/lighter-week sheets, explicit scope and active-session guards; this phase
-stays open until exact-head qualification and owner merge. The source already
-includes the rule-based event/open
-builders (`EventBuildSheet`, `programBuilder`, `build_program`), the native
-block chooser and the web target/ramp designer. Public PR #4 integrated that
-designer into the unified Plan weeks page; rebuilding those is not next work.
+**Now (@owner):** P5 on TestFlight 1.2 (83) or later. The API, web app and
+build 83 all come from main of 2026-11-17, which includes P6's week-target
+sheets and the API guard that refuses target changes to a workout in
+progress. Set up a block on the iPhone, change one week's target and then
+that week through the end, preview a lighter week, and check the same week
+on the phone, the web, Today and the calendar. A block started on the web
+with its own workout list (web-app P2) also shows on those dates beside what
+repeats every week; the iPhone app still edits such a block as whole weeks.
 
-**Next (@owner):** On a separately authorized release, check the same selected
-week on the phone, web, Today and calendar. Reconcile deployment and device
-evidence before closing P5; an old release request is not new authority.
-Deploy the API's active-workout program guard before the new web/native controls:
-an older API accepts the same request shape without that protection. The phone's
-local check cannot protect a recorded session on another device by itself.
+The rule-based event and open builders (`EventBuildSheet`, `programBuilder`,
+`build_program`), the native block chooser and the web target and ramp
+designer already exist; rebuilding them is not next work. The phone's local
+check cannot protect a recorded session on another device by itself.
 
 ## Notes / open questions
 

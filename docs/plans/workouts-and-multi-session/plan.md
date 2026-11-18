@@ -1,6 +1,6 @@
 # Workouts and Multi-Session Days
 
-Slug: workouts-and-multi-session · Status: active · Updated: 2026-11-09 · Theme: gym-floor
+Slug: workouts-and-multi-session · Status: gated · Updated: 2026-11-18 · Theme: gym-floor
 
 ## Goal
 
@@ -205,8 +205,10 @@ past release A. Release A is a rollback target only while no
 additional session (slot above 0) exists; after the first one, roll forward
 with a corrected slot-aware Worker.
 
-**Then (@agent):** Confirm the full iOS release check passed on the exact
-source before a TestFlight upload of the slot-aware app, then record the build.
+The slot-aware app is in TestFlight: 1.2 (83), built from public main on
+2026-11-17 after a full release check on that commit, carries ordered
+sessions per date (the API and web app were released from the same commit).
+Step 4 can use it; no agent step is waiting.
 
 
 ## Notes / open questions

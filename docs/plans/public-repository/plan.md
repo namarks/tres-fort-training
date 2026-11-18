@@ -1,6 +1,6 @@
 # Establish Tres Fort Training as the public development repository
 
-Slug: public-repository · Status: active · Updated: 2026-11-15 · Theme: release
+Slug: public-repository · Status: gated · Updated: 2026-11-18 · Theme: release
 
 ## Goal
 
@@ -37,7 +37,7 @@ remain separate decisions.
     records in its Garmin slice and matched much of the connection flow to
     official public documentation. Remaining protocol-provenance uncertainty was
     disclosed privately. The owner explicitly chose publication with Garmin retained.
-- [ ] **P2 — Publish and qualify hosted verification**
+- [x] **P2 — Publish and qualify hosted verification**
   - [x] **(a) Publish and establish repository controls**
   - Published `main` at `659c045e03512b46c6534df8cf8b2ead276d5549` on
     2026-11-15. Original source main was `bded5f82d0b96e30fec979cca902e20ac9c14ea6`.
@@ -49,7 +49,7 @@ remain separate decisions.
     dependency alerts, approval for all outside-contributor workflow runs,
     read-only default tokens, enforced action SHA pinning and an exact four-action
     allowlist. Only the owner has write access; no self-hosted runners or secrets.
-  - [ ] **(b) Verify the published candidate on hosted CI**
+  - [x] **(b) Verify the published candidate on hosted CI**
   - Hosted CI fixes landed in [PR #1](https://github.com/namarks/tres-fort-training/pull/1):
     authenticated XcodeGen downloads and full-job limits raised from 40 to 90 minutes, retaining
     the 30-minute smoke limit. Its [full CI run](https://github.com/namarks/tres-fort-training/actions/runs/43755367763)
@@ -69,16 +69,34 @@ remain separate decisions.
     recompiles only what it changed. Only main saves builds; PRs, forks included,
     only restore, and the nightly release check still builds from scratch. See
     `docs/IOS-VERIFICATION.md`. No self-hosted runners.
+  - The narrower policy merged in [PR #5](https://github.com/namarks/tres-fort-training/pull/5)
+    and the build cache in [PR #3](https://github.com/namarks/tres-fort-training/pull/3).
+    Published main then passed the full release check on hosted CI: the
+    nightly run on `4a72998` (2026-11-16) and a manual run on `6b56a3a`
+    (2026-11-17, [run 43989778966](https://github.com/namarks/tres-fort-training/actions/runs/43989778966)),
+    every UI, Station and App Store simulator job included. TestFlight 1.2
+    (83) was built from that commit.
 - [ ] **P3 — Complete the development transition**
   - Verify clean-clone backend and simulator onboarding and an ordinary fork PR.
   - Verify owner release automation, licensed artwork supply and private feedback
     destinations independently. No production credentials belong in public CI.
   - Move active development after verification. Archive the original only with
     owner authorization and after confirming no active automation needs writes.
+  - Done so far: all development moved here on 2026-11-15, and the owner
+    archived the original repository (read-only) on 2026-11-16. Owner
+    release automation works from this repository: the 2026-11-17 API and
+    web releases and TestFlight 1.2 (83) were built from public main, and
+    TestFlight feedback still reads with `npm run beta:feedback:list`.
+    Contributor docs and the feature idea form landed in
+    [PR #6](https://github.com/namarks/tres-fort-training/pull/6).
+  - Left: the first ordinary fork PR from an outside contributor (terms
+    comment, the owner's "Approve and run", Codex on request), and a check
+    that an official build was uploaded with the licensed artwork supplied
+    through the ignored paths in `docs/RELEASE-ASSETS.md`.
 
 ## Execution frontier
 
-- P2(b)
+- P3
 
 ## Dependencies
 
@@ -88,15 +106,17 @@ remain separate decisions.
 
 ## Next step
 
-**Now (@agent):** finish the narrower verification policy through its targeted
-checks and normal exact-head PR gates. Then qualify published main with the
-nightly or manual full run and verify contributor onboarding and owner automation
-for P3. Do not bypass protected main or treat smoke coverage as release qualification.
+**Now (@owner):** Confirm that the next official build is uploaded with the
+licensed artwork copied into the ignored paths (`docs/RELEASE-ASSETS.md`).
+Then P3 waits only on the first outside contributor's fork PR, which checks
+the terms comment, "Approve and run" and an `@codex review` on a fork. Do
+not bypass protected main or treat smoke coverage as release qualification.
 
 ## Notes / open questions
 
-- The original repository remains private, active and unarchived. No further old
-  history rewrite or deletion is needed for this clean-snapshot route.
+- The original repository is private and was archived (read-only) by the owner
+  on 2026-11-16. No further old history rewrite or deletion is needed for this
+  clean-snapshot route.
 - Contributor terms 1.1 (2026-11-15, owner's choice): outside contributors
   accept once with a pull-request comment; branches in this repository pass as
   the owner's own work; the owner can still approve or revoke one PR head by

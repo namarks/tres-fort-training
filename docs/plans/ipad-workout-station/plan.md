@@ -1,6 +1,6 @@
 # iPad Workout Station
 
-Slug: ipad-workout-station · Status: active · Updated: 2026-10-12 · Theme: gym-floor
+Slug: ipad-workout-station · Status: gated · Updated: 2026-11-18 · Theme: gym-floor
 
 ## Goal
 
@@ -183,17 +183,22 @@ detections into durable workout actions.
 
 ## Next step
 
-**Now (@agent):** Drive the iPad controls follow-up in
-PR #265 to ready. On
-2026-10-12, after builds 53 and 54 shipped the link fixes below, the owner
-reported that the connection is still flaky and not intuitive: the iPad could
-not move the workout forward, and it offered no workout outline or clock.
-Reading the code found further likely causes, inferred rather than taken from
-device logs. The iPhone published the iPad's display only while Today was on
-screen, so switching tabs withdrew the workout from the iPad. A minimized
-workout showed as paused, and the iPhone stayed awake only while the workout
-was in focus, so auto-lock could close the connection during a rest. The
-iPad removed the workout on any lost connection.
+**Now (@owner):** The physical trial below, on TestFlight 1.2 (83) or later
+on both the iPhone and the iPad. Every fix this plan describes is in that
+build, including the iPad controls follow-up (original PR #265, merged
+before the public snapshot of 2026-11-15; checked in public main on
+2026-11-18). No implementation work is waiting for an agent.
+
+**iPad controls (merged):** On 2026-10-12, after builds 53 and 54 shipped
+the link fixes below, the owner reported that the connection is still flaky
+and not intuitive: the iPad could not move the workout forward, and it
+offered no workout outline or clock. Reading the code found further likely
+causes, inferred rather than taken from device logs. The iPhone published
+the iPad's display only while Today was on screen, so switching tabs
+withdrew the workout from the iPad. A minimized workout showed as paused,
+and the iPhone stayed awake only while the workout was in focus, so
+auto-lock could close the connection during a rest. The iPad removed the
+workout on any lost connection.
 
 The follow-up lets a linked iPad move the iPhone's workout: log a set, end
 rest, start and stop a hold, edit the next set and choose an exercise from the
@@ -303,7 +308,7 @@ The audit covers all 280 exercises: 193 rep candidates, 15 hold candidates and
 72 manual fallbacks. Fifteen entries explicitly select a current experimental
 mode; profile membership alone never enables a counter. Real accuracy remains
 unvalidated. The retained device receipts below describe earlier installations.
-**Next physical trial (@owner):** With build 52 installed on both devices,
+**Next physical trial (@owner):** With build 83 or later installed on both devices,
 use the same account and allow Local Network access. In iPad Station, tap
 "Connect iPhone". Until the QR failure is resolved, open Très Fort on iPhone,
 tap "iPad display" at the top of Today and confirm "Connect iPad" (in builds

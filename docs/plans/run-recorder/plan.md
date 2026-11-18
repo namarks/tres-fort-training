@@ -312,7 +312,7 @@ coach sees it in the same place as Garmin runs.
       trying again finds it. When Health keeps one, the answer says so. A run with no connection or
       never uploaded answers `intervals.status` `not_connected` or
       `not_found`.
-  - [ ] **(e) Keep how the recording went**
+  - [x] **(e) Keep how the recording went**
     - On 2026-11-11, after diagnosing the owner's auto-pause report took
       several production queries, the owner chose to keep, with each
       recorded run, what the recorder saw: every pause with whether the
@@ -335,7 +335,10 @@ coach sees it in the same place as Garmin runs.
       intervals.icu. Only the owner's diagnostics lookups read it, for the
       owner's own runs (docs/DIAGNOSTICS.md). The privacy policy says so.
     - Done once a run recorded on a TestFlight build with it shows its
-      pauses, tapped and automatic, in the owner's diagnostics.
+      pauses, tapped and automatic, in the owner's diagnostics. Seen on
+      2026-11-18: the owner's 2026-11-17 run on TestFlight 1.2 (83) kept its
+      pauses, each marked automatic, with every fix's speed and motion level,
+      and the diagnostics lookups read them (P4's tuning came from it).
 
 - [ ] **P6 — Maps for runs the app didn't record**
   - The owner chose on 2026-11-04 that runs from intervals.icu and from
@@ -585,45 +588,31 @@ mirrors P1's session.
 
 ## Next step
 
-**Now (@owner):** Record the remaining P3 runs, now on TestFlight build 65, which also carries P5 and P6. On 2026-11-04 the API, the
-`tres-fort-web` app and the website were deployed with
-the owner's go-ahead, together with the November security release
-(migrations 0065 and 0066); the owner set `MAPKIT_TOKEN` the same day. P5 is
-done once deleting a recorded run is seen on the device. P6 is done once
-maps of an intervals.icu run and of a Strava run show on the device, after
-allowing Health's workout-route access on build 65.
+**Now (@owner):** On the next TestFlight build (after 83, on the owner's
+go-ahead), run intervals with real stops and music playing. That one run
+checks P4's quicker pause once the phone is still and P9's 3-2-1 beeps and
+short step cues, both merged on 2026-11-18 (iOS only, no server change), and
+P8's Lock Screen card and pages with the phone locked. App Store 1.2 waits
+for the recorder (the owner's choice, 2026-11-16).
 
-P7(a) and (b) are live since the 2026-11-06 release (migration 0067, API, TestFlight build 66). P7(c), (d) and (e) are live since the
-2026-11-07 release with the owner's written go-ahead
-(migration 0069, API, web, TestFlight build 67; the full release check passed on
-that commit). (f) is a run on build 67 with the strap on a hilly route.
+Where the rest stands, as of 2026-11-18:
 
-P4's motion-aware auto-pause is in the repository: release the API (for
-the diagnostics' `motion_mg`), then a TestFlight build, then a run with
-real stops and walked recoveries to tune the still and steps levels from
-the owner's diagnostics.
-
-P5(e) (recorder diagnostics, migration 0076) is in the repository; it
-needs migration 0076 and the Worker released before a TestFlight build
-that sends it, then one recorded run with a pause of each kind.
-
-P8 (time left in the lap on the Lock Screen and the recorder's pages) is
-in the repository, iOS only, with no server change; it reaches the phone
-with the next TestFlight build, then needs one planned run.
-
-From the owner's 2026-11-17 run on build 83: P4's quicker pause once the
-phone is still and P9 (3-2-1 beeps, short step cues) are iOS only, with no
-server change. They reach the phone with the next TestFlight build on the
-owner's go-ahead; then one interval run with stops and music checks both.
-App Store 1.2 waits for the recorder (the owner's choice, 2026-11-16).
-
-P3 runs on the owner's iPhone. P1 and P2 are delivered in the repository;
-their HealthKit, location, ActivityKit and speech calls
-have only been compiled and run against fakes, so P3 is their first real
-test, including the Lock Screen controls, splits heard with the phone
-locked and a Bluetooth heart rate strap. Launch-time recovery runs
-when the app next opens; handling the system's workout-recovery relaunch in
-the scene delegate is left to P3's force-quit check.
+- Everything merged up to public PR #12 is released: the API and the
+  `tres-fort-web` app were deployed from main on 2026-11-17 with every
+  migration through 0078, and TestFlight 1.2 (83) is built from the same
+  commit. That covers P4's motion-aware auto-pause, P5(e)'s recorder
+  diagnostics and P8.
+- P5(e) is proven: the owner's 2026-11-17 run on build 83 kept its pauses
+  and motion levels, and the diagnostics lookups read them. P5 closes once
+  deleting a recorded run is seen on the device.
+- P6 closes once maps of an intervals.icu run and an Apple Health run (for
+  example one Strava saved) show on the device.
+- P7(f) is one run with the strap on a hilly route.
+- P3's checks not yet recorded here: a force-quit mid-run, no network at
+  the end, and the upload and Health save each landing once. P1 and P2's HealthKit,
+  location, ActivityKit and speech calls were first exercised on these real
+  runs; handling the system's workout-recovery relaunch in the scene
+  delegate is left to the force-quit check.
 
 ## Notes / open questions
 

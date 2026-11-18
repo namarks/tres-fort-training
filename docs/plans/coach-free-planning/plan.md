@@ -1,6 +1,6 @@
 # Plan without an AI coach
 
-Slug: coach-free-planning · Status: active · Updated: 2026-11-15 · Theme: gym-floor
+Slug: coach-free-planning · Status: active · Updated: 2026-11-18 · Theme: gym-floor
 
 ## Goal
 
@@ -56,7 +56,7 @@ P5).
     two routes.
   - Still to do: the iOS editor for the event, and training phases in the
     app and on the web.
-- [ ] **P2 — Deload or lighten a week**
+- [x] **P2 — Deload or lighten a week**
   - Offer a reviewed lighter-week action in native and web block planning:
     one scheduled lifting workout or all lifting workouts in the selected
     week, with explicit set and/or load reduction and before/after targets.
@@ -73,13 +73,16 @@ P5).
     workouts are protected by the shared writer, and the same phone guards
     its pre-first-set runner; the remote offline/unlogged limitation is
     recorded in progressive-plans P6, which also owns native manual targets.
+  - Delivered with progressive-plans P6 in public PR #9 (merged 2026-11-16)
+    and released with the API, the web app and TestFlight 1.2 (83) from main
+    on 2026-11-17. The owner's device look rides on progressive-plans P5.
 - [ ] **P3 — Smaller coach-only edits**
   - Exercise cues and the progression rule on a slot, notes on a workout,
     and deleting an intervals.icu activity that Tres Fort created.
 
 ## Execution frontier
 
-- P2
+- P1
 
 ## Dependencies
 
@@ -90,21 +93,16 @@ P5).
 
 ## Next step
 
-**Now (@agent):** Qualify and deliver the implemented P2 on
-`codex/lifting-core-ux`, selected in the November 15 core lifting UX pass.
-Keep it open until exact-head qualification and owner merge.
-Coordinate native per-week/future-target editing with
-progressive-plans P6 and draft preservation with workout-library P0.15.
+**Now (@agent):** P1's iOS editor for the event (set, change and clear it
+through the existing `PUT`/`DELETE /api/plan/race`), then training phases in
+the app and on the web. The web already sets the event on Analysis → Event
+and from the guided block start (web-app P2); the native run builder can
+create an event with its block but is not a standalone event editor. Then
+P3's remaining edits: editing existing slot cues and progression, and native
+workout notes (creation-time lifting cues already exist).
 
-**Later (@agent):** P1's standalone native event editor and training phases,
-then P3's remaining edits. REST and web event editing already exist in source;
-the native run builder can create an event with its block but is not a
-standalone event editor. Creation-time lifting cues exist; editing existing
-slot cues/progression and native workout notes remain separate gaps.
-
-Deployments and client distribution require separate authority. Confirm the
-chosen release's routes and client support from live evidence, rather than
-treating historical deployment requests as current tasks.
+P2's reviewed lighter week is delivered and released (see P2). Deployments
+and client distribution require separate authority.
 
 ## Notes / open questions
 

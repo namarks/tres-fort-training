@@ -1,6 +1,6 @@
 # Run detail charts
 
-Slug: run-detail-charts · Status: active · Updated: 2026-11-11 · Theme: connected-training
+Slug: run-detail-charts · Status: gated · Updated: 2026-11-18 · Theme: connected-training
 
 ## Goal
 
@@ -197,14 +197,14 @@ series, so it can follow P1 or run beside it.
 
 ## Next step
 
-**Now (@owner):** P0 to P3 are live, and the owner saw charts working on
-TestFlight 68. P5 (map dot and full-screen map) went out on 2026-11-08 on the owner's written go-ahead: API, web, no
-migration, and TestFlight 1.0 (69) uploaded before release check run finished, as the owner chose. If that check fails, build 69
-is held back from testers. Check P5 on build 69 as P4 lists. P6 (ride
-power and cadence) and P7 (power kept for `.fit`, Garmin and Apple Health
-rides, migration 0074) are live since 2026-11-11: server and web, and
-TestFlight 79 (see P4). Check them on build 79 as P4 lists, then archive
-this plan.
+**Now (@owner):** The P4 device checks, on TestFlight 1.2 (83) or later,
+which carries P0 to P7 (the owner already saw charts on build 68): drag a
+chart and watch the dot move on a recorded run's, an intervals.icu run's and
+an Apple Health run's map, open the map full screen (P5); then a Zwift ride
+from intervals.icu and a `.fit` ride with power show power and cadence
+charts, best efforts and time in zones (P6, P7). Everything is released on
+the server and web (P6 and P7 since 2026-11-11). Archive this plan once
+those look right.
 
 ## Notes / open questions
 

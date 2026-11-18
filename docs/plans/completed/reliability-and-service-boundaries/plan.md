@@ -1,6 +1,6 @@
 # Reliability and Service Boundaries
 
-Slug: reliability-and-service-boundaries · Status: active · Updated: 2026-09-26 · Theme: platform
+Slug: reliability-and-service-boundaries · Status: done · Archived: completed · Updated: 2026-11-18 · Theme: platform
 
 ## Goal
 
@@ -15,7 +15,7 @@ performance evidence, and a safe path out of temporary workout compatibility.
     successful wire shapes, legacy bounded retries and atomic attribution.
   - Make the default test entry point run the supported backend shards and
     report missing prerequisites before expensive work.
-- [ ] **P1 — Cohesive service and recovery boundaries**
+- [x] **P1 — Cohesive service and recovery boundaries**
   - Extract backend OAuth grant lifecycle and provider reconciliation behind
     the public service facade, preserving ownership and transaction semantics.
   - Extract pure runner recovery decisions and account-bound artifact ownership;
@@ -27,14 +27,19 @@ performance evidence, and a safe path out of temporary workout compatibility.
     writes; preserve existing query budgets and iOS performance probes.
   - Use canonical iOS requests and remove runtime legacy routes, tools, output
     aliases and SQL adaptation; retain readers required by existing stored data.
-- [ ] **P3 — Verify and publish the complete change**
+- [x] **P3 — Verify and publish the complete change**
   - Run local backend shards, typechecking, plan validation and synthetic probes;
     obtain iOS build/unit/UI evidence from the repository CI.
   - Publish a reviewable PR, complete review, and record deployment/app-distribution follow-ups.
-
-## Execution frontier
-
-- P3
+  - Delivered in the original repository before the public snapshot of
+    2026-11-15 (its PR #202). Checked in public main on 2026-11-18: the
+    OAuth grant and intervals.icu services (`src/services/oauthGrants.ts`,
+    `src/services/intervalsSync.ts`) sit behind the `src/db.ts` facade,
+    `RunnerRecovery.swift` owns pure recovery decisions, the final set has
+    no rest, and offline start needs a previously live-certified plan
+    (`StateSnapshotStore`). The full hosted release check passed on public
+    main (2026-11-16 and 2026-11-17), and the API, web app and TestFlight 1.2
+    (83) were released from it on 2026-11-17.
 
 ## Dependencies
 
@@ -45,21 +50,10 @@ physical schema prerequisite; release and app distribution remain separate work.
 
 ## Next step
 
-**Now (@agent):** Complete fresh iOS CI and exact-head review of
-PR #202 after reconciling it with
-main. Preserve main's archive/tags and freestyle behavior, canonical
-contract validation, release gate, and recorded migration evidence. Reviewed
-versions now take precedence over removed workout/slot lookups on REST and MCP;
-regressions cover all four slot edits without durable writes on conflict.
+**Done (2026-11-18):** the follow-up to PR #201 is delivered, released and
+covered by the hosted release check (see P3). No work remains in this plan.
 
-The September 14 head passed backend and native CI (610 unit tests and 12 smoke
-journeys). That evidence does not certify this reconciled head. Current local
-checks cover the three Workers/D1 shards, typecheck, plan graph, website tests,
-and test-command behavior. The default wrapper correctly reports the missing
-`sqlite3` prerequisite in this container; CI must supply query-plan, upload, and
-native build/unit/UI evidence. The 24 extracted service function bodies retain
-main's behavior; one extraction drops an unused destructured field. P1 and P3
-remain open until current native CI and review are green.
+## Delivery record
 
 The scope includes structured slot conflicts and reviewed-version iOS editing,
 internal OAuth and Intervals services, pure runner recovery, final-set rest,
@@ -67,4 +61,4 @@ certified offline start/resume, reproducible test shards, and value-free
 operational measurements. Main already owns the canonical runtime cutover.
 Existing immutable snapshot and cache/outbox readers remain data-preservation
 code. No production migration, deployment or TestFlight distribution is part of
-this repository delivery.
+this repository delivery; those releases followed separately.

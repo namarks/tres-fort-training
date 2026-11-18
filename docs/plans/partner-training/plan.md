@@ -1,6 +1,6 @@
 # Partner Training on One iPad
 
-Slug: partner-training · Status: active · Updated: 2026-11-15 · Theme: gym-floor
+Slug: partner-training · Status: active · Updated: 2026-11-18 · Theme: gym-floor
 
 ## Goal
 
@@ -167,8 +167,11 @@ the public repository (original PR #469); the phone/iPad instruction fixtures
 and full native qualification establish synthetic behavior, not a physical
 trial. No review/merge request for that historical branch remains.
 
-**Later (@agent):** P0.2 follows the selected
-[core lifting UX pass](../../initiatives/gym-floor-experience.md).
+**Next (@agent, once the owner selects it):** P0.2. The
+[core lifting UX pass](../../initiatives/gym-floor-experience.md) it was
+waiting behind merged on 2026-11-16 (public PR #9) and was released on
+2026-11-17, so shared ending and invitation recovery is the next lifting
+candidate.
 
 Historical release evidence: build 49 from internal TestFlight and its
 matching deployed Worker established the original manual trial candidate.
