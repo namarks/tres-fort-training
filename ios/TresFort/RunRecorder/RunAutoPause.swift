@@ -15,10 +15,20 @@ import Foundation
 /// while he walked his recoveries, under the old 0.8 m/s line, and the run
 /// paused twice mid-walk. Steps shake the phone; standing doesn't. So:
 /// - while the phone shows steps, the run never pauses;
-/// - once it has been still for two seconds, the run pauses as soon as the
-///   last two seconds of GPS are under walking pace (0.8 m/s);
+/// - once it has been still for two seconds, the run pauses at the first fix
+///   whose speed reading is missing or under walking pace (0.8 m/s), unless
+///   the fixes of the last two seconds still cover ground;
 /// - without a clear motion reading (no accelerometer, or in between), GPS
 ///   must read under 0.4 m/s, which a walk didn't reach on that run.
+///
+/// The motion levels come from the owner's 2026-11-17 run: standing at a
+/// light read 0.03 to 0.17 g, mostly under 0.1; walking a recovery with the
+/// phone in hand read 0.18 to 0.3 g, a freer walk about 0.5 g, running 1.5 to
+/// 3.5 g. Both stops there paused about four seconds after the phone went
+/// still, because the still line (then 0.05 g) missed most standing seconds
+/// and the speed reading takes three or four seconds to wind down from
+/// running pace, or goes missing. Trusting the still phone and using GPS
+/// only to veto a pause takes the pause to the first still second.
 ///
 /// A resume needs every fix over an easy walk for two seconds, by its speed
 /// reading or else by how far it moved from the fix before, or a single
@@ -50,12 +60,12 @@ struct RunAutoPause {
     static let motionWindow: TimeInterval = 2
     static let motionMinimumSamples = 2
     /// Every level in the window at or under this: the phone is still.
-    /// Standing with the phone in a pocket, armband or hand reads a few
-    /// hundredths of g.
-    static let stillLevel = 0.05
-    /// Every level at or over this: steps. A walk reads a few tenths of g,
-    /// a run more.
-    static let stepsLevel = 0.12
+    /// Standing with the phone in a pocket, armband or hand read 0.03 to
+    /// 0.1 g on the owner's 2026-11-17 run, more while handling it.
+    static let stillLevel = 0.1
+    /// Every level at or over this: steps. A walk with the phone in hand
+    /// read 0.18 g and up on that run, a run 1.5 g and up.
+    static let stepsLevel = 0.15
 
     enum Change: Equatable {
         /// Pause from this time: the fix that showed the stop. Not dated back
@@ -136,8 +146,15 @@ struct RunAutoPause {
         guard span >= (still ? Self.stillMinimumSpan : Self.pauseMinimumSpan),
               // Not while the latest fix shows the runner off again.
               location.speed <= Self.resumeSpeed else { return nil }
-        let threshold = still ? Self.pauseSpeed : Self.gpsOnlyPauseSpeed
         let moved = zip(fixes, fixes.dropFirst()).reduce(0.0) { $0 + $1.1.distance(from: $1.0) } / span
+        if still {
+            // The speed reading lags a stop by seconds and often goes missing
+            // as the runner stands, so only the latest one can veto, with
+            // the positions.
+            let stopped = location.speed < Self.pauseSpeed && moved < Self.resumeSpeed
+            return stopped ? .pause(at: time) : nil
+        }
+        let threshold = Self.gpsOnlyPauseSpeed
         let readings = fixes.map { $0.speed }.filter { $0 >= 0 }
         let stopped = readings.count >= minimumFixes
             // A low reading while the fixes still cover ground isn't a stop.

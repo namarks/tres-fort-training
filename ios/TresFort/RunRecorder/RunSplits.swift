@@ -70,7 +70,16 @@ struct RunSplitTracker {
 
 @MainActor
 protocol RunSplitSpeaking: AnyObject {
-    func speak(_ text: String)
+    /// Says `text` after anything already being said, or, when `urgent`,
+    /// cuts that off first so the cue is on time: a step starting is said
+    /// as it starts, not after the end of a split announcement.
+    func speak(_ text: String, urgent: Bool)
+    /// One short countdown beep, as a timed step's last seconds tick down.
+    func beep()
+}
+
+extension RunSplitSpeaking {
+    func speak(_ text: String) { speak(text, urgent: false) }
 }
 
 /// Speaks over music or a podcast, ducking music and pausing a podcast, then
@@ -91,11 +100,35 @@ final class SystemRunSplitSpeaker: NSObject, RunSplitSpeaking, AVSpeechSynthesiz
         synthesizer.delegate = self
     }
 
-    func speak(_ text: String) {
+    func speak(_ text: String, urgent: Bool) {
+        // The cancelled utterance reports its end, which only schedules a
+        // release that the new utterance keeps waiting.
+        if urgent, synthesizer.isSpeaking { synthesizer.stopSpeaking(at: .immediate) }
         audio.willSpeak()
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = TimerCueVoice.preferred()
         synthesizer.speak(utterance)
+    }
+
+    /// The lift runner's timed-set tick, so a countdown sounds the same
+    /// everywhere in the app.
+    private lazy var beepPlayer: AVAudioPlayer? = {
+        guard let url = Bundle.main.url(forResource: "timed-set-tick", withExtension: "wav") else { return nil }
+        let player = try? AVAudioPlayer(contentsOf: url)
+        player?.prepareToPlay()
+        return player
+    }()
+
+    /// Beeps a second apart keep music ducked from the first to the step's
+    /// announcement after the last.
+    static let beepHold: Duration = .milliseconds(1_200)
+
+    func beep() {
+        guard let player = beepPlayer else { return }
+        audio.willSpeak()
+        player.currentTime = 0
+        let played = player.play()
+        audio.didStopSpeaking(holding: played ? Self.beepHold : .zero)
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {

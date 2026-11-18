@@ -206,7 +206,9 @@ integration or social breadth.
   records how far it falls one and two minutes after the stop, and shows
   the run's training load and its climb from the iPhone's barometer. P8
   puts a step's time left first on the Lock Screen and on swipeable pages
-  in the recorder, with the map a swipe away.
+  in the recorder, with the map a swipe away P9 beeps 3-2-1 before a timed
+  step ends and opens each step's cue with what to do, short for a short
+  step.
 - [Run detail charts](run-detail-charts/plan.md) — **active**; pace, heart
   rate and elevation charts for a run in the app and on the web, from
   intervals.icu streams read live or the route Tres Fort keeps, with a

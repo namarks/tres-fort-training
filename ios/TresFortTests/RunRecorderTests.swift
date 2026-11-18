@@ -99,7 +99,16 @@ private final class FakeLiveActivity: RunLiveActivityPresenting {
 @MainActor
 private final class FakeSpeaker: RunSplitSpeaking {
     private(set) var spoken: [String] = []
-    func speak(_ text: String) { spoken.append(text) }
+    /// What was said urgently, cutting off anything still being said.
+    private(set) var urgent: [String] = []
+    /// Beeps and speech in order: "beep" for a beep.
+    private(set) var events: [String] = []
+    func speak(_ text: String, urgent: Bool) {
+        spoken.append(text)
+        events.append(text)
+        if urgent { self.urgent.append(text) }
+    }
+    func beep() { events.append("beep") }
 }
 
 private final class RecorderUploadStub: RecordingUploadAPI {
@@ -1034,7 +1043,7 @@ final class RunRecorderTests: XCTestCase {
         let model = makeModel()
         await model.start()
         // A level between still and steps reads like no motion at all.
-        shake(0.08, at: 1...8)
+        shake(0.12, at: 1...8)
         location.onLocations?([fix(0, seconds: 1, speed: 3), fix(1, seconds: 2, speed: 1)]
                               + zip(3...8, [0.6, 0.5, 0.7, 0.45, 0.6, 0.5]).map {
                                   fix(1, seconds: TimeInterval($0), speed: $1)
@@ -1067,6 +1076,112 @@ final class RunRecorderTests: XCTestCase {
         location.onLocations?([at(5, 13, speed: 2.5)])
         XCTAssertEqual(model.phase, .running, "Steps and one fix over an easy walk resume")
         XCTAssertEqual(model.run?.pauses.last?.end, started.addingTimeInterval(13))
+    }
+
+    /// A fix `meters` north of the start, `seconds` after the clock.
+    private func fix(meters: Double, seconds: TimeInterval, speed: CLLocationSpeed = -1) -> CLLocation {
+        CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 45.5190 + meters / 111_320, longitude: -122.6793),
+            altitude: 15, horizontalAccuracy: 3, verticalAccuracy: 3, course: -1, speed: speed,
+            timestamp: clock.addingTimeInterval(seconds))
+    }
+
+    /// Shaped like both stops on the owner's 2026-11-17 run: the phone went
+    /// still within a second or two of the stop while the speed reading
+    /// wound down from running pace and then went missing, and the run paused
+    /// about four seconds later. It now pauses at the first still fix.
+    func testAStopPausesAsSoonAsThePhoneIsStill() async throws {
+        let model = makeModel()
+        await model.start()
+        let started = clock
+        clock = started.addingTimeInterval(60)
+        func at(_ meters: Double, _ second: TimeInterval, speed: CLLocationSpeed = -1) -> CLLocation {
+            fix(meters: meters, seconds: second - 60, speed: speed)
+        }
+        shake(1.8, at: 1...6, after: started)
+        shake(0.4, at: 7...7, after: started)
+        shake(0.06, at: 8...8, after: started)
+        shake(0.04, at: 9...12, after: started)
+        location.onLocations?([at(0, 1, speed: 3.3), at(3.3, 2, speed: 3.3), at(6.6, 3, speed: 3.3),
+                               at(9.9, 4, speed: 3.3), at(13.2, 5, speed: 3.3), at(16.5, 6, speed: 3.3),
+                               at(18.1, 7, speed: 1.6), at(19.1, 8, speed: 1.2)])
+        XCTAssertEqual(model.phase, .running, "Still slowing down")
+        location.onLocations?([at(19.9, 9)])
+        XCTAssertEqual(model.phase, .paused, "The first fix once the phone is still, without a speed reading")
+        XCTAssertEqual(model.run?.pauses.last?.start, started.addingTimeInterval(9))
+    }
+
+    func testAStillPhoneDoesntPauseWhileGPSShowsTheRunnerMoving() async throws {
+        let model = makeModel()
+        await model.start()
+        let started = clock
+        clock = started.addingTimeInterval(60)
+        shake(0.03, at: 1...9, after: started)
+        // A phone held steady, such as on a stroller, while the runner jogs on.
+        location.onLocations?((1...6).map {
+            fix(meters: Double($0) * 2.5, seconds: TimeInterval($0) - 60, speed: 2.5)
+        })
+        XCTAssertEqual(model.phase, .running)
+        // Positions that cover ground veto a missing reading too.
+        location.onLocations?((7...9).map {
+            fix(meters: Double($0) * 2.5, seconds: TimeInterval($0) - 60)
+        })
+        XCTAssertEqual(model.phase, .running)
+    }
+
+    /// On the owner's 2026-11-17 run a walked recovery with the phone in hand
+    /// read 0.18 to 0.3 g at 0.7 to 1.1 m/s. That's steps, not a stop.
+    func testAWalkWithThePhoneInHandDoesntPause() async throws {
+        let model = makeModel()
+        await model.start()
+        let started = clock
+        clock = started.addingTimeInterval(60)
+        shake(0.2, at: 1...10, after: started)
+        location.onLocations?((1...10).map {
+            fix(meters: Double($0) * 0.8, seconds: TimeInterval($0) - 60, speed: 0.7)
+        })
+        XCTAssertEqual(model.phase, .running)
+    }
+
+    /// The 2026-11-17 strides: three beeps before each timed step ends, then
+    /// the next step said short and on time.
+    func testTimedStepsCountDownWithBeeps() async throws {
+        let steps = """
+        [{"kind":"warmup","duration_s":60},\
+        {"repeat":2,"steps":[{"kind":"work","duration_s":20},{"kind":"recovery","duration_s":60}]}]
+        """
+        let model = makeModel()
+        model.announcesSplits = true
+        model.autoPauses = false
+        model.plannedRun = PlannedRun(id: "slot", workoutName: "Easy Run + Strides", plan: RunPlan(json: steps),
+                                      runSteps: steps, durationSeconds: nil)
+        await model.start()
+        let started = clock
+        for tenth in 1...850 {
+            clock = started.addingTimeInterval(Double(tenth) / 10)
+            model.advancePlan()
+        }
+        XCTAssertEqual(speaker.events, [
+            "Warm up 1 minute.", "beep", "beep", "beep",
+            "Run 20 seconds.", "beep", "beep", "beep",
+            "Recover 1 minute. Rep 1 of 2.",
+        ])
+
+        // Paused, the clock stops and so does the countdown.
+        clock = started.addingTimeInterval(137)
+        model.advancePlan()
+        XCTAssertEqual(speaker.events.suffix(1), ["beep"], "Three seconds left of the recovery")
+        model.pause()
+        clock = started.addingTimeInterval(200)
+        model.advancePlan()
+        XCTAssertEqual(speaker.events.filter { $0 == "beep" }.count, 7)
+        model.resume()
+
+        // With announcements off, nothing beeps.
+        model.announcesSplits = false
+        clock = started.addingTimeInterval(202)
+        model.advancePlan()
+        XCTAssertEqual(speaker.events.filter { $0 == "beep" }.count, 7)
     }
 
     func testAutoPauseCanBeTurnedOff() async throws {
@@ -1549,11 +1664,13 @@ final class RunRecorderTests: XCTestCase {
                                       runSteps: steps, durationSeconds: nil)
         await model.start()
         let started = clock
-        XCTAssertEqual(speaker.spoken, ["Step 1 of 2. 1 minute warm-up."])
+        XCTAssertEqual(speaker.spoken, ["Warm up 1 minute."])
 
         clock = started.addingTimeInterval(61)
         model.advancePlan()
-        XCTAssertEqual(speaker.spoken.last, "Step 2 of 2. 5 minutes at 130 to 145 beats per minute.")
+        XCTAssertEqual(speaker.spoken.last, "Run 5 minutes at 130 to 145 beats per minute.")
+        XCTAssertEqual(speaker.urgent, ["Warm up 1 minute.", "Run 5 minutes at 130 to 145 beats per minute."],
+                       "A step's announcement cuts off whatever is still being said")
 
         // Heart rate well above the range from the step's start: one cue once
         // the step has settled and the change has held.

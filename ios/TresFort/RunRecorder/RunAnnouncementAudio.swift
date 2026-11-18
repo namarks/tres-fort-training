@@ -69,12 +69,16 @@ final class RunAnnouncementAudio {
         try? session.activate()
     }
 
-    /// When an utterance finishes or is cancelled.
-    func didStopSpeaking() {
+    /// When an utterance finishes or is cancelled. `hold` keeps the session
+    /// a while longer first: a countdown beep holds it until about when the
+    /// next beep comes, so music stays ducked across the countdown instead of
+    /// rising between beeps. The next cue cancels the wait; without one the
+    /// session is given back as usual.
+    func didStopSpeaking(holding hold: Duration = .zero) {
         guard holding else { return }
         let token = generation
         releaseTask?.cancel()
-        releaseTask = Task { [weak self] in await self?.release(token) }
+        releaseTask = Task { [weak self] in await self?.release(token, after: hold) }
     }
 
     /// Waits for the latest release to finish or give up, for tests.
@@ -82,7 +86,11 @@ final class RunAnnouncementAudio {
         await releaseTask?.value
     }
 
-    private func release(_ token: Int) async {
+    private func release(_ token: Int, after hold: Duration) async {
+        if hold > .zero {
+            await sleep(hold)
+            guard !Task.isCancelled, token == generation else { return }
+        }
         await sleep(Self.settleDelay)
         for attempt in 0...Self.retryDelays.count {
             if attempt > 0 { await sleep(Self.retryDelays[attempt - 1]) }

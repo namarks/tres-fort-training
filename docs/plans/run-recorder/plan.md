@@ -1,6 +1,6 @@
 # Run recorder on iPhone
 
-Slug: run-recorder · Status: active · Updated: 2026-11-13 · Theme: connected-training
+Slug: run-recorder · Status: active · Updated: 2026-11-18 · Theme: connected-training
 
 ## Goal
 
@@ -194,6 +194,28 @@ coach sees it in the same place as Garmin runs.
     before a TestFlight build that sends it. The two levels are first
     guesses from typical phone accelerometer readings; the owner's next run
     with stops and walks, read from the diagnostics, sets them.
+  - Auto-pause, quicker once the phone is still, after the owner's Easy Run
+    + Strides on 2026-11-17 (TestFlight 1.2 build 83, read from the
+    diagnostics lookups): he felt the pause take about 5 seconds at each
+    stop, while the resume was quick. Both stops paused four seconds after
+    the phone first read still. The still line of 0.05 g missed most
+    standing seconds (standing read 0.03 to 0.17 g, mostly under 0.1, more
+    while he handled the phone), so the GPS-only rule decided, and the
+    speed reading took three to four seconds to wind down from running pace
+    or went missing. The run gave the first real levels: walking a
+    recovery with the phone in hand read 0.18 to 0.3 g, a freer walk about
+    0.5 g, running 1.5 to 3.5 g, and the steps rule kept that walk from
+    pausing. Now:
+    - still is every level at or under 0.1 g, steps every level at or over
+      0.15 g;
+    - once still, the run pauses at the first fix whose speed reading is
+      missing or under 0.8 m/s, unless the fixes of the last two seconds
+      moved 1.4 m/s or more. The earlier still rule waited for two speed
+      readings under 0.8 m/s, which lag the stop.
+    Replayed on that run's fixes, both stops pause three seconds sooner, at
+    the first still second, about a second and a half after the runner
+    stood still; nothing else pauses and the resumes don't change. Next:
+    the owner's next run with stops on a build that carries it.
 
 - [ ] **P5 — Keep recorded runs in Tres Fort**
   - The owner decided on 2026-11-02 that the recorder saves runs straight to
@@ -499,6 +521,42 @@ coach sees it in the same place as Garmin runs.
   - Done once the owner has run a planned run with the phone locked and in
     hand on a TestFlight build with it.
 
+- [ ] **P9 — Interval countdown and short step cues**
+  - From the owner's Easy Run + Strides on 2026-11-17 (25 minutes at 135 to
+    148 bpm, then 4 × 20 seconds with a minute's recovery): he wanted a
+    short countdown of beeps for the last three seconds of an interval, and
+    some steps were announced with what to do while others, like the
+    strides, said nothing useful. A short step's cue should be quick, not
+    half the interval.
+  - Steps were announced as "Step 2 of 10. Rep 1 of 4. 20 seconds.": a
+    work step without a target never said what to do, and the whole cue
+    took about four seconds of a 20-second stride. Every step now opens
+    with what to do (`RunPlanFormat.kindTitle`: Warm up, Run, Recover, Cool
+    down): "Run 800 meters at 6 34 to 6 50 a mile. Rep 1 of 4.",
+    "Warm up 10 minutes.". A step under a minute or 300 m hears only what
+    to do and for how long, "Run 20 seconds.", about a second.
+    "Step N of M" is gone; the Plan page lists the steps.
+  - A step's announcement, and "Plan complete", cut off anything still
+    being said (a split or a target cue), so it comes as the step starts
+    instead of queuing behind it. Other cues still wait their turn.
+  - A timed step of 10 seconds or more beeps once at 3, 2 and 1 seconds
+    left, with the lift runner's timed-set tick, and the next step's
+    announcement marks the end (`RunStepCountdown`). The plan ticker wakes
+    just past each of those seconds and the step's end, not once a second,
+    so the beeps and the announcement land on time. A late check beeps only
+    for the second it's in, never a burst. Paused, the clock and the
+    countdown stop. Distance steps get no beeps, since GPS decides when
+    they end.
+  - Beeps follow the announcements toggle and use the same audio session
+    as the speech (`RunAnnouncementAudio`): music ducks for the countdown
+    and stays ducked between beeps, held for 1.2 seconds after each, then
+    the session is given back with the same retries as P2's fix, so music
+    resumes.
+  - iOS only, no server change. Not covered: a countdown for distance
+    steps, a separate switch for beeps and speech.
+  - Done once the owner has run intervals on a TestFlight build with it and
+    heard the beeps and every step's cue, with music resuming after.
+
 ## Execution frontier
 
 - P3
@@ -507,6 +565,7 @@ coach sees it in the same place as Garmin runs.
 - P6
 - P7
 - P8
+- P9
 
 ## Dependencies
 
@@ -518,6 +577,8 @@ coach sees it in the same place as Garmin runs.
 | P7 | gated_by | external:owner-run-recorder-device-verification | Heart rate after the stop needs the owner's strap on a real run. |
 | P7 | coordinates_with | plan:apple-watch | Heart rate after the stop on a Watch needs the Watch recorder's own session handling. |
 | P8 | gated_by | external:owner-run-recorder-device-verification | The Lock Screen card and the pages need a planned run on the owner's iPhone. |
+| P9 | gated_by | external:owner-run-recorder-device-verification | The beeps and short cues need intervals on the owner's iPhone with music playing. |
+| P9 | coordinates_with | plan:planned-runs#P3 | P9 changes the spoken step cues planned-runs P3 introduced. |
 
 Phases run in order: P1 needs P0's upload path, and P2's Live Activity
 mirrors P1's session.
@@ -549,6 +610,12 @@ that sends it, then one recorded run with a pause of each kind.
 P8 (time left in the lap on the Lock Screen and the recorder's pages) is
 in the repository, iOS only, with no server change; it reaches the phone
 with the next TestFlight build, then needs one planned run.
+
+From the owner's 2026-11-17 run on build 83: P4's quicker pause once the
+phone is still and P9 (3-2-1 beeps, short step cues) are iOS only, with no
+server change. They reach the phone with the next TestFlight build on the
+owner's go-ahead; then one interval run with stops and music checks both.
+App Store 1.2 waits for the recorder (the owner's choice, 2026-11-16).
 
 P3 runs on the owner's iPhone. P1 and P2 are delivered in the repository;
 their HealthKit, location, ActivityKit and speech calls

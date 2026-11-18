@@ -175,9 +175,13 @@ final class RunRecorderModel: ObservableObject {
     /// The latest fix auto-pause considered, so a late or repeated fix
     /// can't count twice.
     private var lastSpeedFix: Date?
-    /// Moves the plan on once a second, so a timed step ends on time even
-    /// when no new distance or heart rate arrives.
+    /// Moves the plan on at least once a second, and right on each of a
+    /// timed step's last three seconds and its end, so the countdown beeps
+    /// and the next step's announcement come on time even when no new
+    /// distance or heart rate arrives.
     private var planTicker: Task<Void, Never>?
+    /// The 3-2-1 beeps before a timed step ends (P9).
+    private var stepCountdown = RunStepCountdown()
     /// The progress before each step the plan ended on its own since the
     /// last skip, so a pause dated back to a GPS fix can undo a step that
     /// only ended because of the time the pause removes.
@@ -454,7 +458,10 @@ final class RunRecorderModel: ObservableObject {
         self.run = run
         phase = .paused
         autoPauseDetector.reset()
-        if start < time { reconcilePlan() }
+        if start < time {
+            reconcilePlan()
+            rewindCountdown()
+        }
         engine?.pause()
         checkpoint(force: true)
         refreshLiveActivity(force: true)
@@ -735,6 +742,7 @@ final class RunRecorderModel: ObservableObject {
         planTicker?.cancel()
         planTicker = nil
         planHistory = []
+        stepCountdown = RunStepCountdown()
         RunRecorderControl.handler = nil
     }
 
@@ -870,12 +878,14 @@ final class RunRecorderModel: ObservableObject {
         planSteps = run.plan.flatMap { RunPlan(json: $0.runSteps) }?.expandedSteps ?? []
         planHistory = []
         targetCoach = RunTargetCoach()
+        stepCountdown = RunStepCountdown()
         planTicker?.cancel()
         planTicker = nil
         guard !planSteps.isEmpty else { return }
         planTicker = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(1))
+                let wait = self?.nextPlanTick() ?? 1
+                try? await Task.sleep(for: .seconds(wait))
                 guard !Task.isCancelled else { return }
                 self?.advancePlan()
             }
@@ -887,6 +897,16 @@ final class RunRecorderModel: ObservableObject {
     var currentPlanStep: RunPlan.ExpandedStep? {
         guard let index = run?.plan?.progress.stepIndex, planSteps.indices.contains(index) else { return nil }
         return planSteps[index]
+    }
+
+    /// Seconds until the plan ticker should look again: just past the
+    /// current timed step's next countdown second or its end, and at most a
+    /// second.
+    private func nextPlanTick() -> Double {
+        guard phase == .running, let run, let progress = run.plan?.progress,
+              let duration = currentPlanStep?.step.durationSeconds else { return 1 }
+        let left = progress.stepStartSeconds + Double(duration) - run.activeSeconds(at: now())
+        return RunStepCountdown.wait(secondsLeft: left)
     }
 
     /// Ends every step the run has finished, by moving time or distance.
@@ -906,19 +926,41 @@ final class RunRecorderModel: ObservableObject {
             announceStep()
             refreshLiveActivity(force: true)
         } else {
+            countDownStep()
             coachTarget()
         }
     }
 
-    /// Says the step the run is now on, or that the plan is done, and starts
+    /// Beeps on each of a timed step's last three seconds; the next step's
+    /// announcement follows at its end.
+    private func countDownStep() {
+        guard let run, let progress = run.plan?.progress, let step = currentPlanStep else { return }
+        let elapsed = run.activeSeconds(at: now()) - progress.stepStartSeconds
+        guard stepCountdown.beep(stepIndex: progress.stepIndex, step: step.step,
+                                 stepStartSeconds: progress.stepStartSeconds, elapsed: elapsed) != nil else { return }
+        beep()
+    }
+
+    /// A pause dated back to its fix gives back moving time, possibly time
+    /// the countdown already beeped, so the beeps from there on come again
+    /// when the runner sets off.
+    private func rewindCountdown() {
+        guard let run, let progress = run.plan?.progress, let step = currentPlanStep,
+              let duration = step.step.durationSeconds else { return }
+        let left = progress.stepStartSeconds + Double(duration) - run.activeSeconds(at: now())
+        stepCountdown.rewind(stepIndex: progress.stepIndex, stepStartSeconds: progress.stepStartSeconds,
+                             secondsLeft: left)
+    }
+
+    /// Says the step the run is now on, or that the plan is done, and starts    /// Says the step the run is now on, or that the plan is done, and starts
     /// watching the new step's target.
     private func announceStep() {
-        guard let run, let progress = run.plan?.progress, !planSteps.isEmpty else { return }
+        guard let run, run.plan != nil, !planSteps.isEmpty else { return }
         targetCoach.startStep(at: run.activeSeconds(at: now()))
         if let step = currentPlanStep {
-            speak(RunPlanFormat.spoken(step, index: progress.stepIndex, count: planSteps.count, unit: unit))
+            speak(RunPlanFormat.spoken(step, unit: unit), urgent: true)
         } else {
-            speak("Plan complete. Keep going or end the run.")
+            speak("Plan complete. Keep going or end the run.", urgent: true)
         }
     }
 
@@ -1035,10 +1077,17 @@ final class RunRecorderModel: ObservableObject {
     }
 
     /// Spoken only while announcements are on.
-    private func speak(_ text: String) {
+    private func speak(_ text: String, urgent: Bool = false) {
         guard announcesSplits else { return }
         if speaker == nil { speaker = makeSpeaker() }
-        speaker?.speak(text)
+        speaker?.speak(text, urgent: urgent)
+    }
+
+    /// A countdown beep, only while announcements are on, like the speech.
+    private func beep() {
+        guard announcesSplits else { return }
+        if speaker == nil { speaker = makeSpeaker() }
+        speaker?.beep()
     }
 
     /// A Live Activity button. Only the run being recorded answers; a
