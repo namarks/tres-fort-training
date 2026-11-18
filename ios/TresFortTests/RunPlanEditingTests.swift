@@ -46,6 +46,40 @@ final class RunPlanEditingTests: XCTestCase {
         XCTAssertNil(draft.plan)
     }
 
+    /// A step tapped on a run's details (planned-runs P10) changes only
+    /// that step: a plain one, or one inside a repeat group.
+    func testOneTappedStepChangesAndTheRestStay() throws {
+        let cooldown = RunPlan.StepPath(item: 2, step: nil)
+        XCTAssertEqual(intervals.step(at: cooldown)?.kind, .cooldown)
+        var easier = try XCTUnwrap(intervals.step(at: cooldown))
+        easier.target = .heartRate(minBPM: 125, maxBPM: 145)
+        let changed = try XCTUnwrap(intervals.replacing(cooldown, with: easier))
+        XCTAssertEqual(changed.items[0], intervals.items[0])
+        XCTAssertEqual(changed.items[1], intervals.items[1])
+        XCTAssertEqual(changed.step(at: cooldown), easier)
+
+        let recovery = RunPlan.StepPath(item: 1, step: 1)
+        var walk = try XCTUnwrap(intervals.step(at: recovery))
+        walk.durationSeconds = 60
+        let inRepeat = try XCTUnwrap(intervals.replacing(recovery, with: walk))
+        XCTAssertEqual(inRepeat.items[1], .repeated(times: 4, steps: [
+            .init(kind: .work, durationSeconds: nil, distanceMeters: 800,
+                  target: .pace(fastestSecondsPerKm: 245, slowestSecondsPerKm: 255)),
+            walk,
+        ]))
+        XCTAssertEqual(inRepeat.items[2], intervals.items[2])
+    }
+
+    func testAPathThatNamesNoStepChangesNothing() {
+        let step = RunPlan.Step(kind: .work, durationSeconds: 60, distanceMeters: nil, target: nil)
+        let paths: [RunPlan.StepPath] = [.init(item: 3, step: nil), .init(item: 1, step: nil),
+                                         .init(item: 1, step: 2), .init(item: 0, step: 0)]
+        for path in paths {
+            XCTAssertNil(intervals.step(at: path), "\(path)")
+            XCTAssertNil(intervals.replacing(path, with: step), "\(path)")
+        }
+    }
+
     func testAddingARepeatGivesWorkAndRecovery() {
         var draft = RunPlanDraft(plan: nil)
         draft.addRepeat()

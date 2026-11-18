@@ -8,23 +8,26 @@ struct RunPlanStepsView: View {
     let plan: RunPlan
     let unit: RunDistanceUnit
     var size: CGFloat = 13
+    /// Set where a step can be changed (a run's details): each step becomes
+    /// a button that hands back where it sits in the plan.
+    var onSelect: ((RunPlan.StepPath) -> Void)? = nil
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let list = VStack(alignment: .leading, spacing: 8) {
             if let total = RunPlanFormat.total(plan, unit: unit) {
                 Text("TOTAL  " + total)
                     .font(Theme.mono(12, .bold)).tracking(1).foregroundStyle(Theme.muted)
             }
-            ForEach(Array(plan.items.enumerated()), id: \.offset) { _, item in
+            ForEach(Array(plan.items.enumerated()), id: \.offset) { index, item in
                 switch item {
                 case .step(let step):
-                    RunPlanStepRow(step: step, unit: unit, size: size)
+                    row(step, at: RunPlan.StepPath(item: index, step: nil))
                 case .repeated(let times, let steps):
                     VStack(alignment: .leading, spacing: 6) {
                         Label(RunPlanFormat.repeatTitle(times), systemImage: "repeat")
                             .font(Theme.mono(12, .bold)).tracking(1).foregroundStyle(Theme.text)
-                        ForEach(Array(steps.enumerated()), id: \.offset) { _, step in
-                            RunPlanStepRow(step: step, unit: unit, size: size)
+                        ForEach(Array(steps.enumerated()), id: \.offset) { offset, step in
+                            row(step, at: RunPlan.StepPath(item: index, step: offset))
                         }
                     }
                     .padding(10)
@@ -34,8 +37,37 @@ struct RunPlanStepsView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("runPlan.steps")
+        // Read as one passage, unless each step is its own button.
+        list.accessibilityElement(children: onSelect == nil ? .combine : .contain)
+            .accessibilityIdentifier("runPlan.steps")
+    }
+
+    @ViewBuilder
+    private func row(_ step: RunPlan.Step, at path: RunPlan.StepPath) -> some View {
+        if let onSelect {
+            Button { onSelect(path) } label: {
+                HStack(spacing: 8) {
+                    RunPlanStepRow(step: step, unit: unit, size: size)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .bold)).foregroundStyle(Theme.dim)
+                        .accessibilityHidden(true)
+                }
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityElement(children: .combine)
+            .accessibilityHint("Change this step's time or target")
+            .accessibilityIdentifier(Self.identifier(path))
+        } else {
+            RunPlanStepRow(step: step, unit: unit, size: size)
+        }
+    }
+
+    /// "runPlan.step.0" for a plain step, "runPlan.step.1.0" for the first
+    /// step of a repeat.
+    static func identifier(_ path: RunPlan.StepPath) -> String {
+        "runPlan.step.\(path.item)" + (path.step.map { ".\($0)" } ?? "")
     }
 }
 

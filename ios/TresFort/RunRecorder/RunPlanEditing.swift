@@ -36,6 +36,39 @@ extension RunPlan {
         }
     }
 
+    /// Where one step sits in the plan: a plain step is its item; a step in
+    /// a repeat group is that item and its place in the group.
+    struct StepPath: Hashable {
+        var item: Int
+        var step: Int?
+    }
+
+    func step(at path: StepPath) -> Step? {
+        guard items.indices.contains(path.item) else { return nil }
+        switch items[path.item] {
+        case .step(let step):
+            return path.step == nil ? step : nil
+        case .repeated(_, let steps):
+            guard let index = path.step, steps.indices.contains(index) else { return nil }
+            return steps[index]
+        }
+    }
+
+    /// The plan with one step changed and everything else as it was, or nil
+    /// when the path doesn't name a step of this plan.
+    func replacing(_ path: StepPath, with step: Step) -> RunPlan? {
+        guard self.step(at: path) != nil else { return nil }
+        var plan = self
+        switch items[path.item] {
+        case .step:
+            plan.items[path.item] = .step(step)
+        case .repeated(let times, var steps):
+            steps[path.step!] = step
+            plan.items[path.item] = .repeated(times: times, steps: steps)
+        }
+        return plan
+    }
+
     private static func object(_ step: Step) -> [String: Any] {
         var object: [String: Any] = ["kind": step.kind.rawValue]
         if let distance = step.distanceMeters {

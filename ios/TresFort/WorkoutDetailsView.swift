@@ -23,7 +23,26 @@ struct WorkoutDetailsView: View {
     @State private var choosingEdit = false
     /// Edit on a date's run opens the run screen for that day.
     @State private var editingRunForDay = false
+    /// A run's step tapped on this screen (planned-runs P10).
+    @State private var editingStep: StepEdit?
+    @State private var savingStep = false
     private let unit = RunDistanceUnit.preferred()
+
+    private struct StepEdit: Identifiable {
+        let path: RunPlan.StepPath
+        let step: RunPlan.Step
+        /// The steps as shown when the step was tapped; the change applies
+        /// to these, so a refresh meanwhile can't move it to another step.
+        let plan: RunPlan
+        let change: StepChange
+        let version: Int
+        var id: RunPlan.StepPath { path }
+    }
+
+    /// How a tapped step is saved for its day: on a run that is already
+    /// that day's own, or on a copy made for the day so the saved run and
+    /// the week stay as they are.
+    private enum StepChange { case inPlace(String), forDay(String) }
 
     private var shownID: String { copyID ?? workoutID }
     /// The workout as it reads on its date, with a block week's targets;
@@ -47,6 +66,22 @@ struct WorkoutDetailsView: View {
               sync.previewWorkout(forDateString: date)?.id == workout.id,
               sync.calendarAssignmentUnavailableReason(date: date) == nil else { return nil }
         return date
+    }
+
+    /// Whether a run's steps can be changed right here, for its day only
+    /// (planned-runs P10). A saved run opened for a date that can still
+    /// change is copied for that day first. A run that is already one day's
+    /// own changes in place while that day can change, so a finished run's
+    /// record keeps the plan it was run against. A saved run opened with no
+    /// date only reads here; Edit changes it everywhere.
+    private func stepChange(for workout: Workout, shown plan: RunPlan) -> StepChange? {
+        guard !workout.isArchived, !savingStep, !copying, !sync.isRoutineMutationInFlight else { return nil }
+        if let day = changeDate(for: workout) { return .forDay(day) }
+        guard let day = workout.one_time_date,
+              sync.calendarAssignmentUnavailableReason(date: day) == nil,
+              // In place, the steps shown must be the run's own.
+              PlannedRunCreation.runSlot(in: sync.workout(id: workout.id))?.runPlan == plan else { return nil }
+        return .inPlace(day)
     }
 
     private func dayName(_ ymd: String) -> String {
@@ -74,7 +109,15 @@ struct WorkoutDetailsView: View {
                             .padding(16)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14))
-                        RunPlanStepsView(plan: plan, unit: unit, size: 14)
+                        let change = stepChange(for: workout, shown: plan)
+                        RunPlanStepsView(plan: plan, unit: unit, size: 14,
+                                         onSelect: change.map { selectStep(in: plan, change: $0) })
+                        if savingStep {
+                            Text("Saving…").font(.footnote).foregroundStyle(Theme.muted)
+                        } else if let change {
+                            Text(stepChangeNote(change))
+                                .font(.footnote).foregroundStyle(Theme.muted)
+                        }
                     } else {
                         WorkoutExercisePreview(sync: sync, exercises: workout.exercises)
                     }
@@ -139,6 +182,11 @@ struct WorkoutDetailsView: View {
                 }
             }
         }
+        .sheet(item: $editingStep) { edit in
+            NavigationStack {
+                RunStepEditorView(step: edit.step, unit: unit) { saveStep(edit, as: $0) }
+            }
+        }
         .confirmationDialog("Edit \(workout?.name ?? "this workout")", isPresented: $choosingEdit,
                             titleVisibility: .visible) {
             if let workout, let changeDate = changeDate(for: workout) {
@@ -166,6 +214,53 @@ struct WorkoutDetailsView: View {
             editingRunForDay = true
         } else {
             choosingEdit = true
+        }
+    }
+
+    private func selectStep(in plan: RunPlan, change: StepChange) -> (RunPlan.StepPath) -> Void {
+        { path in
+            guard let step = plan.step(at: path), let version = sync.plan?.version else { return }
+            editingStep = StepEdit(path: path, step: step, plan: plan, change: change, version: version)
+        }
+    }
+
+    private func stepChangeNote(_ change: StepChange) -> String {
+        switch change {
+        case .forDay(let day), .inPlace(let day):
+            return "Tap a step to change its time or target for \(dayName(day)) only."
+        }
+    }
+
+    /// Saves one changed step: on the run itself, or on a copy made for the
+    /// day, which this screen then shows. Unchanged steps save nothing.
+    private func saveStep(_ edit: StepEdit, as step: RunPlan.Step) {
+        guard step != edit.step, let changed = edit.plan.replacing(edit.path, with: step) else { return }
+        savingStep = true
+        Task {
+            defer { savingStep = false }
+            let id: String
+            var version = edit.version
+            switch edit.change {
+            case .inPlace:
+                id = shownID
+            case .forDay(let day):
+                guard let source = sync.workout(id: shownID),
+                      let made = await sync.makeOneTimeWorkout(date: day, from: source) else { return }
+                copyID = made
+                id = made
+                // The create can land while its refresh fails; fetch once more.
+                if PlannedRunCreation.runSlot(in: sync.workout(id: made)) == nil { await sync.load() }
+                // The copy holds the steps the day showed; anything else
+                // means the day changed meanwhile and needs another look.
+                guard PlannedRunCreation.runSlot(in: sync.workout(id: made))?.runPlan == edit.plan,
+                      let current = sync.plan?.version else {
+                    sync.loadError = "This day's run changed. Check its steps and try again."
+                    return
+                }
+                version = current
+            }
+            guard let slot = PlannedRunCreation.runSlot(in: sync.workout(id: id)) else { return }
+            _ = await sync.updateRunSteps(dayID: id, teID: slot.id, steps: changed, expectedVersion: version)
         }
     }
 
