@@ -107,6 +107,8 @@ enum EventGoal {
         let hasHours = match.range(at: 1).location != NSNotFound
         let hours = group(1)
         if hasHours && hours == nil { return nil }
+        // Over a week is never a goal time; checking first keeps the sum from overflowing.
+        if let hours, hours > 7 * 24 { return nil }
         guard let minutes = group(2), let seconds = group(3) else { return nil }
         if seconds >= 60 || (hours != nil && minutes >= 60) { return nil }
         let total = (hours ?? 0) * 3_600 + minutes * 60 + seconds
@@ -341,11 +343,19 @@ struct EventGoalDraft: Equatable {
                 guard let amount = Double(typed), amount.isFinite, amount > 0 else {
                     return .failure(.init("Enter the distance as a number."))
                 }
-                let value = (amount * customUnit.meters * 10).rounded() / 10
-                if value > 1_000_000 { return .failure(.init("That distance is too long.")) }
-                if value <= 0 { return .failure(.init("Enter the distance as a number.")) }
-                meters = value
-                distance = "\(Self.amountText(amount)) \(customUnit.rawValue)"
+                if let original, let saved = original.distance_m,
+                   typed == Self.amountText(saved / customUnit.meters) {
+                    // Untouched since it opened: keep the saved distance exactly,
+                    // not the two-decimal figure the field shows.
+                    meters = saved
+                    distance = original.distance ?? "\(typed) \(customUnit.rawValue)"
+                } else {
+                    let value = (amount * customUnit.meters * 10).rounded() / 10
+                    if value > 1_000_000 { return .failure(.init("That distance is too long.")) }
+                    if value <= 0 { return .failure(.init("Enter the distance as a number.")) }
+                    meters = value
+                    distance = "\(Self.amountText(amount)) \(customUnit.rawValue)"
+                }
             case .text:
                 let text = distanceLabel.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !text.isEmpty { distance = text }

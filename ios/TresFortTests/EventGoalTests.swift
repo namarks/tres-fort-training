@@ -31,6 +31,9 @@ final class EventGoalTests: XCTestCase {
         XCTAssertNil(EventGoal.parseGoalTime("1:60:00"))
         XCTAssertNil(EventGoal.parseGoalTime("18:5"))
         XCTAssertNil(EventGoal.parseGoalTime("fast"))
+        XCTAssertNil(EventGoal.parseGoalTime("9999999999999999:00:00"), "Huge hours are refused, not overflowed")
+        XCTAssertNil(EventGoal.parseGoalTime("169:00:00"))
+        XCTAssertEqual(EventGoal.parseGoalTime("168:00:00"), 7 * 24 * 3_600)
         XCTAssertEqual(EventGoal.goalTimeText(1_200), "20:00")
         XCTAssertEqual(EventGoal.goalTimeText(6_330), "1:45:30")
     }
@@ -107,6 +110,21 @@ final class EventGoalTests: XCTestCase {
         XCTAssertEqual(odd.distanceChoice, .custom)
         XCTAssertEqual(odd.customUnit, .km)
         XCTAssertEqual(odd.customAmount, "1.2")
+
+        // A distance the field can only show rounded is kept exactly until it's edited.
+        let track = PlanEvent(name: "Track 400", date: "2027-05-01", discipline: "running",
+                              distance: "400 m", distance_m: 400)
+        var lap = EventGoalDraft(event: track, unit: .miles)
+        XCTAssertEqual(lap.customAmount, "0.25")
+        XCTAssertFalse(lap.canSave, "Opening it changes nothing")
+        lap.name = "Track 400 m"
+        guard case .success(let renamed) = lap.event() else { return XCTFail("The draft is valid") }
+        XCTAssertEqual(renamed.distance_m, 400)
+        XCTAssertEqual(renamed.distance, "400 m")
+        lap.customAmount = "0.5"
+        guard case .success(let longer) = lap.event() else { return XCTFail("The draft is valid") }
+        XCTAssertEqual(longer.distance, "0.5 mi")
+        XCTAssertEqual(longer.distance_m ?? 0, 804.7, accuracy: 0.05)
 
         let textOnly = EventGoalDraft(event: PlanEvent(name: "Hill climb", date: "2027-05-01",
                                                        discipline: "running", distance: "About 7 miles"),
