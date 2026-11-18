@@ -1,6 +1,6 @@
 # Positioning (open source deferred)
 
-Slug: positioning-and-open-source · Status: active · Updated: 2026-11-08 · Theme: platform
+Slug: positioning-and-open-source · Status: gated · Updated: 2026-11-18 · Theme: platform
 
 ## Goal
 
@@ -23,14 +23,23 @@ on 2026-11-02 (see Notes).
     1280 px. The owner approved the website deploy on 2026-11-01: the new website serves tresfort.app with the new title and hero;
     the homepage, /privacy and assets return 200 and the email DNS records are
     unchanged.
-- [ ] **P1 — In-app copy**
+- [x] **P1 — In-app copy**
   - Onboarding and Profile → Coach wording treats AI as an add-on, without
     changing behavior.
+  - Checked in public main on 2026-11-18: onboarding opens with "Everything
+    you train. One plan." and its two optional steps are the member's usual
+    week and the apps they already use, with no AI step (member-activation
+    P5's shorter setup). Profile keeps the AI coach behind "Set up your AI
+    coach", and the coach screens say the plan and history stay in Très
+    Fort. Both are in TestFlight 1.2 (83).
 - [ ] **P2 — App Store listing**
   - Subtitle "One plan for all your training", a new description and keywords,
     for the first App Store version that ships the run recorder. Version 1.0
     (build 55) keeps its current listing, because it has no run recorder and is
     already in review.
+  - The owner approved a new subtitle and keywords for 1.1 (70), live since
+    2026-11-09 ([App Store plan](../app-store-submission/plan.md)). The
+    description and a recorder screenshot come with 1.2.
 
 - [x] **P3 — Website after the App Store release** (live 2026-11-08)
   - The home page links the live App Store listing and the web app (a Log in
@@ -45,18 +54,20 @@ on 2026-11-02 (see Notes).
 
 ## Execution frontier
 
-- P1
+- P2
 
 ## Dependencies
 
 | Local phase | Relationship | Target | Reason |
 |---|---|---|---|
-| P2 | gated_by | external:owner-app-store-next-version | The listing changes with the first App Store version after 1.0 that includes the run recorder; 1.0 is in review and must not be pulled. |
+| P2 | gated_by | external:owner-app-store-next-version | The listing changes with the first App Store version that includes the run recorder (1.2). |
 
 ## Next step
 
-**Now (@agent):** P1 in-app copy, so onboarding and Profile → Coach treat AI
-as an add-on.
+**Now (@owner):** P2 with App Store 1.2: a description that leads with one
+plan across sports and AI as optional, plus a recorder screenshot, once the
+run recorder is ready (see the [App Store plan](../app-store-submission/plan.md)).
+P1's in-app copy is done.
 
 ## Notes / open questions
 

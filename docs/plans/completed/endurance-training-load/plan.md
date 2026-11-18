@@ -1,6 +1,6 @@
 # Real training load for endurance workouts
 
-Slug: endurance-training-load · Status: active · Updated: 2026-11-08 · Theme: connected-training
+Slug: endurance-training-load · Status: done · Archived: completed · Updated: 2026-11-18 · Theme: connected-training
 
 ## Goal
 
@@ -113,16 +113,20 @@ requiring intervals.icu or an AI coach. Done means:
     Imported workouts appear in the group feed like intervals.icu ones.
   - Covered by `test/fit_file.test.ts`, `test/fit_import.test.ts` (with a
     test FIT writer in `test/fitWriter.ts`) and `FitImportTests.swift`.
-- [ ] **P5 — Garmin activity files**
+- [x] **P5 — Garmin activity files**
   - With Garmin's Starter API approval, receive activity files directly and
     run them through the same engine.
-  - Starter access was approved on 2026-11-07; the direct connection is
-    planned and built in [Garmin data in Tres Fort](../garmin/plan.md) P2.
+  - Starter access was approved on 2026-11-07; the direct connection was
+    built in [Garmin data in Tres Fort](../../garmin/plan.md) P2 and released
+    to the server on 2026-11-08 (migration `0071`): each Garmin activity
+    file goes through the `.fit` pipeline as `source='garmin'` and is scored
+    by this engine. The owner's check of a real Garmin run and ride, and the
+    member launch (no earlier than 2026-12-08), belong to the Garmin plan.
 - [x] **P6 — Effort fallback**
   - A one-tap "How hard was it?" (1 to 10) on imported workouts with no usable
     data gives a session-RPE load, labeled as an estimate.
   - Delivered for every sport, not only runs, rides and swims, by
-    [sport-activities P2](../sport-activities/plan.md): migration `0066`,
+    [sport-activities P2](../../sport-activities/plan.md): migration `0066`,
     `load_method='effort'`, one hour at effort 7 is 100.
 - [x] **P7 — Starting values from intervals.icu**
   - Every activity intervals.icu sends carries the sport settings it was
@@ -155,11 +159,12 @@ requiring intervals.icu or an AI coach. Done means:
 
 ## Next step
 
-**Now (@agent):** P5 is delivered by the [Garmin plan](../garmin/plan.md)
-P2 (Starter access approved 2026-11-07); every other phase is in the
-repository. P6 shipped as sport-activities P2, whose migration `0066`, Worker
-deploy and app build each need the owner's separate go-ahead. Migrations
-`0059` to `0064` are in production.
+**Done (2026-11-18):** every phase is delivered and released. Migrations
+`0059` to `0066` and the Garmin path (`0071`) are in production, the API and
+web app were last released from public main on 2026-11-17, and TestFlight
+1.2 (83) carries the thresholds screen and load display. Device checks of
+Garmin workouts stay with the [Garmin plan](../../garmin/plan.md) P3; the
+calendar heuristic and swim threshold below are separate future decisions.
 
 ## Notes / open questions
 
@@ -168,7 +173,7 @@ deploy and app build each need the owner's separate go-ahead. Migrations
   contract and is left for a separate decision.
 - The owner chose on 2026-11-01 that endurance workouts need real load
   ("otherwise a serious athlete won't use my app"). This plan is outside the
-  [Connected Training](../../initiatives/connected-training.md) initiative,
+  [Connected Training](../../../initiatives/connected-training.md) initiative,
   whose priority policy keeps missing load unknown rather than adding a
   physiology engine; that rule still holds for workouts with no usable data.
 - Heart-rate load uses (heart rate / threshold heart rate)² per second, so one

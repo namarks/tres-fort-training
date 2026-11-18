@@ -1,6 +1,6 @@
 # Bring Your Own AI Coach
 
-Slug: bring-your-own-ai-coach · Status: gated · Updated: 2026-11-11 · Theme: coaching
+Slug: bring-your-own-ai-coach · Status: gated · Updated: 2026-11-18 · Theme: coaching
 
 ## Goal
 
@@ -91,9 +91,11 @@ Repository delivery and actual provider connection/release evidence remain disti
     plugin manifest, and add ChatGPT steps (custom MCP server) to `/connect`.
   - [x] Reuse the standing review code and synthetic review account from P6
     for OpenAI's reviewers.
-  - [ ] Owner-authorized release of the Worker and website from the Mac.
+  - [x] Owner-authorized release of the Worker and website from the Mac
+    (2026-11-08).
   - [ ] Owner adds Très Fort in ChatGPT as a custom MCP server, checks a read and
-    a write, and records the demo video.
+    a write, and records the demo video. The owner added it on 2026-11-08;
+    the demo video is still to record.
   - [ ] Owner verifies an identity on the OpenAI Platform, verifies the domain
     with the issued token, scans tools and submits.
   - [ ] After approval and publication produce a real listing URL, add ChatGPT
@@ -167,8 +169,8 @@ Repository delivery and actual provider connection/release evidence remain disti
   - [x] Review member created in production D1 (no Apple sign-in), secrets set,
     API released on 2026-11-08, and the code
     verified end to end; test plan seeded through MCP.
-  - [ ] Owner deploys the website (`tresfort.app/connect`) and submits in the
-    portal.
+  - [x] Owner deploys the website (`tresfort.app/connect`) and submits in the
+    portal (both 2026-11-08).
   - [ ] After listing, point **Connect with Claude** at the issued directory URL,
     update the guide, and verify find → connect → approve → read → edit → app
     sync → disconnect on iPhone.
@@ -186,7 +188,9 @@ Repository delivery and actual provider connection/release evidence remain disti
     edits, and Sign in with Apple returns only to a `/coach/authorize` request.
   - [x] The iPhone setup screen offers ChatGPT with three steps.
   - [ ] Owner-authorized release of the Worker, web app and an iOS build, then a
-    real ChatGPT or Claude connection approved with Apple on a computer.
+    real ChatGPT or Claude connection approved with Apple on a computer. The
+    Worker and web app were released on 2026-11-08 and later TestFlight builds
+    carry the iPhone ChatGPT option; the real approval with Apple remains.
 
 - [ ] **P8 — Connect Claude from the phone in fewer taps**
   - The owner found iPhone setup too long (2026-11-10): a consent screen to
@@ -255,21 +259,23 @@ Repository delivery and actual provider connection/release evidence remain disti
 
 ## Next step
 
-**Now (@owner):** P8. Send the logo permission requests to Anthropic and
-OpenAI. Once a TestFlight build carries the new setup, connect Claude from the
-phone and confirm it reads well and returns to Claude.
+**Now (@owner):** P8 on TestFlight 1.2 (83), which carries the shorter
+setup: Profile → set up coach → Allow and connect Claude → confirm in Claude
+→ review access in Très Fort → Allow and return to Claude. Also send the logo
+permission requests to Anthropic and OpenAI if they have not gone yet.
 
-**Also now (@owner):** P6. Deploy the website so `tresfort.app/connect` is live,
-then submit in Anthropic's portal using the
-Claude directory worksheet.
-The review account, secrets and API release are done.
+**Also now (@owner):** P6 was submitted in Anthropic's portal on 2026-11-08;
+when the listing is issued, point **Connect with Claude** at it and verify
+the round trip on the iPhone.
 
-**Also now (@owner):** P4. Release the Worker (domain challenge) and website
-(`/terms`, ChatGPT steps in `/connect`), add Très Fort in ChatGPT as a
-custom MCP server and record the demo video, then submit in OpenAI's portal using
-the ChatGPT submission worksheet.
+**Also now (@owner):** P4. The Worker (domain challenge) and website
+(`/terms`, ChatGPT steps in `/connect`) are live and Très Fort is added in
+the owner's ChatGPT. Left: record the demo video, verify an identity on the
+OpenAI Platform, set the domain token and submit, using the ChatGPT
+submission worksheet. P7's real approval with Apple can be checked during
+the same ChatGPT session.
 
-**Also now (@owner):** Install TestFlight 1.0 (42) and complete the real-provider
+**Also now (@owner):** On TestFlight 83 or later, complete the real-provider
 connection, coaching read, reversible edit, iOS sync and disconnect/reconnect
 checks. Claude's install link and native approval are released, but their full
 physical-iPhone round trip has not been verified. Codex's direct connection still
@@ -280,8 +286,8 @@ mode and whether a dot can use that connection is deferred by the owner
 (2026-10-07). The sign-in hardening from
 PR #239 (accepting
 `offline_access`, path-inserted discovery, recipient naming, logging refused
-OAuth requests for `wrangler tail`) is merged and must be released under owner
-authority before it applies in production.
+OAuth requests for `wrangler tail`) is in the source and in the API released
+from public main on 2026-11-17.
 
 **Release complete (2026-09-14 Pacific):** The owner authorized the latest
 production and TestFlight release. The reviewed source serves 100% of traffic;

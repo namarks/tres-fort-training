@@ -1,6 +1,6 @@
 # Workout Library
 
-Slug: workout-library · Status: active · Updated: 2026-11-15 · Theme: gym-floor
+Slug: workout-library · Status: gated · Updated: 2026-11-18 · Theme: gym-floor
 
 ## Goal
 
@@ -645,7 +645,7 @@ No second editor, no per-session template copies, no weeks table.
     conflict journeys passed. Largest-text evidence remains partial; release
     and physical-device acceptance are separate.
 
-- [ ] **P0.14 — Adapt grouped work during a solo session**
+- [x] **P0.14 — Adapt grouped work during a solo session**
   - Add an extra superset or circuit round from the active group or finish
     review. Increase every member together; explain that the added round
     includes every movement. Preserve original starting targets and the saved
@@ -659,8 +659,13 @@ No second editor, no per-session template copies, no weeks table.
   - Verify queued-set and cold recovery, skipped members, completed groups,
     additional-session isolation, failed persistence rollback and timer/partner
     guards. Qualify native code and the actual runner controls before delivery.
+  - Delivered with P0.15 in public PR #9, which Nick merged on 2026-11-16.
+    Required CI was green on the reviewed head and the full native run passed
+    on the head before a docs-only merge; independent local review was clean.
+    It reached the API and web releases of 2026-11-17 and TestFlight 1.2
+    (83). Physical acceptance remains with P0.7(b)'s release gate.
 
-- [ ] **P0.15 — Preserve unfinished block setup and workout details**
+- [x] **P0.15 — Preserve unfinished block setup and workout details**
   - Retain web new-block name, start, week count and repetition, plus the
     reviewed source week/version, across navigation and reload. A conflicting
     new block is not permission to overwrite it.
@@ -675,6 +680,9 @@ No second editor, no per-session template copies, no weeks table.
     competing block creation and acknowledged saves with failed refresh.
     Other forms (event/away dates, new group and run-step authoring) are not
     covered by this bounded slice and must not be described as draft-safe.
+  - Delivered with P0.14 in public PR #9 (merged 2026-11-16), released on
+    the web on 2026-11-17 and in TestFlight 1.2 (83). Native dirty-sheet
+    protection does not promise persistence through the app being closed.
 
 - [x] **P1 — Library metadata: tags and archive**
   - Reuse prescription-integrity's validated atomic writer contract for every
@@ -862,8 +870,6 @@ reviewed lighter week belongs to [coach-free planning P2](../coach-free-planning
 
 - P0.2(b)
 - P0.7(b)
-- P0.14
-- P0.15
 
 ## Dependencies
 
@@ -892,14 +898,15 @@ completed coaching context.
 
 ## Next step
 
-**Now (@agent):** Qualify `codex/lifting-core-ux` in the public repository and
-hand its PR to the owner for merge. It implements P0.14 (extra grouped rounds
-and scoped rest changes) and P0.15 (unfinished block setup and workout details).
-These phases remain open until exact-head qualification and repository delivery.
-Coordinate
-with [progressive plans P6](../progressive-plans/plan.md) and
-[coach-free planning P2](../coach-free-planning/plan.md). These are the owner's
-selected core UX priorities, ahead of shared ending/invitation recovery.
+**Now (@owner):** On TestFlight 1.2 (83) or later, try the core lifting
+pass from public PR #9 (merged 2026-11-16, released with the API and web app
+on 2026-11-17): add an extra round to a circuit or superset mid-workout and
+change its remaining rests, then leave a new block's setup or a workout's
+details half done and come back to it. This is the acceptance P0.7(b) and
+P0.2(b) already wait on; no implementation phase in this plan is open.
+Shared ending and invitation recovery
+([partner training P0.2](../partner-training/plan.md)) is the next lifting
+candidate once the owner selects it.
 
 P0.7(a) and P0.8–P0.13 are delivered in the source inherited by the public
 repository. Accurate shared exercise instructions are also delivered; their

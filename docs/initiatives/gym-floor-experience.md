@@ -1,6 +1,6 @@
 # Gym-Floor Experience
 
-Slug: gym-floor-experience · Status: active · Updated: 2026-11-15
+Slug: gym-floor-experience · Status: active · Updated: 2026-11-18
 
 ## Objective
 
@@ -46,6 +46,12 @@ status and acceptance; this initiative only orders their work:
 3. Make manual progression reachable: edit one or later block weeks from the
    phone and preview a lighter week on phone/web. Distinguish active session,
    indexed block week (including repeated cycles) and reusable workout.
+
+Public PR #9 (merged 2026-11-16) delivered all four selected nodes, and the
+2026-11-17 API, web and TestFlight 1.2 (83) releases carry them. The child
+plans record the owner's device acceptance that remains. Selecting the next
+lifting slice (for example partner training's shared ending and invitation
+recovery) is the owner's call; until then no node in this pass is runnable.
 
 Use the shared plan tree, versioned writers and runner checkpoint contract.
 Independent surfaces may proceed in parallel; shared editor changes coordinate

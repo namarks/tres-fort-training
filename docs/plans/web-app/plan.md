@@ -1,6 +1,6 @@
 # Plan on the web
 
-Slug: web-app · Status: active · Updated: 2026-11-16 · Theme: platform
+Slug: web-app · Status: active · Updated: 2026-11-18 · Theme: platform
 
 ## Goal
 
@@ -467,41 +467,33 @@ partner training are not web features.
 
 ## Next step
 
-**Now (@agent):** Deliver the web portions of the selected core lifting pass:
-[workout-library P0.15](../workout-library/plan.md) preserves new-block and
-workout-details drafts, and [coach-free planning P2](../coach-free-planning/plan.md)
-adds a reviewed lighter week using the existing retained block editor. Detailed
-week targets and ramps already exist; do not create a competing block editor.
+**Now (@owner):** Give the written go-ahead for a `tres-fort-web` release
+from current main, which carries the guided block start and the Add box by
+type (P2, public PR #13, merged 2026-11-17). It changes no API, so the API
+released on 2026-11-17 serves it. Then, signed in at `app.tresfort.app`,
+start a block with the three questions and add a run to an empty date by
+double-clicking it.
 
-The unified Plan weeks page and Activity map/wide-layout changes from public
-PR #4 are merged. The source also includes mixed-week creation, connection
-discovery, signed-out entry, primary date-only editing, Event analysis, Strength
-charts and exact workout correction. Earlier private PR numbers are historical
-source-delivery references, not pending public-repository work.
+Released on 2026-11-17 with the owner's go-ahead (API first, then the web
+app, both from main after public PR #12): the Plan tabs, the repeating week
+as the calendar's first row and the block beside it with its own Block tab
+(public PRs #11 and #12), and the web parts of the core lifting pass in
+public PR #9 (retained new-block and workout-detail drafts, workout-library
+P0.15, and the reviewed lighter week, coach-free planning P2). Still to
+check on the phone (TestFlight 83 or later): a block date shows the block's
+workout together with what repeats every week. The iPhone app still starts
+and edits blocks as whole weeks; teaching it the block's own list is later
+work there.
 
-Plan page simplification (owner, 2026-11-16): the tabs, the removed
-sections, the repeating week as the calendar's first row, away dates behind
-a button, the "This date only" mark and the days on the Workouts tab are
-built, and so is the block beside the repeating week with its own Block tab
-(P2). Next for it: the owner merges, then a separately authorized API
-release followed by the web release, and a check on the phone that a block
-date shows the block's workout together with what repeats every week. The
-iPhone app still starts and edits blocks as whole weeks; teaching it the
-block's own list is later work there.
+**Later (@agent):** Date-only replacement of scheduled extras, and a second
+workout on one date from the Add box, still need a shared replacement and
+lineage contract, as described in member activation P7. The remaining P3
+analysis pages (Running, Recovery, Records) and the broader P4 profile and
+connection work keep their own scope.
 
-Guided block start and adding to a day by type (owner, 2026-11-17): built
-(P2). Next for it: the owner merges, then a separately authorized web
-release; it changes no API, so the released API serves it.
-
-**Later (@agent):** Date-only replacement of scheduled extras still needs a
-shared replacement/lineage contract, as described in member activation P7.
-The remaining P3 analysis extensions and broader P4 profile/connection work
-retain their own scope; this lifting pass does not activate all of them.
-
-**Next (@owner):** Authorize and verify a release separately when ready.
-Repository completion does not prove the production web bundle or API version.
-Deploy a compatible API before clients that require its changed request shapes;
-no deployment is authorized by this plan cleanup.
+**Release rule (@owner):** Deploy a compatible API before web bundles that
+need its changed request shapes. Repository completion does not prove the
+production web bundle or API version.
 
 ## Notes / open questions
 

@@ -1,6 +1,6 @@
 # Progress and Apple Health Weight
 
-Slug: apple-health-weight · Status: gated · Updated: 2026-10-11 · Theme: member-experience
+Slug: apple-health-weight · Status: gated · Updated: 2026-11-18 · Theme: member-experience
 
 ## Goal
 
@@ -67,13 +67,12 @@ upload permission.
 
 ## Next step
 
-**Now (@owner):** Complete P2 on an iPhone running TestFlight 1.0 (42) or a
-later build: enable Read weight in Profile → Connections → Apple Health, open
-Activity → Progress → Weight (Progress → Weight before the Activity tab), and record the permission sheet, a real dated measurement
-and its source, relaunch/foreground refresh, revocation/reconnect and a
-Withings-sourced reading. P4's recovery is implemented in this branch but has
-not been distributed; its real-device recovery check requires a later authorized
-build containing the change.
+**Now (@owner):** Complete P2 on an iPhone running TestFlight 1.2 (83) or
+later: enable Read weight in Profile → Connections → Apple Health, open
+Activity → Progress → Weight, and record the permission sheet, a real dated
+measurement and its source, relaunch/foreground refresh, revocation/reconnect
+and a Withings-sourced reading. Build 83 also carries P4's in-place recovery
+and P5's consistency lead, so one session covers every phase.
 
 P1 merged in PR #196 on
 2026-09-12 and P3 in PR #197 on

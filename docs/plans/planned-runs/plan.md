@@ -294,21 +294,25 @@ intervals.icu, which stays the store of completed runs.
 | Local phase | Relationship | Target | Reason |
 |---|---|---|---|
 | P9 | coordinates_with | plan:run-recorder | The laps change the recorder's checkpoint, upload and TCX file. |
-| P9 | gated_by | external:owner-release-approval | Migration 0069 must be applied before the API that writes laps, and the app needs a TestFlight build, each on the owner's written go-ahead. |
 | P3 | coordinates_with | plan:run-recorder#P3 | Spoken cues are tuned on the same real runs that check the recorder. The owner chose on 2026-10-31 to build P2 before those runs. |
 | P2 | coordinates_with | plan:run-recorder#P4 | Both change the recorder's screen and its pause handling. |
-| P4 | gated_by | external:owner-planned-runs-device-verification | Real runs on the owner's iPhone, on TestFlight build 60. |
+| P4 | gated_by | external:owner-planned-runs-device-verification | Real runs on the owner's iPhone, on TestFlight build 60 or later. |
 
 ## Next step
 
 **Now (@owner):** Run an interval session (P4); the first heart rate run
-is done. P10 (change a day's run from its details) reaches the phone with
-the next TestFlight build after it merges; it needs no Worker deploy. P8 reaches the phone with the next TestFlight build after it
-merges; it needs no Worker deploy or migration. P9 (laps) needs, each on
-the owner's written go-ahead, migration 0069 applied before an API deploy,
-a `tres-fort-web` deploy and a TestFlight build; then the next interval
-run shows its laps.
-Run-recorder P3's real runs can use the same build.
+is done, and the 2026-11-17 Easy Run + Strides on TestFlight 1.2 (83) was a
+planned run with steps. P10 (change a day's run from its details) merged on
+2026-11-18 and reaches the phone with the next TestFlight build, on the
+owner's go-ahead; it needs no Worker deploy. Check it by tapping a step on a
+dated run's Details and changing its heart rate target for that day.
+
+P8 ("New run" from a weekday) is in TestFlight 83. P9 is released:
+migration 0069 and the API that keeps laps went out with the 2026-11-07
+release, and the API, web app and TestFlight 83 were rebuilt from main on
+2026-11-17. The next interval run should list its laps
+on the run's detail, in the app and on the web. Run-recorder P3's real runs
+and P9's countdown beeps can use the same run.
 
 Released on 2026-10-31 with the owner's go-ahead: migration 0058 was applied
 in production before the Worker deploy of main, and TestFlight beta
