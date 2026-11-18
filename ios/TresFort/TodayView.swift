@@ -688,6 +688,7 @@ struct TodayView: View {
         } else {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
+                    EventTodayLine(sync: sync)
                     dayWorkouts
                     // The recovery card adds its own top gap, so nothing
                     // moves when WHOOP isn't connected.

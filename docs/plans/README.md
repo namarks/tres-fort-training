@@ -155,8 +155,8 @@ linked plan owns its phase status and acceptance evidence.
   owner's check on the phone, web, Today and calendar. P7 (in review) lets
   the iPhone keep a block's own workouts beside Your week, as the web does.
 - [Plan without an AI coach](coach-free-planning/plan.md) — **active**;
-  away dates and P2's reviewed lighter week are delivered. Next, P1's native
-  event editor and training phases, then P3's remaining coach-only edits.
+  away dates, P2's reviewed lighter week and P1's iPhone event editor are
+  built. Next, P1's training phases, then P3's remaining coach-only edits.
 - [Partner training on one iPad](partner-training/plan.md) — **active**;
   manual two-person training and accurate exercise instructions exist. The
   physical trial remains open; P0.2, shared ending and invitation recovery, is

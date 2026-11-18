@@ -6754,6 +6754,27 @@ final class SyncModel: ObservableObject {
         return result?.ok == true
     }
 
+    /// Sets the member's goal event (coach-free-planning P1), whole, at the
+    /// plan version the editor opened with. A newer plan comes back as a
+    /// conflict, reloads and asks the member to review, like away dates.
+    @discardableResult
+    func saveEvent(_ event: PlanEvent, expectedVersion version: Int) async -> Bool {
+        let race = event.wire
+        let result: APIClient.RaceWriteResult? = await performRoutineMutation { api, jwt in
+            try await api.setRace(race, expectedVersion: version, jwt: jwt)
+        }
+        return result?.ok == true
+    }
+
+    /// Clears the goal event. The block and history stay as they are.
+    @discardableResult
+    func removeEvent(expectedVersion version: Int) async -> Bool {
+        let result: APIClient.RaceWriteResult? = await performRoutineMutation { api, jwt in
+            try await api.clearRace(expectedVersion: version, jwt: jwt)
+        }
+        return result?.ok == true
+    }
+
     @discardableResult
     func removeAwayDates(id: String, expectedVersion version: Int) async -> Bool {
         let result: APIClient.TripWriteResult? = await performRoutineMutation { api, jwt in
