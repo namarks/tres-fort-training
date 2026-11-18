@@ -54,12 +54,12 @@ P5).
     pace. The web sets, edits and removes the event on its Analysis section's
     Event page ([web app](../web-app/plan.md) P3); the web gateway allows the
     two routes.
-  - iOS event editor (placement is mock option B, offered to the owner on
-    2026-11-18 beside a quieter row and a Today countdown):
-    with an event set, a card at the top of the Plan tab's Schedule side
-    shows its date and countdown, name, distance, goal time and goal pace;
-    tapping it opens the editor. With none, a "Set an event" row sits beside
-    Calendar. The editor sets name, date, type (the web's five plus
+  - iOS event editor (owner, 2026-11-18: option C, the event leads the Plan
+    tab and Today counts down to it): with an event set, a card at the top
+    of the Plan tab's Schedule side shows its date and countdown, name,
+    distance, goal time and goal pace, and Today shows one quiet line above
+    the day ("Turkey Trot 5k in 19 days") until the event has passed. Either
+    opens the editor. With none, a "Set an event" row sits beside Calendar. The editor sets name, date, type (the web's five plus
     "Something else"), distance (the web's presets per sport, another
     distance in its unit, or free text for multisport and other types, and a
     distance the coach saved as text is kept) and an optional goal time

@@ -176,6 +176,10 @@ final class EventGoalTests: XCTestCase {
         XCTAssertEqual(EventGoal.goalPaceText(event, unit: .miles), "6:26/mi")
         XCTAssertEqual(EventGoal.goalPaceText(event, unit: .kilometers), "4:00/km")
         XCTAssertEqual(EventGoal.detailLine(event, unit: .miles), "5k · goal 20:00 · 6:26/mi")
+        XCTAssertEqual(EventGoal.todayLine(event, today: "2026-11-07"), "Turkey Trot 5k in 19 days")
+        XCTAssertEqual(EventGoal.todayLine(event, today: "2026-11-25"), "Turkey Trot 5k tomorrow")
+        XCTAssertEqual(EventGoal.todayLine(event, today: "2026-11-26"), "Turkey Trot 5k is today")
+        XCTAssertNil(EventGoal.todayLine(event, today: "2026-11-27"), "Today drops the line once it has passed")
 
         let ride = PlanEvent(name: "Century", date: "2027-06-01", discipline: "cycling",
                              distance: "100 miles", distance_m: 100 * EventGoal.mile, goal_time_s: 5 * 3_600)

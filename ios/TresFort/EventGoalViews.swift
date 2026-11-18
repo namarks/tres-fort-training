@@ -67,6 +67,40 @@ struct EventPlanCard: View {
     }
 }
 
+/// Today's countdown to the goal event (owner's pick, 2026-11-18): one quiet
+/// line above the day, gone once the event has passed. Tapping it opens the
+/// same editor as the Plan tab's card.
+struct EventTodayLine: View {
+    @ObservedObject var sync: SyncModel
+    @State private var editing: EventGoalEditTarget?
+
+    var body: some View {
+        if let event = sync.plan?.event, let line = EventGoal.todayLine(event, today: sync.todayString) {
+            Button {
+                editing = EventGoalEditTarget.opening(sync)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "flag.checkered").accessibilityHidden(true)
+                    Text(line).lineLimit(1)
+                }
+                .font(Theme.mono(12, .medium)).foregroundStyle(Theme.muted)
+                .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+                // A 44-point target without pushing the day's card down.
+                .contentShape(Rectangle().inset(by: -8))
+            }
+            .buttonStyle(.plain)
+            .disabled(sync.isRoutineMutationInFlight)
+            .accessibilityHint("Edit your event")
+            .accessibilityIdentifier("today.event")
+            .sheet(item: $editing) { target in
+                NavigationStack {
+                    EventGoalEditor(sync: sync, draft: target.draft, expectedVersion: target.version)
+                }
+            }
+        }
+    }
+}
+
 /// Sets, changes or removes the goal event. Every write carries the plan
 /// version the editor opened with. When the plan has moved on (a conflict, or
 /// a refresh while editing), a failed write closes the editor so the member

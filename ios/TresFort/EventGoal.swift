@@ -158,6 +158,19 @@ enum EventGoal {
         }
     }
 
+    /// Today's countdown: "Turkey Trot 5k in 19 days", "Turkey Trot 5k
+    /// tomorrow", "Turkey Trot 5k is today"; nil once the event has passed.
+    static func todayLine(_ event: PlanEvent, today: String) -> String? {
+        guard let day = CalendarProjection.dayNumber(event.date),
+              let now = CalendarProjection.dayNumber(today) else { return nil }
+        switch day - now {
+        case 0: return "\(event.name) is today"
+        case 1: return "\(event.name) tomorrow"
+        case 2...: return "\(event.name) in \(day - now) days"
+        default: return nil
+        }
+    }
+
     /// The card's top line: "THU, NOV 26 · 19 DAYS TO GO".
     static func dateLine(_ event: PlanEvent, today: String) -> String {
         let date = ProgramEditing.spokenDate(event.date)
