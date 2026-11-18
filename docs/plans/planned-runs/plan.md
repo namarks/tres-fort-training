@@ -1,6 +1,6 @@
 # Planned runs with pace and heart rate targets
 
-Slug: planned-runs · Status: active · Updated: 2026-11-07 · Theme: connected-training
+Slug: planned-runs · Status: active · Updated: 2026-11-18 · Theme: connected-training
 
 ## Goal
 
@@ -258,6 +258,37 @@ intervals.icu, which stays the store of completed runs.
     a watch's laps; Tres Fort could read them live like its route), splits
     per mile or kilometer for a run without a plan, and laps for the coach.
 
+- [x] **P10 — Change a day's run from its details** (in the repository)
+  - The owner, 2026-11-17: the coach made a one-time "Easy Run + Strides"
+    for the day (25 min at 135–148 bpm, strides, cool-down), and on the
+    iPhone there seemed to be no way to change its heart rate target. The
+    step editor (P5) was reachable only as Details, Edit, the run's row,
+    then a step; the steps on Details only read.
+  - On a run's Details for a date, each step is a button that opens the
+    P5 step editor for that step alone (time or distance, and a pace,
+    heart rate or no target). A note under the steps says "Tap a step to
+    change its time or target for today only."
+  - The change is for that day only. A run that is already the day's own
+    (one-time) changes in place while the day can still change, so a
+    finished run's record keeps the plan it was run against. A saved run
+    on a date that can still change is first copied for the day
+    (workout-library P3, with any block week's targets), so the saved run
+    and the week stay as they are, and Details then shows the copy.
+  - The change applies to the steps as shown when the step was tapped
+    (`RunPlan.replacing`), saved through the existing slot route with the
+    plan version read then. Before anything is written, the save checks
+    again that the plan version, the date's session attempt and the run
+    shown are unchanged and the day can still change (the editor can stay
+    open across a refresh, a start or midnight); otherwise it writes
+    nothing and says "This day's run changed." A copy is made with those
+    same reviewed tokens. An unchanged step saves nothing.
+  - Steps opened with no date (the library, the Plan tab) still only read;
+    Edit changes the saved run everywhere, as before.
+  - No server change: the one-time workout and slot routes already do the
+    work, with their audit (`actor='ios'`) and version checks.
+  - Not covered: the Today card's figures don't open the editor directly,
+    and Edit on a one-time run still opens the general workout editor.
+
 ## Dependencies
 
 | Local phase | Relationship | Target | Reason |
@@ -271,7 +302,8 @@ intervals.icu, which stays the store of completed runs.
 ## Next step
 
 **Now (@owner):** Run an interval session (P4); the first heart rate run
-is done. P8 reaches the phone with the next TestFlight build after it
+is done. P10 (change a day's run from its details) reaches the phone with
+the next TestFlight build after it merges; it needs no Worker deploy. P8 reaches the phone with the next TestFlight build after it
 merges; it needs no Worker deploy or migration. P9 (laps) needs, each on
 the owner's written go-ahead, migration 0069 applied before an API deploy,
 a `tres-fort-web` deploy and a TestFlight build; then the next interval
