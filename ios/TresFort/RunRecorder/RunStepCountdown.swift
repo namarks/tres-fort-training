@@ -36,6 +36,21 @@ struct RunStepCountdown: Equatable {
         return second
     }
 
+    /// Moving time went back to `left` seconds before the step's end, after
+    /// a pause dated back to its fix. Beeps for the seconds still ahead play
+    /// again; the one for the second it's in counts as played. A step the
+    /// pause undid had already counted down to its end.
+    mutating func rewind(stepIndex: Int, stepStartSeconds: Double, secondsLeft left: Double) {
+        let current = min(Self.beeps + 1, max(1, Int(left.rounded(.up))))
+        if stepIndex != self.stepIndex || stepStartSeconds != stepStart {
+            self.stepIndex = stepIndex
+            stepStart = stepStartSeconds
+            lastSecond = current
+        } else {
+            lastSecond = max(lastSecond, current)
+        }
+    }
+
     /// How long the plan ticker waits with `left` seconds of a timed step to
     /// go: until just past the next countdown second or the step's end, and
     /// never more than a second.

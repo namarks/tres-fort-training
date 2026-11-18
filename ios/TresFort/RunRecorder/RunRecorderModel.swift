@@ -458,7 +458,10 @@ final class RunRecorderModel: ObservableObject {
         self.run = run
         phase = .paused
         autoPauseDetector.reset()
-        if start < time { reconcilePlan() }
+        if start < time {
+            reconcilePlan()
+            rewindCountdown()
+        }
         engine?.pause()
         checkpoint(force: true)
         refreshLiveActivity(force: true)
@@ -938,7 +941,18 @@ final class RunRecorderModel: ObservableObject {
         beep()
     }
 
-    /// Says the step the run is now on, or that the plan is done, and starts
+    /// A pause dated back to its fix gives back moving time, possibly time
+    /// the countdown already beeped, so the beeps from there on come again
+    /// when the runner sets off.
+    private func rewindCountdown() {
+        guard let run, let progress = run.plan?.progress, let step = currentPlanStep,
+              let duration = step.step.durationSeconds else { return }
+        let left = progress.stepStartSeconds + Double(duration) - run.activeSeconds(at: now())
+        stepCountdown.rewind(stepIndex: progress.stepIndex, stepStartSeconds: progress.stepStartSeconds,
+                             secondsLeft: left)
+    }
+
+    /// Says the step the run is now on, or that the plan is done, and starts    /// Says the step the run is now on, or that the plan is done, and starts
     /// watching the new step's target.
     private func announceStep() {
         guard let run, run.plan != nil, !planSteps.isEmpty else { return }

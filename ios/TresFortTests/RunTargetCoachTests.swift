@@ -206,6 +206,27 @@ final class RunTargetCoachTests: XCTestCase {
         let rep = RunPlan.Step(kind: .work, durationSeconds: nil, distanceMeters: 400, target: nil)
         XCTAssertNil(late.beep(stepIndex: 7, step: rep, stepStartSeconds: 1_710, elapsed: 80))
 
+        // A pause dated back to its fix gives back moving time the countdown
+        // had beeped through: those beeps come again, without repeating the
+        // second it's in.
+        var rewound = RunStepCountdown()
+        for elapsed in [17.0, 18, 19] {
+            _ = rewound.beep(stepIndex: 1, step: stride, stepStartSeconds: 0, elapsed: elapsed)
+        }
+        rewound.rewind(stepIndex: 1, stepStartSeconds: 0, secondsLeft: 5)
+        XCTAssertEqual([17.0, 18, 19].compactMap {
+            rewound.beep(stepIndex: 1, step: stride, stepStartSeconds: 0, elapsed: $0)
+        }, [3, 2, 1])
+        var slight = RunStepCountdown()
+        XCTAssertEqual(slight.beep(stepIndex: 1, step: stride, stepStartSeconds: 0, elapsed: 18.5), 2)
+        slight.rewind(stepIndex: 1, stepStartSeconds: 0, secondsLeft: 1.6)
+        XCTAssertNil(slight.beep(stepIndex: 1, step: stride, stepStartSeconds: 0, elapsed: 18.4))
+        XCTAssertEqual(slight.beep(stepIndex: 1, step: stride, stepStartSeconds: 0, elapsed: 19), 1)
+        // A step brought back from its end beeps for the seconds still ahead.
+        slight.rewind(stepIndex: 0, stepStartSeconds: -20, secondsLeft: 2.5)
+        XCTAssertNil(slight.beep(stepIndex: 0, step: stride, stepStartSeconds: -20, elapsed: 17.6))
+        XCTAssertEqual(slight.beep(stepIndex: 0, step: stride, stepStartSeconds: -20, elapsed: 18), 2)
+
         // The ticker wakes just past each countdown second and the end.
         XCTAssertEqual(RunStepCountdown.wait(secondsLeft: 10), 1)
         XCTAssertEqual(RunStepCountdown.wait(secondsLeft: 3.5), 0.52, accuracy: 1e-9)
