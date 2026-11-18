@@ -70,7 +70,20 @@ final class ThemeAccessibilityTests: XCTestCase {
         }
     }
 
-    /// The week fort card is navy in both modes: its text keeps 4.5:1 and
+    /// Today's week chart sits on the page: its trained and planned towers
+    /// keep the 3:1 graphics minimum on both ends of the page's gradient,
+    /// and today's ring and date (signal) keep 4.5:1.
+    func testWeekChartContrastOnThePage() {
+        for style in styles {
+            for page in [Theme.bgTop, Theme.bg] {
+                XCTAssertGreaterThanOrEqual(contrast(BrandPalette.fortOrange, page, style), 3)
+                XCTAssertGreaterThanOrEqual(contrast(BrandPalette.weekPlanned, page, style), 3)
+                XCTAssertGreaterThanOrEqual(contrast(Theme.signal, page, style), 4.5)
+            }
+        }
+    }
+
+    /// Activity's week card is navy in both modes: its text keeps 4.5:1 and
     /// its towers keep the 3:1 graphics minimum.
     func testWeekFortContrastOnNavy() {
         for style in styles {

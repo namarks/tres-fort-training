@@ -3,9 +3,9 @@ import XCTest
 
 final class WeekFortTests: XCTestCase {
     private func state(_ kind: DayProjection.Kind, sets: Int = 0, activity: Bool = false,
-                       ride: Bool = false, blackout: Bool = false) -> WeekFort.State {
+                       ride: Bool = false, blackout: Bool = false, extra: Bool = false) -> WeekFort.State {
         WeekFort.state(kind: kind, loggedSets: sets, hasActivity: activity,
-                       hasPlannedRide: ride, suppressesEndurance: blackout)
+                       hasPlannedRide: ride, suppressesEndurance: blackout, hasPlannedExtra: extra)
     }
 
     func testLoggedWorkRaisesATrainedTower() {
@@ -21,6 +21,16 @@ final class WeekFortTests: XCTestCase {
         XCTAssertEqual(state(.projected), .planned)
         XCTAssertEqual(state(.inProgress, sets: 0), .planned, "an in-progress session with no sets records no work")
         XCTAssertEqual(state(.rest, ride: true), .planned)
+    }
+
+    /// Friday's core work beside no workout is still training planned, so
+    /// the chart agrees with Coming up (app-design-pass P29).
+    func testAnActivityPlannedBesideTheDayIsAPlannedTower() {
+        XCTAssertEqual(state(.rest, extra: true), .planned)
+        XCTAssertEqual(state(.none, extra: true), .planned)
+        XCTAssertEqual(state(.projected, extra: true), .planned)
+        XCTAssertEqual(state(.rest, activity: true, extra: true), .trained, "logged work still wins")
+        XCTAssertEqual(state(.completed, extra: true), .trained)
     }
 
     func testEverythingElseRests() {

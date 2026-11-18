@@ -68,8 +68,9 @@ struct EventPlanCard: View {
 }
 
 /// Today's countdown to the goal event (owner's pick, 2026-11-18): one quiet
-/// line above the day, gone once the event has passed. Tapping it opens the
-/// same editor as the Plan tab's card.
+/// line beside the date over the day's card (`TodayDayHeading`), gone once
+/// the event has passed. Tapping it opens the same editor as the Plan tab's
+/// card.
 struct EventTodayLine: View {
     @ObservedObject var sync: SyncModel
     @State private var editing: EventGoalEditTarget?
@@ -79,12 +80,12 @@ struct EventTodayLine: View {
             Button {
                 editing = EventGoalEditTarget.opening(sync)
             } label: {
-                HStack(spacing: 6) {
+                HStack(spacing: 5) {
                     Image(systemName: "flag.checkered").accessibilityHidden(true)
                     Text(line).lineLimit(1)
                 }
-                .font(Theme.mono(12, .medium)).foregroundStyle(Theme.muted)
-                .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+                .font(Theme.mono(13, .semibold)).foregroundStyle(Theme.accent)
+                .frame(minHeight: 28)
                 // A 44-point target without pushing the day's card down.
                 .contentShape(Rectangle().inset(by: -8))
             }

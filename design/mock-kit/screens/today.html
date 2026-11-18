@@ -1,34 +1,48 @@
-<!-- Today with a workout scheduled (TodayView.content, idle branch).
-     render.mjs fills the status, tab bar, map and chart placeholders. -->
+<!-- Today with a workout planned (TodayView.lineupCard, TodayDayHeading,
+     TodayWeekSection, WeekFortView): the date and the goal event over a
+     two-tone card, then the light week chart and Coming up.
+     render.mjs fills the status and tab bar placeholders. -->
 {{status}}
 <div class="nav-inline"><span></span><span class="title">Today</span><span style="justify-self:end" class="glass-btn"><i data-icon="plus" data-size="22" data-weight="2"></i></span></div>
-<div class="scroll stack-22" style="padding-top:26px">
-  <div class="mono caption muted" style="font-size:12px">Saturday, November 7</div>
-  <div class="hero stack-16" data-slot="today-card">
-    <div class="mono caption muted" style="font-size:12px">Scheduled for today</div>
-    <div class="display" style="font-size:30px">Lower A</div>
-    <div class="subheadline muted">6 exercises</div>
-    <div class="btn-primary">Start workout</div>
-    <div class="row" style="gap:8px;margin-top:4px">
-      <span class="pill" style="flex:1;justify-content:center;background:color-mix(in srgb, var(--text) 10%, transparent)"><i data-icon="list.bullet.clipboard" data-size="15"></i>Details</span>
-      <span class="pill" style="flex:1;justify-content:center;background:color-mix(in srgb, var(--text) 10%, transparent)"><i data-icon="repeat" data-size="15"></i>Swap</span>
-      <span class="pill" style="flex:1;justify-content:center;background:color-mix(in srgb, var(--text) 10%, transparent)"><i data-icon="moon.zzz" data-size="15"></i>Skip</span>
+<div class="scroll" style="padding:8px 16px 0">
+  <div class="sec-head"><span class="sec">Wed, Nov 18</span><span class="sec-link event"><i data-icon="flag.checkered" data-size="13" data-weight="2"></i>5K in 24 days</span></div>
+  <div class="today-card" style="margin-top:4px" data-slot="today-card">
+    <div class="hero"><div class="sec">Planned workout</div>
+      <div class="name">Lower A</div>
+      <div class="sum">6 exercises</div>
+      <div class="names">Barbell squat · Romanian deadlift · Split squat · Leg curl · Calf raise · Plank</div>
+      <div class="btn-primary">Start workout</div>
+    </div>
+    <div class="foot">
+      <div class="day-actions"><span><i data-icon="list.bullet.clipboard" data-size="15"></i>Details</span><span><i data-icon="repeat" data-size="15"></i>Swap</span><span><i data-icon="moon.zzz" data-size="15"></i>Skip</span></div>
+      <div class="foot-link"><i data-icon="plus" data-size="15" data-weight="2.4"></i>Add another workout</div>
     </div>
   </div>
-  <div class="route plain"><div><div class="t">Workouts</div><div class="s">Browse, create, and edit</div></div><span class="spacer"></span><span class="muted"><i data-icon="chevron.right" data-size="16" data-weight="2.2"></i></span></div>
-  <div class="stack-10">
-    <div class="row"><span class="label">This week</span><span class="spacer"></span><span class="accent row" style="font-size:15px;font-weight:600;gap:4px">Calendar<i data-icon="chevron.right" data-size="12" data-weight="3"></i></span></div>
-    <div class="fort"><div class="sum trained">3 of 5 done</div>
-      <div class="towers"><i class="trained"></i><i class="trained"></i><i class="rest"></i><i class="trained"></i><i></i><i class="today"></i><i class="rest"></i></div></div>
-    <div class="weekrow">
-      <div><span class="wd">MON</span><div class="cell workout">2<span class="accent"><i data-icon="figure.strengthtraining.traditional" data-size="14" data-weight="2.4"></i></span></div></div>
-      <div><span class="wd">TUE</span><div class="cell workout">3<span style="color:var(--cat4)"><i data-icon="figure.run" data-size="14" data-weight="2.4"></i></span></div></div>
-      <div><span class="wd">WED</span><div class="cell">4</div></div>
-      <div><span class="wd">THU</span><div class="cell workout">5<span class="accent"><i data-icon="figure.strengthtraining.traditional" data-size="14" data-weight="2.4"></i></span></div></div>
-      <div><span class="wd">FRI</span><div class="cell workout">6<span style="color:var(--cat4)"><i data-icon="figure.run" data-size="14" data-weight="2.4"></i></span></div></div>
-      <div><span class="wd">SAT</span><div class="cell today">7<span class="accent"><i data-icon="figure.strengthtraining.traditional" data-size="14" data-weight="2.4"></i></span></div></div>
-      <div><span class="wd">SUN</span><div class="cell">8</div></div>
-    </div>
+  <div class="sec-head" style="margin-top:24px"><span class="sec">This week</span><span class="sec-link">1 of 4 done <i data-icon="chevron.right" data-size="11" data-weight="3"></i></span></div>
+  <div class="week-chart" style="margin-top:8px">
+    <div><span class="tw"><i class="rest"></i></span><span class="l">M</span><span class="n">16</span></div>
+    <div><span class="tw"><i class="trained"></i></span><span class="l">T</span><span class="n">17</span></div>
+    <div class="now"><span class="tw"><i></i></span><span class="l">W</span><span class="n">18</span></div>
+    <div><span class="tw"><i></i></span><span class="l">T</span><span class="n">19</span></div>
+    <div><span class="tw"><i></i></span><span class="l">F</span><span class="n">20</span></div>
+    <div><span class="tw"><i class="rest"></i></span><span class="l">S</span><span class="n">21</span></div>
+    <div><span class="tw"><i class="rest"></i></span><span class="l">S</span><span class="n">22</span></div>
+  </div>
+  <div class="sec-head" style="margin-top:24px;margin-bottom:4px"><span class="sec">Coming up</span><span class="sec-link">Calendar <i data-icon="chevron.right" data-size="11" data-weight="3"></i></span></div>
+  <div class="upcoming">
+    <div class="r"><div class="d"><div class="w">THU</div><div class="n">19</div></div><div class="lines">
+      <div class="line"><span class="g"><i data-icon="figure.strengthtraining.traditional" data-size="15" data-weight="2.2"></i></span><div><div class="t">Kettlebell A</div><div class="s">Swing · Goblet squat · Press</div></div></div>
+      <div class="line"><span class="g endurance"><i data-icon="figure.core.training" data-size="15" data-weight="2.2"></i></span><div><div class="t">Core</div></div></div>
+    </div><span class="c"><i data-icon="chevron.right" data-size="12" data-weight="3"></i></span></div>
+    <div class="r"><div class="d"><div class="w">FRI</div><div class="n">20</div></div><div class="lines">
+      <div class="line"><span class="g endurance"><i data-icon="figure.core.training" data-size="15" data-weight="2.2"></i></span><div><div class="t">Core</div></div></div>
+    </div><span class="c"><i data-icon="chevron.right" data-size="12" data-weight="3"></i></span></div>
+    <div class="r"><div class="d"><div class="w">MON</div><div class="n">23</div></div><div class="lines">
+      <div class="line"><span class="g endurance"><i data-icon="figure.soccer" data-size="15" data-weight="2.2"></i></span><div><div class="t">Soccer</div></div></div>
+    </div><span class="c"><i data-icon="chevron.right" data-size="12" data-weight="3"></i></span></div>
+    <div class="r"><div class="d"><div class="w">TUE</div><div class="n">24</div></div><div class="lines">
+      <div class="line"><span class="g endurance"><i data-icon="figure.run" data-size="15" data-weight="2.2"></i></span><div><div class="t">Easy run</div><div class="s">30 min easy</div></div></div>
+    </div><span class="c"><i data-icon="chevron.right" data-size="12" data-weight="3"></i></span></div>
   </div>
 </div>
 {{tabbar:today}}

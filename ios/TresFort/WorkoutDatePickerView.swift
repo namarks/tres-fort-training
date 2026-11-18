@@ -776,19 +776,28 @@ struct DayPickView: View {
     }
 }
 
-/// A planned run at a glance on Today: how long or far, the kind of run and
-/// its target. Every step is in Details. A run planned without steps keeps
-/// its one-line label.
+/// A planned run at a glance: how long or far, the kind of run and its
+/// target. Every step is in Details. A run planned without steps keeps its
+/// one-line label. Today's card reads the figures as one line under the
+/// name (`oneLine`); Details keeps them as labeled figures.
 struct PlannedRunGlance: View {
     let workout: Workout
+    var oneLine = false
     private let unit = RunDistanceUnit.preferred()
 
     var body: some View {
         let figures = DayChange.glance(workout, unit: unit)
         if figures.isEmpty, let slot = PlannedRunCreation.runSlot(in: workout) {
             Text(slot.runPrescriptionLabel(in: unit))
-                .font(Theme.mono(13)).foregroundStyle(Theme.muted)
+                .font(oneLine ? .headline : Theme.mono(13))
+                .foregroundStyle(oneLine ? Theme.text : Theme.muted)
                 .fixedSize(horizontal: false, vertical: true)
+        } else if oneLine {
+            Text(figures.map(\.value).joined(separator: " · "))
+                .font(.headline.monospacedDigit()).foregroundStyle(Theme.text)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityLabel(figures.map { "\($0.label) \($0.value)" }.joined(separator: ", "))
+                .accessibilityIdentifier("today.runGlance")
         } else {
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .top, spacing: 20) { ForEach(figures) { figure($0) } }
@@ -809,8 +818,10 @@ struct PlannedRunGlance: View {
     }
 }
 
-/// Details, Swap and Skip under a planned day's main action (app-design-pass
-/// P25). Swap and Skip are left out while a workout is under way.
+/// Details, Swap and Skip on the plain foot of a planned day's card, as text
+/// links so the navy above holds only the workout and its Start
+/// (app-design-pass P25, P29). Swap and Skip are left out while a workout is
+/// under way.
 struct DayActionsRow: View {
     let showsChanges: Bool
     let onDetails: () -> Void
@@ -819,27 +830,35 @@ struct DayActionsRow: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
-        let layout = dynamicTypeSize.isAccessibilitySize
-            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 6))
-            : AnyLayout(HStackLayout(spacing: 8))
-        layout {
-            action("Details", glyph: "list.bullet.clipboard", id: "today.viewWorkout", run: onDetails)
-            if showsChanges {
-                action("Swap", glyph: "arrow.triangle.2.circlepath", id: "today.changeWorkout", run: onSwap)
-                action("Skip", glyph: "moon.zzz", id: "today.skipWorkout", run: onSkip)
-            }
+        if dynamicTypeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: 0) { actions(divided: false) }
+        } else {
+            HStack(spacing: 0) { actions(divided: true) }
         }
+    }
+
+    @ViewBuilder private func actions(divided: Bool) -> some View {
+        action("Details", glyph: "list.bullet.clipboard", id: "today.viewWorkout", run: onDetails)
+        if showsChanges {
+            if divided { divider }
+            action("Swap", glyph: "arrow.triangle.2.circlepath", id: "today.changeWorkout", run: onSwap)
+            if divided { divider }
+            action("Skip", glyph: "moon.zzz", id: "today.skipWorkout", run: onSkip)
+        }
+    }
+
+    private var divider: some View {
+        RaisedFill().frame(width: 1, height: 20).accessibilityHidden(true)
     }
 
     private func action(_ title: String, glyph: String, id: String, run: @escaping () -> Void) -> some View {
         Button(action: run) {
             Label(title, systemImage: glyph)
-                .font(.subheadline.weight(.semibold)).foregroundStyle(Theme.text)
+                .font(.subheadline.weight(.semibold)).foregroundStyle(Theme.accent)
                 .lineLimit(1).minimumScaleFactor(0.85)
-                .frame(maxWidth: dynamicTypeSize.isAccessibilitySize ? nil : .infinity, minHeight: 44)
-                .padding(.horizontal, dynamicTypeSize.isAccessibilitySize ? 14 : 0)
-                .background(Theme.text.opacity(0.1), in: Capsule())
-                .contentShape(Capsule())
+                .frame(maxWidth: dynamicTypeSize.isAccessibilitySize ? nil : .infinity,
+                       minHeight: 44)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier(id)

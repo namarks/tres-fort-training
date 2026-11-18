@@ -62,6 +62,14 @@ history found the list under the calendar unordered and thin: it listed
 every date ever trained whatever month the calendar showed, with no years,
 so December 2026 showed rides from older Decembers, each only "Ride · 28m".
 The owner chose to keep importing all Health history. P26 addresses that.
+On 2026-11-18 the owner found Today on TestFlight 83 cramped, with space
+not well used. A read of the code found a lone "Add another workout" row
+over the card, the card's own lines 2 to 6 points apart while the sections
+sat 64 or more apart, two navy blocks competing, a week chart that showed a
+day with only an activity as rest, and uneven Coming up rows. From mocks
+(project files today-space) the owner picked the same three sections with
+tidied spacing, a light week chart ("too many blue blocks means none of
+them are important") and navy kept for the action alone. P29 builds that.
 
 ## Phases
 
@@ -672,6 +680,42 @@ The owner chose to keep importing all Health history. P26 addresses that.
     switch kinds through Change; the mock kit's at-home screen shows the
     sheet in place. Needs the owner's look on a TestFlight build like P5.
 
+- [ ] **P29 — Today uses its space: navy only for the action**
+  - Today reads as three sections under matching small headings, each with
+    its link beside it and the same gap between them: the date with the
+    goal event's countdown ("5K in 24 days") beside it, THIS WEEK with the
+    week's count ("1 of 4 done") opening Activity, and COMING UP with
+    Calendar. The date leaves the card and the event line no longer takes a
+    row of its own.
+  - The day's card is in two tones. Navy holds only what to do now: its
+    status, its name, one line on how much it is (a run's time, kind and
+    target; a lift's exercise count and names) and the one orange action.
+    Everything else sits on a plain foot as rows under thin rules: Details,
+    Swap and Skip as links, Later today, Something else, and Add another
+    workout as the card's last line, no longer a row alone over the card.
+    Finished items stay above as check lines.
+  - A day with nothing to start or log has no navy: a rest day is a plain
+    card, "Rest day", with Lift, Run and Log and "Do a saved workout". So
+    are a finished day, another day swiped to, and a logged activity. On a
+    rest day "Add another workout" read wrong, so building a routine is
+    "Build a workout" in the + menu, and the card keeps only the retry for
+    one whose request is still out.
+  - The week chart is light and sits on the page with no card: trained
+    days are the only orange, planned days a quiet blue
+    (`BrandPalette.weekPlanned`, 3:1 on the page in both modes), rest days
+    stay low and today's date is ringed. A day that holds only an activity
+    beside no workout (Friday's core) now counts as planned, so the chart
+    and its count agree with Coming up.
+  - Coming up rows are one height and one alignment, every line a glyph
+    and a name with the day's first line the heavier one, and the list
+    shows up to four days.
+  - No backend change and no migration. Unit tests cover the planned tower
+    for an add-on activity and the chart's contrast on the page; the
+    design system and the mock kit's Today screens (planned workout,
+    planned run, rest day) show the new layout. The journeys' identifiers
+    are unchanged. Needs the owner's look on a TestFlight build like P5,
+    and real simulator screenshots before that.
+
 ## Execution frontier
 
 - P5
@@ -698,6 +742,7 @@ The owner chose to keep importing all Health history. P26 addresses that.
 - P26
 - P27
 - P28
+- P29
 
 ## Dependencies
 
@@ -707,19 +752,23 @@ The owner chose to keep importing all Health history. P26 addresses that.
 
 ## Next step
 
-**Now (@owner):** On the next TestFlight build (after 83, on the owner's
-go-ahead), add something to a weekday from the Plan tab and check that P28's
+**Now (@agent):** With a Remote Control session on the Mac mini, capture
+Today from a simulator build of P29's branch and of main, with synthetic
+data (a planned run, a planned lift, a rest day, light and dark), for the
+owner's before and after against the mocks in project files today-space.
+Capture the real weekday sheet (P28), Add to your week (P27) and P25's
+Details and Swap in the same session.
+
+**Then (@owner):** On the next TestFlight build (after 83, on the owner's
+go-ahead), look at Today (P29): the date and event over the card, navy only
+around what to do now, the light week chart and Coming up. On the same
+build, add something to a weekday from the Plan tab and check that P28's
 sheet changes in place: the picked type folds into one line, nothing jumps,
 and the day and time sit by the Add button. P28 merged on 2026-11-18 (public
 PR #14). TestFlight 1.2 (83), built from main on 2026-11-17, already carries
 everything through P27 (Add to your week reads top down), P26 (the calendar's
 list follows its month) and P25 (Details, Swap and Skip from Today), so those
 can be looked at now. Earlier builds carry P0 to P24 (P24 since build 79).
-
-**Then (@agent):** With a Remote Control session on the Mac mini, capture
-the real weekday sheet (P28), Add to your week (P27) and P25's Today card,
-Details and Swap from a simulator build of main, with synthetic data, for the
-owner's comparison with the mocks.
 
 ## Notes / open questions
 

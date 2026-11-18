@@ -1,9 +1,11 @@
 import SwiftUI
 
-/// The Today screen reads top to bottom as three sections: one card for
-/// today, the week, then what's coming up. These pieces keep them alike.
+/// The Today screen reads top to bottom as three sections, each under a
+/// small heading with a link beside it: the day and its card, the week, then
+/// what's coming up. These pieces keep them alike.
 enum TodayCard {
-    /// The card's small first line: "FRI, NOV 6 · REST DAY".
+    /// A date and a status in small capitals: "FRI, NOV 6 · REST DAY". With
+    /// no status it is the day's heading over the card, "FRI, NOV 6".
     static func kicker(_ ymd: String, _ status: String) -> String {
         [DateLabel.short(ymd), status]
             .filter { !$0.isEmpty }
@@ -24,10 +26,101 @@ struct TodaySectionLabel: View {
     }
 }
 
+/// The date over the day's card, with the goal event's countdown beside it:
+/// the first of Today's section headings. The card under it opens straight
+/// on what the day holds.
+struct TodayDayHeading: View {
+    @ObservedObject var sync: SyncModel
+    let dateString: String
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    var body: some View {
+        let layout = dynamicTypeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 0))
+            : AnyLayout(HStackLayout(spacing: 8))
+        layout {
+            TodaySectionLabel(text: TodayCard.kicker(dateString, ""))
+                .fixedSize()
+                .accessibilityIdentifier("today.date")
+            if !dynamicTypeSize.isAccessibilitySize { Spacer(minLength: 8) }
+            EventTodayLine(sync: sync)
+        }
+        .frame(minHeight: 28)
+        .padding(.horizontal, 4)
+    }
+}
+
+/// Today's card in two tones (app-design-pass P29). Navy is kept for the one
+/// thing to do now and the orange action that starts or logs it; everything
+/// else about the day sits on the plain card around it. A day with nothing to
+/// start or log has no navy at all, so navy on Today always means "do this".
+private struct TodayActionBand: ViewModifier {
+    func body(content: Content) -> some View {
+        // The same recipe as `heroCard`: the content takes the dark-mode
+        // colors, the fill keeps this appearance's navy.
+        content
+            .environment(\.colorScheme, .dark)
+            .environment(\.inHeroCard, true)
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(BrandPalette.hero)
+            // Above the plain rows, so the rule over the first of them
+            // tucks under the navy (`todayFootRows`).
+            .zIndex(1)
+    }
+}
+
 extension View {
-    /// Today's card: solid navy, the app icon in miniature (`heroCard`).
-    func todayCardSurface(padding: CGFloat = 16) -> some View {
-        heroCard(padding: padding)
+    /// What to do now, with its one action, on navy.
+    func todayActionBand() -> some View {
+        modifier(TodayActionBand())
+    }
+
+    /// What leads the card: on navy when it has an action to take, on the
+    /// plain card when it is only something to read (already logged).
+    @ViewBuilder func todayLeadBand(hasAction: Bool) -> some View {
+        if hasAction {
+            todayActionBand()
+        } else {
+            padding(.horizontal, 20).padding(.top, 20).padding(.bottom, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// Finished items over what leads the card, on the plain card.
+    func todayDoneBand() -> some View {
+        padding(.horizontal, 20).padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The plain rows under what leads the card. Each row draws a thin rule
+    /// over itself (`todayFootRow`); the stack sits one point up so the first
+    /// row's rule hides under a navy band and shows under a plain one.
+    func todayFootRows() -> some View {
+        padding(.horizontal, 20).padding(.bottom, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, -1)
+    }
+
+    /// One of the plain rows of today's card, under a thin rule. The first
+    /// row of a card with nothing over it goes without the rule.
+    func todayFootRow(ruled: Bool = true) -> some View {
+        frame(maxWidth: .infinity, alignment: .leading)
+            .overlay(alignment: .top) { if ruled { RaisedFill().frame(height: 1) } }
+    }
+
+    /// Rounds a card's bands into one card on the plain surface.
+    func todayCardShell() -> some View {
+        frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 16))
+    }
+
+    /// A day's card with nothing to start or log: one plain card.
+    func todayPlainCard() -> some View {
+        padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16))
     }
 }
 
@@ -109,34 +202,34 @@ struct TodayDoneLine: View {
 }
 
 /// An activity leading today's card once what came before it is done:
-/// its name and the one orange action that logs it.
+/// its name and the one orange action that logs it. The caller puts it on
+/// navy (`todayLeadBand`).
 struct TodayNextActivity: View {
     let workout: Workout
-    let dateString: String
     let onLog: ((String) -> Void)?
     /// The member's time for it today, minutes after midnight, if set.
     var minutes: Int? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            TodaySectionLabel(text: TodayCard.kicker(dateString, "Next up"))
+            TodaySectionLabel(text: "NEXT UP")
             Text(workout.name).font(Theme.display(30)).foregroundStyle(Theme.text)
                 .lineLimit(2).minimumScaleFactor(0.7)
                 .padding(.top, 8)
             Text(TodayLineup.detail("Activity", minutes: minutes))
-                .font(.subheadline).foregroundStyle(Theme.muted).padding(.top, 4)
+                .font(.headline).foregroundStyle(Theme.text).padding(.top, 6)
             if let onLog {
                 Button("Log \(workout.name)") { onLog(workout.name) }
                     .buttonStyle(WorkoutPrimaryButtonStyle())
-                    .padding(.top, 14)
+                    .padding(.top, 16)
                     .accessibilityIdentifier("today.extra.log.\(workout.id)")
             }
         }
     }
 }
 
-/// Today's activities still to come, under the item leading the card, each
-/// with its own Log.
+/// Today's activities still to come, one of the plain rows under the item
+/// leading the card, each with its own Log.
 struct TodayLaterList: View {
     let extras: [Workout]
     let onLog: ((String) -> Void)?
@@ -170,9 +263,8 @@ struct TodayLaterList: View {
                     .accessibilityIdentifier("today.later.\(workout.id)")
                 }
             }
-            .padding(.top, 12)
-            .overlay(alignment: .top) { RaisedFill().frame(height: 1) }
-            .padding(.top, 8)
+            .padding(.top, 12).padding(.bottom, 4)
+            .todayFootRow()
         }
     }
 }
