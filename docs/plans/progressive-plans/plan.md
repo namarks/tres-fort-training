@@ -134,8 +134,8 @@ spec.md holds the data format, the date rule and the limits.
     by week (each weekday's main workout with exercises is switched on); the
     rest carry on every week beside it, and the picked ones leave Your week
     in the same plan version, as the web's guided start does.
-  - The block's week shows what comes from Your week muted and tagged
-    "Every week"; a day change touches only the block's own workouts (sent
+  - The block's week shows what comes from Your week in full, tagged
+    "Every week" (the owner, 2026-11-18: not greyed out); a day change touches only the block's own workouts (sent
     in own form; the server lays Your week back over it). "In this block"
     lists its workouts with their days: one opens to change its days in
     every week of the block, edit that week's targets or remove it from the
@@ -153,8 +153,8 @@ spec.md holds the data format, the date rule and the limits.
     change: `PUT /api/plan/program` already takes `workout_ids` and
     `schedule`.
   - Layout: mock options A, B and C are in the project files at
-    `block-on-iphone/` and in the mock kit (`plan-block-*.html`). A (list
-    under the block's week) is built while the owner chooses.
+    `block-on-iphone/` and in the mock kit (`plan-block-*.html`). The owner
+    picked A (list under the block's week) on 2026-11-18.
 
 ## Execution frontier
 
@@ -183,8 +183,7 @@ on the phone, the web, Today and the calendar. A block started on the web
 with its own workout list (web-app P2) also shows on those dates beside what
 repeats every week.
 
-**Then (@owner):** P7: pick the layout for the block's own workouts (A is
-built), then review its pull request. After a TestFlight build with it,
+**Then (@owner):** P7: review its pull request (layout A, as picked). After a TestFlight build with it,
 start a block on the iPhone with some workouts switched off, check that they
 carry on beside it on Today and the calendar, move a block workout to
 another day, add one from Your week and see the same block on the web's

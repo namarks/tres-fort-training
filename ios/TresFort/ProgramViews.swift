@@ -143,12 +143,10 @@ struct ProgramWeekCard: View {
                     .font(Theme.mono(11, .bold)).foregroundStyle(Theme.muted)
                     .frame(width: 36, alignment: .leading)
                 if let workout = row.workout, row.isEveryWeekOnly {
-                    // Your week's, beside the block: read, not the block's to change.
-                    PlanItemBadge(glyph: PlanItemSummary.glyph(for: workout))
-                        .opacity(0.55)
-                        .accessibilityHidden(true)
-                    Text(workout.name).font(Theme.mono(15, .medium)).foregroundStyle(Theme.muted)
-                        .lineLimit(1)
+                    // Your week's, beside the block: still training that day,
+                    // so shown in full, with a tag saying where it comes from
+                    // (the owner, 2026-11-18: not greyed out).
+                    PlanItemLabel(workout: shown(workout, row.weekdayKey), plan: sync.plan, showsWeekdays: false)
                     EveryWeekTag()
                     Spacer(minLength: 0)
                     Image(systemName: "chevron.right")
