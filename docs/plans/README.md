@@ -152,7 +152,8 @@ linked plan owns its phase status and acceptance evidence.
 - [Plan over blocks and cycles](progressive-plans/plan.md) — **gated**;
   blocks, per-week targets, native scheduling, run builders, the web designer
   and P6's week targets from the phone are delivered and released. P5 is the
-  owner's check on the phone, web, Today and calendar.
+  owner's check on the phone, web, Today and calendar. P7 (in review) lets
+  the iPhone keep a block's own workouts beside Your week, as the web does.
 - [Plan without an AI coach](coach-free-planning/plan.md) — **active**;
   away dates, P2's reviewed lighter week and P1's iPhone event editor are
   built. Next, P1's training phases, then P3's remaining coach-only edits.

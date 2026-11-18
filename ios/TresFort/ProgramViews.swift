@@ -142,7 +142,17 @@ struct ProgramWeekCard: View {
                 Text(row.weekdayKey.uppercased())
                     .font(Theme.mono(11, .bold)).foregroundStyle(Theme.muted)
                     .frame(width: 36, alignment: .leading)
-                if let workout = row.workout {
+                if let workout = row.workout, row.isEveryWeekOnly {
+                    // Your week's, beside the block: still training that day,
+                    // so shown in full, with a tag saying where it comes from
+                    // (the owner, 2026-11-18: not greyed out).
+                    PlanItemLabel(workout: shown(workout, row.weekdayKey), plan: sync.plan, showsWeekdays: false)
+                    EveryWeekTag()
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.dim)
+                        .accessibilityHidden(true)
+                } else if let workout = row.workout {
                     PlanItemLabel(workout: shown(workout, row.weekdayKey), plan: sync.plan, showsWeekdays: false)
                     Spacer(minLength: 0)
                     Image(systemName: "chevron.right")
@@ -164,7 +174,8 @@ struct ProgramWeekCard: View {
                 HStack(spacing: 6) {
                     Image(systemName: "plus")
                         .font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.dim)
-                    Text(row.extras.map(\.name).joined(separator: " · "))
+                    Text(row.extras.map { row.everyWeek.contains($0.id) ? "\($0.name) (every week)" : $0.name }
+                        .joined(separator: " · "))
                         .font(Theme.mono(12)).foregroundStyle(Theme.muted)
                         .lineLimit(1)
                 }
@@ -180,8 +191,9 @@ struct ProgramWeekCard: View {
 
     private func spoken(_ row: ProgramEditing.DayRow) -> String {
         let day = WorkoutLibraryPolicy.weekdayNames[row.weekdayKey] ?? row.weekdayKey
-        let also = row.extras.isEmpty ? "" : ". Also \(ScheduleExtras.spokenList(row.extras.map(\.name)))"
+        let also = row.extras.isEmpty ? "" : ". Also \(ScheduleExtras.spokenList(row.extras.map { row.everyWeek.contains($0.id) ? "\($0.name), every week" : $0.name }))"
         guard let workout = row.workout else { return "\(day): Rest" + also }
+        if row.isEveryWeekOnly { return "\(day): \(workout.name), every week, beside the block" + also }
         return "\(day): " + PlanItemSummary.spoken(shown(workout, row.weekdayKey), plan: sync.plan,
                                                      unit: RunDistanceUnit.preferred(), showsWeekdays: false) + also
     }
@@ -200,7 +212,14 @@ struct ProgramSetupSheet: View {
     @State private var reviewedPlan: PlanTree?
     @State private var initialStart = ""
     @State private var confirmDiscard = false
-    private var dirty: Bool { name != "" || weeks != 8 || repeats || start != initialStart }
+    /// The workouts the block plans week by week (P7); the rest of Your week
+    /// carries on beside it. Nil until the sheet has read the plan.
+    @State private var picked: [String]?
+    @State private var initialPicked: [String] = []
+    private var dirty: Bool {
+        name != "" || weeks != 8 || repeats || start != initialStart || (picked ?? initialPicked) != initialPicked
+    }
+    private var choicesInWeek: [BlockLayers.Placed] { BlockLayers.repeatingWorkouts(reviewedPlan) }
     private var competingBlock: Bool { sync.plan?.program != nil }
     private var samePlan: Bool { reviewedPlan != nil && reviewedPlan?.id == sync.plan?.id }
     private var needsReview: Bool { reviewedPlan?.version != sync.plan?.version }
@@ -230,8 +249,33 @@ struct ProgramSetupSheet: View {
                         .accessibilityIdentifier("plan.blockSetup.repeat")
                 } footer: {
                     Text(repeats
-                         ? "Each week starts as a copy of your week. After the last week, the block starts over."
-                         : "Each week starts as a copy of your week. After the last week, your week comes back.")
+                         ? "After the last week, the block starts over."
+                         : "After the last week, what you do every week carries on by itself.")
+                }
+                if !choicesInWeek.isEmpty {
+                    Section {
+                        ForEach(choicesInWeek) { item in
+                            Toggle(isOn: Binding(
+                                get: { (picked ?? []).contains(item.workout.id) },
+                                set: { on in
+                                    var next = (picked ?? []).filter { $0 != item.workout.id }
+                                    if on { next.append(item.workout.id) }
+                                    picked = next
+                                }
+                            )) {
+                                HStack(spacing: 6) {
+                                    Text(item.workout.name).font(Theme.mono(15, .medium)).lineLimit(1)
+                                    Text(BlockLayers.daysLabel(item.days))
+                                        .font(Theme.mono(12)).foregroundStyle(Theme.muted)
+                                }
+                            }
+                            .accessibilityIdentifier("plan.blockSetup.pick.\(item.workout.id)")
+                        }
+                    } header: {
+                        Text("What the block plans week by week")
+                    } footer: {
+                        Text("Switched on: planned in the block, week by week, on the same days to start. Switched off: carries on every week beside it, block or not.")
+                    }
                 }
                 if competingBlock {
                     Section {
@@ -288,6 +332,8 @@ struct ProgramSetupSheet: View {
                 start = choices.first ?? ""
                 initialStart = start
                 reviewedPlan = sync.plan
+                initialPicked = BlockLayers.suggested(sync.plan)
+                picked = initialPicked
             }
             .alert("Discard block draft?", isPresented: $confirmDiscard) {
                 Button("Keep editing", role: .cancel) { }
@@ -308,7 +354,10 @@ struct ProgramSetupSheet: View {
         guard let plan = reviewedPlan, samePlan, !needsReview, !competingBlock, !start.isEmpty else { return }
         saving = true
         defer { saving = false }
-        let program = ProgramEditing.newProgram(from: plan, start: start, weeks: weeks, repeats: repeats, name: name)
+        // Its own workouts are picked from the week reviewed here; one
+        // removed since then is left out.
+        let program = BlockLayers.newBlock(from: plan, start: start, weeks: weeks, repeats: repeats,
+                                           name: name, picked: picked ?? [])
         if await sync.saveProgram(program, expectedVersion: plan.version) { dismiss() }
     }
 }
@@ -326,8 +375,24 @@ struct ProgramDaySheet: View {
     /// The block as it is now: a conflict reloads it, so the sheet shows
     /// what the next pick will change.
     private var block: PlanProgram { sync.plan?.program ?? program }
+    private var layered: Bool { BlockLayers.isLayered(block) }
+    /// What the day holds: in a layered block only the block's own count,
+    /// and Your week's are listed apart.
+    private var day: (own: [String], standing: [String]) {
+        BlockLayers.split(block, schedule: BlockLayers.repeatingWeek(sync.plan), week: target.week,
+                          day: target.weekdayKey)
+    }
     private var current: String? {
-        block.weeks.indices.contains(target.week) ? (block.weeks[target.week].week[target.weekdayKey] ?? nil) : nil
+        if layered { return day.own.first }
+        return block.weeks.indices.contains(target.week) ? (block.weeks[target.week].week[target.weekdayKey] ?? nil) : nil
+    }
+    private var standingWorkouts: [Workout] {
+        let live = sync.plan?.availableWorkouts ?? []
+        return day.standing.compactMap { id in live.first { $0.id == id } }
+    }
+    private var pickable: [Workout] {
+        let standing = Set(day.standing)
+        return (sync.plan?.libraryWorkouts ?? []).filter { !standing.contains($0.id) }
     }
     private var hasLaterWeeks: Bool { target.week < block.weeks.count - 1 }
     private var dayName: String { WorkoutLibraryPolicy.weekdayNames[target.weekdayKey] ?? target.weekdayKey }
@@ -348,9 +413,27 @@ struct ProgramDaySheet: View {
                              : "Weeks \(target.week + 1) to \(block.weeks.count) change.")
                     }
                 }
+                if layered && !standingWorkouts.isEmpty {
+                    Section {
+                        ForEach(standingWorkouts) { workout in
+                            HStack(spacing: 8) {
+                                Text(workout.name).font(Theme.mono(15, .medium)).foregroundStyle(Theme.muted)
+                                    .lineLimit(1)
+                                Spacer(minLength: 0)
+                                EveryWeekTag()
+                            }
+                            .frame(minHeight: 44)
+                            .accessibilityElement(children: .combine)
+                        }
+                    } header: {
+                        Text("Every week")
+                    } footer: {
+                        Text("These carry on beside the block. Change them in Your week.")
+                    }
+                }
                 Section {
-                    choice(nil, title: "Rest", systemImage: "moon.zzz")
-                    ForEach(sync.plan?.libraryWorkouts ?? []) { workout in
+                    choice(nil, title: layered ? "Nothing from the block" : "Rest", systemImage: "moon.zzz")
+                    ForEach(pickable) { workout in
                         Button { Task { await pick(workout.id) } } label: {
                             HStack {
                                 PlanItemLabel(workout: workout, plan: sync.plan, showsWeekdays: false)
@@ -419,9 +502,9 @@ struct ProgramDaySheet: View {
         guard let plan = sync.plan, let live = plan.program, live.weeks.indices.contains(target.week) else {
             dismiss(); return
         }
-        let next = ProgramEditing.setting(target.weekdayKey, to: workoutID, week: target.week,
-                                          scope: hasLaterWeeks ? scope : .thisWeek, in: live)
-        if next == live { dismiss(); return }
-        if await sync.saveProgram(next, expectedVersion: plan.version) { dismiss() }
+        let change = ProgramEditing.dayChange(target.weekdayKey, to: workoutID, week: target.week,
+                                              scope: hasLaterWeeks ? scope : .thisWeek, in: live, plan: plan)
+        if change.after == change.before { dismiss(); return }
+        if await sync.saveProgram(change.after, expectedVersion: plan.version) { dismiss() }
     }
 }

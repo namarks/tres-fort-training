@@ -481,9 +481,8 @@ as the calendar's first row and the block beside it with its own Block tab
 public PR #9 (retained new-block and workout-detail drafts, workout-library
 P0.15, and the reviewed lighter week, coach-free planning P2). Still to
 check on the phone (TestFlight 83 or later): a block date shows the block's
-workout together with what repeats every week. The iPhone app still starts
-and edits blocks as whole weeks; teaching it the block's own list is later
-work there.
+workout together with what repeats every week. Teaching the iPhone app the
+block's own list is [progressive plans](../progressive-plans/plan.md) P7.
 
 **Later (@agent):** Date-only replacement of scheduled extras, and a second
 workout on one date from the Add box, still need a shared replacement and

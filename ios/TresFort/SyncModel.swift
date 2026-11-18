@@ -6687,6 +6687,9 @@ final class SyncModel: ObservableObject {
     /// Saves the whole block of weeks (P2), or ends it with nil, at the plan
     /// version the Plan tab showed. A block changed elsewhere in the
     /// meantime comes back as a conflict to review, never overwritten.
+    /// A layered block (one that lists its own workouts) also sends the
+    /// repeating week without them when it still holds any, so a workout
+    /// the block owns leaves Your week in the same plan version.
     @discardableResult
     func saveProgram(_ program: PlanProgram?, expectedVersion version: Int) async -> Bool {
         guard !programWouldChangeLocalRunnerTargets(program) else {
@@ -6696,13 +6699,14 @@ final class SyncModel: ObservableObject {
         let live = plan.map(ProgramEditing.liveSlots)
         let activities = plan.map(ProgramEditing.liveWorkouts)
         let body = program.map { ProgramEditing.wire($0, liveSlots: live, activities: activities) }
+        let schedule = program.flatMap { ProgramEditing.wireSchedule(beside: $0, plan: plan) }
         let result: APIClient.ProgramWriteResult? = await performRoutineMutation { api, jwt in
             // The mutation queue may have waited while a local runner started.
             // Starting is itself blocked once this mutation owns the queue.
             guard !self.programWouldChangeLocalRunnerTargets(program) else {
                 throw APIError.http(400, "{\"error\":\"active_workout_targets_changed\"}")
             }
-            return try await api.setProgram(body, expectedVersion: version, jwt: jwt)
+            return try await api.setProgram(body, schedule: schedule, expectedVersion: version, jwt: jwt)
         }
         return result?.ok == true
     }

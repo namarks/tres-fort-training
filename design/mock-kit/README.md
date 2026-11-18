@@ -18,6 +18,11 @@ current screens:
 | `screens/plan-add.html` | Add to your week (`PlanComposerView`) |
 | `screens/plan-add-ride.html` | Add to your week with Ride chosen (`PlanComposerView.enduranceSections`) |
 | `screens/plan-add-home.html` | A weekday after tapping At home: the composer in place, the tile folded into one line (`WeekdayPlanSheet`, `PlanComposerView.DayContext`, `HomeRoutineSteppers`) |
+| `screens/plan-block-a.html` | Option A for a block's own workouts: every-week entries shown in the block's days with an Every week tag, "In this block" under them (`ProgramWeekCard`, `BlockWorkoutRows`) |
+| `screens/plan-block-b.html` | Option B: the block card switched to By workout (proposal, not built) |
+| `screens/plan-block-c.html`, `plan-block-c-page.html` | Option C: Your week with block tags and the block on its own page (proposal, not built) |
+| `screens/plan-block-setup.html` | Plan a block: what the block plans week by week (`ProgramSetupSheet`) |
+| `screens/plan-block-workout.html` | One of the block's workouts: its days and Remove from block (`BlockWorkoutSheet`) |
 | `screens/plan-event.html` | The Plan tab with a goal event leading the Schedule side (`EventPlanCard`) |
 | `screens/plan-event-edit.html` | Set or edit the goal event (`EventGoalEditor`) |
 | `screens/activity.html` | Activity, History side (`ActivityTabView`, `ActivityHistoryView`) |

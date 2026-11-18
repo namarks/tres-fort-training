@@ -120,6 +120,11 @@ struct WorkoutsView: View {
     @State private var programWeekLabel = ""
     @State private var endingProgram = false
     @State private var programTargetEdit: ProgramTargetEditRequest?
+    /// The block's own workouts (P7): one opened, adding one, or choosing
+    /// them for a block that never listed them.
+    @State private var blockWorkout: BlockWorkoutTarget?
+    @State private var addingToBlock = false
+    @State private var sortingBlock = false
     /// Your week folds to one row while a block is in use; this opens it.
     @State private var showsYourWeek = false
     /// The tab stays put when a workout starts; the sheet closes.
@@ -259,6 +264,9 @@ struct WorkoutsView: View {
                 }
             }
             .sheet(item: $programTargetEdit) { request in ProgramTargetEditorSheet(sync: sync, request: request) }
+            .sheet(item: $blockWorkout) { target in BlockWorkoutSheet(sync: sync, target: target) }
+            .sheet(isPresented: $addingToBlock) { AddToBlockSheet(sync: sync) }
+            .sheet(isPresented: $sortingBlock) { SortBlockSheet(sync: sync) }
             .sheet(isPresented: $showProgramSetup) { ProgramSetupSheet(sync: sync) }
             .sheet(isPresented: $showEventBuild) { EventBuildSheet(sync: sync) }
             .sheet(item: $eventTarget) { target in
@@ -290,7 +298,9 @@ struct WorkoutsView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("Your week takes over again. Past workouts stay in your history.")
+                Text(BlockLayers.isLayered(sync.plan?.program)
+                     ? "The block's own workouts stop and what you do every week carries on. They stay in Workouts, and past workouts stay in your history."
+                     : "Your week takes over again. Past workouts stay in your history.")
             }
     }
 
@@ -376,7 +386,22 @@ struct WorkoutsView: View {
                            inUse: ProgramEditing.isInUse(program, today: sync.todayString))
         } footer: {
             Text(ProgramEditing.status(program, today: sync.todayString)
-                 + " Tap a day to change it for this week or this week and after.")
+                 + (BlockLayers.isLayered(program)
+                    ? " Tap a day to change the block's workouts for this week or this week and after."
+                    : " Tap a day to change it for this week or this week and after."))
+        }
+        // What the block plans week by week, apart from what repeats every week.
+        Section {
+            BlockWorkoutRows(sync: sync, program: program, week: week,
+                             onOpen: { blockWorkout = $0 },
+                             onAdd: { addingToBlock = true },
+                             onSort: { sortingBlock = true })
+        } header: {
+            Text("In this block")
+        } footer: {
+            if BlockLayers.isLayered(program) {
+                Text("Every-week workouts carry on beside the block. Change them in Your week.")
+            }
         }
     }
 
@@ -536,7 +561,8 @@ struct WorkoutsView: View {
         } footer: {
             if let program {
                 Text(blockInUse
-                     ? ProgramEditing.yourWeekWhileInUse(program) + ". A new block starts from it."
+                     ? ProgramEditing.yourWeekWhileInUse(program)
+                        + (BlockLayers.isLayered(program) ? ". Tap a day to change it." : ". A new block starts from it.")
                      : ProgramEditing.yourWeekBesideBlock(program, today: sync.todayString))
             } else {
                 Text("Tap a day to swap it, or Add to put something new on one or more days. To change a single date, use the calendar.")

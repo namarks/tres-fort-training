@@ -1,0 +1,563 @@
+{
+  "_comment": "Shared with test/block_layers_fixture.test.ts (src/programLayers.ts, web/src/blockLayers.ts) and ios/TresFortTests/BlockLayersTests.swift (BlockLayers.swift). Expected values come from the TypeScript; both sides must match them. docs/plans/progressive-plans P7.",
+  "layer": [
+    {
+      "name": "own main stays and the repeating week's main moves beside it",
+      "before": {
+        "week": {
+          "mon": "kb_a",
+          "tue": "intervals"
+        }
+      },
+      "after": {
+        "week": {
+          "mon": "kb_a",
+          "tue": "intervals"
+        }
+      },
+      "program": {
+        "workout_ids": [
+          "intervals",
+          "long_run"
+        ],
+        "weeks": [
+          {
+            "label": "Base",
+            "week": {
+              "mon": "kb_a",
+              "tue": "intervals",
+              "sun": "long_run"
+            }
+          },
+          {
+            "week": {
+              "mon": "long_run",
+              "tue": "intervals"
+            },
+            "extras": {
+              "mon": [
+                "kb_a"
+              ]
+            }
+          }
+        ]
+      },
+      "expected_weeks": [
+        {
+          "label": "Base",
+          "week": {
+            "mon": "kb_a",
+            "tue": "intervals",
+            "wed": null,
+            "thu": null,
+            "fri": null,
+            "sat": null,
+            "sun": "long_run"
+          }
+        },
+        {
+          "week": {
+            "mon": "long_run",
+            "tue": "intervals",
+            "wed": null,
+            "thu": null,
+            "fri": null,
+            "sat": null,
+            "sun": null
+          },
+          "extras": {
+            "mon": [
+              "kb_a"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "a change to the repeating week reaches every block day",
+      "before": {
+        "week": {
+          "mon": "kb_a"
+        }
+      },
+      "after": {
+        "week": {
+          "mon": "kb_b",
+          "wed": "soccer"
+        },
+        "extras": {
+          "mon": [
+            "core"
+          ]
+        }
+      },
+      "program": {
+        "workout_ids": [
+          "intervals"
+        ],
+        "weeks": [
+          {
+            "week": {
+              "mon": "kb_a",
+              "tue": "intervals"
+            }
+          }
+        ]
+      },
+      "expected_weeks": [
+        {
+          "week": {
+            "mon": "kb_b",
+            "tue": "intervals",
+            "wed": "soccer",
+            "thu": null,
+            "fri": null,
+            "sat": null,
+            "sun": null
+          },
+          "extras": {
+            "mon": [
+              "core"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "extras keep the block's own first and cut the repeating week's past four",
+      "before": {
+        "week": {}
+      },
+      "after": {
+        "week": {
+          "thu": "kb_b"
+        },
+        "extras": {
+          "thu": [
+            "core",
+            "stretch",
+            "mobility"
+          ]
+        }
+      },
+      "program": {
+        "workout_ids": [
+          "tempo",
+          "strides",
+          "drills"
+        ],
+        "weeks": [
+          {
+            "week": {
+              "thu": "tempo"
+            },
+            "extras": {
+              "thu": [
+                "strides",
+                "drills"
+              ]
+            }
+          }
+        ]
+      },
+      "expected_weeks": [
+        {
+          "week": {
+            "mon": null,
+            "tue": null,
+            "wed": null,
+            "thu": "tempo",
+            "fri": null,
+            "sat": null,
+            "sun": null
+          },
+          "extras": {
+            "thu": [
+              "strides",
+              "drills",
+              "kb_b",
+              "core"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "an unlisted entry the repeating week doesn't hold is kept as the block's",
+      "before": {
+        "week": {
+          "mon": "kb_a"
+        }
+      },
+      "after": {
+        "week": {
+          "mon": "kb_a"
+        }
+      },
+      "program": {
+        "workout_ids": [
+          "intervals"
+        ],
+        "weeks": [
+          {
+            "week": {
+              "mon": "kb_a",
+              "fri": "swim"
+            }
+          }
+        ]
+      },
+      "expected_weeks": [
+        {
+          "week": {
+            "mon": "kb_a",
+            "tue": null,
+            "wed": null,
+            "thu": null,
+            "fri": "swim",
+            "sat": null,
+            "sun": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "a listed workout in the repeating week is never added back as every week",
+      "before": {
+        "week": {
+          "sat": "tempo"
+        }
+      },
+      "after": {
+        "week": {
+          "sat": "tempo",
+          "sun": "easy_run"
+        }
+      },
+      "program": {
+        "workout_ids": [
+          "tempo"
+        ],
+        "weeks": [
+          {
+            "week": {
+              "sat": null
+            }
+          },
+          {
+            "week": {
+              "sat": "tempo"
+            }
+          }
+        ]
+      },
+      "expected_weeks": [
+        {
+          "week": {
+            "mon": null,
+            "tue": null,
+            "wed": null,
+            "thu": null,
+            "fri": null,
+            "sat": null,
+            "sun": "easy_run"
+          }
+        },
+        {
+          "week": {
+            "mon": null,
+            "tue": null,
+            "wed": null,
+            "thu": null,
+            "fri": null,
+            "sat": "tempo",
+            "sun": "easy_run"
+          }
+        }
+      ]
+    },
+    {
+      "name": "targets and labels ride along untouched",
+      "before": {
+        "week": {}
+      },
+      "after": {
+        "week": {
+          "wed": "soccer"
+        }
+      },
+      "program": {
+        "workout_ids": [
+          "long_run"
+        ],
+        "weeks": [
+          {
+            "label": "Build",
+            "week": {
+              "sun": "long_run"
+            },
+            "targets": {
+              "slot_long": {
+                "target_sets": 1
+              }
+            }
+          }
+        ]
+      },
+      "expected_weeks": [
+        {
+          "label": "Build",
+          "week": {
+            "mon": null,
+            "tue": null,
+            "wed": "soccer",
+            "thu": null,
+            "fri": null,
+            "sat": null,
+            "sun": "long_run"
+          },
+          "targets": {
+            "slot_long": {
+              "target_sets": 1
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "a block that lists no workouts is left as stored",
+      "before": {
+        "week": {
+          "mon": "kb_a"
+        }
+      },
+      "after": {
+        "week": {
+          "mon": "kb_b"
+        }
+      },
+      "program": {
+        "weeks": [
+          {
+            "week": {
+              "mon": "kb_a",
+              "tue": "intervals"
+            }
+          }
+        ]
+      },
+      "expected_weeks": [
+        {
+          "week": {
+            "mon": "kb_a",
+            "tue": "intervals",
+            "wed": null,
+            "thu": null,
+            "fri": null,
+            "sat": null,
+            "sun": null
+          }
+        }
+      ]
+    }
+  ],
+  "own_form": [
+    {
+      "name": "drops what the repeating week put there",
+      "schedule": {
+        "week": {
+          "mon": "kb_a",
+          "wed": "soccer"
+        },
+        "extras": {
+          "mon": [
+            "core"
+          ]
+        }
+      },
+      "program": {
+        "workout_ids": [
+          "intervals",
+          "long_run"
+        ],
+        "weeks": [
+          {
+            "week": {
+              "mon": "kb_a",
+              "tue": "intervals",
+              "wed": "soccer",
+              "sun": "long_run"
+            },
+            "extras": {
+              "mon": [
+                "core"
+              ]
+            }
+          },
+          {
+            "week": {
+              "mon": "long_run",
+              "wed": "soccer"
+            },
+            "extras": {
+              "mon": [
+                "kb_a",
+                "core"
+              ]
+            }
+          }
+        ]
+      },
+      "expected_weeks": [
+        {
+          "week": {
+            "mon": null,
+            "tue": "intervals",
+            "wed": null,
+            "thu": null,
+            "fri": null,
+            "sat": null,
+            "sun": "long_run"
+          }
+        },
+        {
+          "week": {
+            "mon": "long_run",
+            "tue": null,
+            "wed": null,
+            "thu": null,
+            "fri": null,
+            "sat": null,
+            "sun": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "keeps a listed workout the repeating week also holds",
+      "schedule": {
+        "week": {
+          "sat": "tempo"
+        }
+      },
+      "program": {
+        "workout_ids": [
+          "tempo"
+        ],
+        "weeks": [
+          {
+            "week": {
+              "sat": "tempo"
+            }
+          }
+        ]
+      },
+      "expected_weeks": [
+        {
+          "week": {
+            "mon": null,
+            "tue": null,
+            "wed": null,
+            "thu": null,
+            "fri": null,
+            "sat": "tempo",
+            "sun": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "an unlayered block owns its whole days",
+      "schedule": {
+        "week": {
+          "mon": "kb_a"
+        }
+      },
+      "program": {
+        "weeks": [
+          {
+            "week": {
+              "mon": "kb_a",
+              "tue": "intervals"
+            }
+          }
+        ]
+      },
+      "expected_weeks": [
+        {
+          "week": {
+            "mon": "kb_a",
+            "tue": "intervals",
+            "wed": null,
+            "thu": null,
+            "fri": null,
+            "sat": null,
+            "sun": null
+          }
+        }
+      ]
+    }
+  ],
+  "trimmed": [
+    {
+      "name": "takes the block's own workouts out of the repeating week",
+      "schedule": {
+        "week": {
+          "mon": "kb_a",
+          "tue": "intervals",
+          "sat": "tempo"
+        },
+        "extras": {
+          "tue": [
+            "core"
+          ],
+          "sat": [
+            "intervals"
+          ]
+        }
+      },
+      "workout_ids": [
+        "intervals",
+        "tempo"
+      ],
+      "expected": {
+        "week": {
+          "mon": "kb_a",
+          "tue": null,
+          "wed": null,
+          "thu": null,
+          "fri": null,
+          "sat": null,
+          "sun": null
+        },
+        "extras": {
+          "tue": [
+            "core"
+          ]
+        }
+      }
+    },
+    {
+      "name": "nothing to send when the repeating week holds none of them",
+      "schedule": {
+        "week": {
+          "mon": "kb_a"
+        }
+      },
+      "workout_ids": [
+        "intervals"
+      ],
+      "expected": null
+    },
+    {
+      "name": "nothing to send for a block without a list",
+      "schedule": {
+        "week": {
+          "mon": "kb_a"
+        }
+      },
+      "workout_ids": null,
+      "expected": null
+    }
+  ]
+}

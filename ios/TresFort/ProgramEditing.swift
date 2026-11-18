@@ -108,7 +108,9 @@ enum ProgramEditing {
         case .upcoming:
             return "Starts \(spokenDate(program.start))."
         case .ended:
-            return "This block has ended. Your week is back."
+            return BlockLayers.isLayered(program)
+                ? "This block has ended. What you do every week carries on."
+                : "This block has ended. Your week is back."
         }
     }
 
@@ -128,6 +130,7 @@ enum ProgramEditing {
 
     /// The one line on Your week's folded row while the block is in use.
     static func yourWeekWhileInUse(_ program: PlanProgram) -> String {
+        if BlockLayers.isLayered(program) { return "Carries on beside the block every week" }
         if let back = yourWeekReturns(program) { return "Not in use until \(spokenDate(back)), after the block" }
         return "Not in use while the block repeats"
     }
@@ -248,27 +251,55 @@ enum ProgramEditing {
 
     private static func replacing(weeks: [PlanProgram.Week], in program: PlanProgram) -> PlanProgram {
         PlanProgram(id: program.id, name: program.name, start: program.start,
-                    repeats: program.repeats, weeks: weeks)
+                    repeats: program.repeats, weeks: weeks, workoutIDs: program.workoutIDs)
     }
 
     // MARK: reading a week
 
     /// One weekday of a block week: its main workout and extras, live only.
+    /// In a layered block, `everyWeek` holds the ids that come from Your week
+    /// rather than the block (P7).
     struct DayRow: Equatable, Identifiable {
         let weekdayKey: String
         let workout: Workout?
         let extras: [Workout]
+        var everyWeek: Set<String> = []
         var id: String { weekdayKey }
+        /// Whether the day holds nothing from the block itself.
+        var isEveryWeekOnly: Bool { workout.map { everyWeek.contains($0.id) } ?? false }
     }
 
     static func rows(_ program: PlanProgram, week index: Int, plan: PlanTree?) -> [DayRow] {
         guard let week = program.weeks[safe: index] else { return [] }
         let live = Dictionary((plan?.availableWorkouts ?? []).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let schedule = BlockLayers.repeatingWeek(plan)
         return PlanSchedule.weekdayKeys.map { key in
             let main = (week.week[key] ?? nil).flatMap { live[$0] }
             let extras = (week.extras?[key] ?? []).compactMap { live[$0] }
-            return DayRow(weekdayKey: key, workout: main, extras: extras)
+            let standing = BlockLayers.split(program, schedule: schedule, week: index, day: key).standing
+            return DayRow(weekdayKey: key, workout: main, extras: extras, everyWeek: Set(standing))
         }
+    }
+
+    /// A day change on a block: the program to save and the one it is
+    /// compared with to see whether anything changed. A layered block is
+    /// changed in own form, so only what the block owns moves; the server
+    /// lays Your week back over it.
+    static func dayChange(_ weekdayKey: String, to workoutID: String?, week index: Int, scope: Scope,
+                          in program: PlanProgram, plan: PlanTree?) -> (before: PlanProgram, after: PlanProgram) {
+        let layered = BlockLayers.isLayered(program)
+        let base = layered ? BlockLayers.ownForm(program, schedule: BlockLayers.repeatingWeek(plan)) : program
+        guard layered, workoutID == nil else {
+            return (base, setting(weekdayKey, to: workoutID, week: index, scope: scope, in: base))
+        }
+        // "Nothing from the block": every workout the block owns that day
+        // leaves, its extras too; Your week's are laid back by the server.
+        let reach = scope == .thisWeek ? index...index : index...max(index, base.weeks.count - 1)
+        var weeks = base.weeks
+        for i in reach where weeks.indices.contains(i) {
+            weeks[i] = BlockLayers.withDay(weeks[i], weekdayKey, [])
+        }
+        return (base, replacing(weeks: weeks, in: base))
     }
 
     /// Whether a week differs from Your week (its days, extras or targets).
@@ -304,7 +335,26 @@ enum ProgramEditing {
             "weeks": program.weeks.map { wire(week: $0, liveSlots: liveSlots, activities: activities) },
         ]
         if let name = program.name { body["name"] = name }
+        // A layered block sends its list; one that never had a list leaves it
+        // out, so the server keeps whatever list the saved block has.
+        if let ids = program.workoutIDs {
+            body["workout_ids"] = ids.filter { activities?.contains($0) ?? true }
+        }
         return body
+    }
+
+    /// The `schedule` beside a layered block's `PUT /api/plan/program`:
+    /// the repeating week without the block's own workouts, or nil when it
+    /// holds none of them (or the block lists none).
+    static func wireSchedule(beside program: PlanProgram, plan: PlanTree?) -> [String: Any]? {
+        guard let ids = program.workoutIDs,
+              let trimmed = BlockLayers.trimmedSchedule(BlockLayers.repeatingWeek(plan), workoutIDs: ids)
+        else { return nil }
+        var days: [String: Any] = [:]
+        for key in PlanSchedule.weekdayKeys {
+            if let id = trimmed.week[key] ?? nil { days[key] = id } else { days[key] = NSNull() }
+        }
+        return ["week": days, "extras": trimmed.extras]
     }
 
     static func wire(week: PlanProgram.Week, liveSlots: Set<String>? = nil,

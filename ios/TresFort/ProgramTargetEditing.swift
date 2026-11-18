@@ -158,6 +158,7 @@ enum ProgramTargetEditing {
         return Preview(program: next, changes: changes)
     }
     private static func replacing(_ weeks: [PlanProgram.Week], in p: PlanProgram) -> PlanProgram {
-        PlanProgram(id: p.id, name: p.name, start: p.start, repeats: p.repeats, weeks: weeks)
+        PlanProgram(id: p.id, name: p.name, start: p.start, repeats: p.repeats, weeks: weeks,
+                    workoutIDs: p.workoutIDs)
     }
 }
