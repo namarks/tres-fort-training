@@ -893,6 +893,24 @@ private final class SetRoutineEditingAPIStub: RoutineEditingAPI {
         if let tripError { throw tripError }
         return APIClient.TripWriteResult(ok: true, version: expectedVersion + 1)
     }
+
+    /// (race sent, expected version); a clear sends nil.
+    private(set) var raceWrites: [([String: Any]?, Int)] = []
+    var raceError: Error?
+
+    func setRace(_ race: [String: Any], expectedVersion: Int, jwt: String) async throws
+        -> APIClient.RaceWriteResult
+    {
+        raceWrites.append((race, expectedVersion))
+        if let raceError { throw raceError }
+        return APIClient.RaceWriteResult(ok: true, version: expectedVersion + 1)
+    }
+
+    func clearRace(expectedVersion: Int, jwt: String) async throws -> APIClient.RaceWriteResult {
+        raceWrites.append((nil, expectedVersion))
+        if let raceError { throw raceError }
+        return APIClient.RaceWriteResult(ok: true, version: expectedVersion + 1)
+    }
 }
 
 private actor SetAsyncLatch {
@@ -4608,6 +4626,69 @@ final class SetOutboxTests: XCTestCase {
         XCTAssertTrue(removed)
         XCTAssertEqual(routineAPI.tripRemovals.first?.0, "trip-1")
         XCTAssertEqual(routineAPI.tripRemovals.first?.1, 4)
+    }
+
+    func testEventSaveAndRemoveSendTheWholeEventAtTheShownVersion() async throws {
+        let defaults = defaults()
+        let s = session(status: "planned", attempt: 0)
+        let workouts = [day(with: [exercise()])]
+        let meta = #"{"race":{"name":"Turkey Trot","date":"2026-11-26","discipline":"running","priority":"A"}}"#
+        let routineAPI = SetRoutineEditingAPIStub()
+        let stateAPI = SetWriteAPIStub()
+        stateAPI.stateHandler = { [self] _ in
+            state(session: s, sets: [], workouts: workouts, planVersion: 4, planMeta: meta)
+        }
+        let model = SyncModel(auth: retainedAuth(defaults: defaults), setWriteAPI: stateAPI,
+            catalogAPI: SetCatalogAPIStub(), routineEditingAPI: routineAPI,
+            defaults: defaults, now: { self.fixedDate })
+        model.replaceState(with: state(session: s, sets: [], workouts: workouts, planVersion: 3, planMeta: meta))
+        let shown = try XCTUnwrap(model.plan?.event)
+        XCTAssertEqual(shown.priority, "A")
+
+        var draft = EventGoalDraft(event: shown, unit: .miles)
+        draft.distanceChoice = .preset("5k")
+        draft.goal = "20:00"
+        guard case .success(let event) = draft.event() else { return XCTFail("The draft is valid") }
+        let saved = await model.saveEvent(event, expectedVersion: 3)
+        XCTAssertTrue(saved)
+        XCTAssertEqual(routineAPI.raceWrites.count, 1)
+        let race = routineAPI.raceWrites[0].0
+        XCTAssertEqual(race?["name"] as? String, "Turkey Trot")
+        XCTAssertEqual(race?["distance"] as? String, "5k")
+        XCTAssertEqual(race?["distance_m"] as? Double, 5_000)
+        XCTAssertEqual(race?["goal_time_s"] as? Int, 1_200)
+        XCTAssertEqual(race?["priority"] as? String, "A", "The coach's priority is kept")
+        XCTAssertEqual(routineAPI.raceWrites[0].1, 3)
+        XCTAssertEqual(model.plan?.version, 4, "A saved event reloads the plan")
+
+        let removed = await model.removeEvent(expectedVersion: 4)
+        XCTAssertTrue(removed)
+        XCTAssertNil(routineAPI.raceWrites[1].0)
+        XCTAssertEqual(routineAPI.raceWrites[1].1, 4)
+    }
+
+    func testStaleEventSaveReloadsAndAsksForReview() async {
+        let defaults = defaults()
+        let s = session(status: "planned", attempt: 0)
+        let workouts = [day(with: [exercise()])]
+        let routineAPI = SetRoutineEditingAPIStub()
+        routineAPI.raceError = APIError.http(409, #"{"conflict":true,"current_version":5}"#)
+        let stateAPI = SetWriteAPIStub()
+        stateAPI.stateHandler = { [self] _ in
+            state(session: s, sets: [], workouts: workouts, planVersion: 5, planMeta: nil)
+        }
+        let model = SyncModel(auth: retainedAuth(defaults: defaults), setWriteAPI: stateAPI,
+            catalogAPI: SetCatalogAPIStub(), routineEditingAPI: routineAPI,
+            defaults: defaults, now: { self.fixedDate })
+        model.replaceState(with: state(session: s, sets: [], workouts: workouts, planVersion: 2, planMeta: nil))
+
+        let saved = await model.saveEvent(PlanEvent(name: "Turkey Trot", date: "2026-11-26", discipline: "running"),
+                                          expectedVersion: 2)
+
+        XCTAssertFalse(saved)
+        XCTAssertEqual(model.plan?.version, 5)
+        XCTAssertNotNil(model.loadError)
+        XCTAssertEqual(routineAPI.raceWrites.last?.1, 2, "A save never adopts the newer live version")
     }
 
     func testStaleAwayDatesSaveReloadsAndAsksForReview() async {

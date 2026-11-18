@@ -310,10 +310,18 @@ struct PlanProgram: Equatable {
     }
 }
 
-/// `meta.race`, as far as the app shows it: the event a block builds to.
+/// `meta.race`: the member's goal event, which a block can build to. Set and
+/// cleared in the app (`EventGoalEditor`), on the web, or by the coach.
 struct PlanEvent: Decodable, Equatable {
     let name: String
     let date: String
+    var discipline: String? = nil
+    var distance: String? = nil
+    var distance_m: Double? = nil
+    var goal_time_s: Int? = nil
+    /// A, B or C, set by the coach; the app keeps it on save.
+    var priority: String? = nil
+    var location: String? = nil
 }
 
 struct PlanTree: Codable, Equatable {
@@ -338,7 +346,7 @@ struct PlanTree: Codable, Equatable {
         return try? JSONDecoder().decode(MetaEnvelope.self, from: data).schedule
     }
 
-    /// The member's goal event (`meta.race`): its name and date, or nil.
+    /// The member's goal event (`meta.race`), or nil.
     var event: PlanEvent? {
         guard let meta, let data = meta.data(using: .utf8) else { return nil }
         struct MetaEnvelope: Decodable { let race: PlanEvent? }

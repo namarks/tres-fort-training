@@ -28,6 +28,7 @@ const P = {
   'checkmark': '<path d="M5 12.5l4.5 4.5L19 7"/>',
   'calendar': '<rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M8 3v4M16 3v4"/>',
   'airplane': '<path d="M3 13l7-2V5.5a2 2 0 0 1 4 0V11l7 2v2l-7-1.5V18l2 1.5V21l-4-1-4 1v-1.5l2-1.5v-4.5L3 15z"/>',
+  'flag.checkered': '<path d="M5 21V4M5 4h13l-2.5 4.5L18 13H5"/>',
   'xmark': '<path d="M6 6l12 12M18 6L6 18"/>',
   'repeat': '<path d="M4 11V9a3 3 0 0 1 3-3h12l-3-3M20 13v2a3 3 0 0 1-3 3H5l3 3"/>',
   'chevron.down': '<path d="M5 9l7 7 7-7"/>',

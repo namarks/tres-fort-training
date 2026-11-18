@@ -54,8 +54,25 @@ P5).
     pace. The web sets, edits and removes the event on its Analysis section's
     Event page ([web app](../web-app/plan.md) P3); the web gateway allows the
     two routes.
-  - Still to do: the iOS editor for the event, and training phases in the
-    app and on the web.
+  - iOS event editor (placement is mock option B, offered to the owner on
+    2026-11-18 beside a quieter row and a Today countdown):
+    with an event set, a card at the top of the Plan tab's Schedule side
+    shows its date and countdown, name, distance, goal time and goal pace;
+    tapping it opens the editor. With none, a "Set an event" row sits beside
+    Calendar. The editor sets name, date, type (the web's five plus
+    "Something else"), distance (the web's presets per sport, another
+    distance in its unit, or free text for multisport and other types, and a
+    distance the coach saved as text is kept) and an optional goal time
+    (`18:00`, `1:45:30` or minutes), with goal pace or speed worked out, and
+    removes the event after a confirmation. Saves send the whole event
+    through `PUT /api/plan/race`, keeping a priority and location the coach
+    set; removal uses `DELETE /api/plan/race`. Both carry the plan version
+    the editor opened with and go through the routine write queue; a newer
+    plan is a conflict that reloads, closes the editor and asks the member to
+    review. The draft rules mirror `web/src/event.ts` (`EventGoal.swift`,
+    `EventGoalTests`).
+  - Still to do: training phases (`set_periodization`) in the app and on the
+    web.
 - [x] **P2 — Deload or lighten a week**
   - Offer a reviewed lighter-week action in native and web block planning:
     one scheduled lifting workout or all lifting workouts in the selected
@@ -93,13 +110,12 @@ P5).
 
 ## Next step
 
-**Now (@agent):** P1's iOS editor for the event (set, change and clear it
-through the existing `PUT`/`DELETE /api/plan/race`), then training phases in
-the app and on the web. The web already sets the event on Analysis → Event
-and from the guided block start (web-app P2); the native run builder can
-create an event with its block but is not a standalone event editor. Then
-P3's remaining edits: editing existing slot cues and progression, and native
-workout notes (creation-time lifting cues already exist).
+**Now (@agent):** P1's training phases (`set_periodization`) in the app and
+on the web. The iOS event editor is built (see P1) and rides the next
+TestFlight build; the owner's look on a device is part of that build's
+checks. Then P3's remaining edits: editing existing slot cues and
+progression, and native workout notes (creation-time lifting cues already
+exist).
 
 P2's reviewed lighter week is delivered and released (see P2). Deployments
 and client distribution require separate authority.
