@@ -9,7 +9,9 @@ import SwiftUI
 /// what it is and what's in it (P13). The arrows, a sideways swipe or the week's letters move to
 /// another day; the content slides with the finger and the phone ticks on
 /// each move (P20). Only this weekday changes; dates already assigned stay
-/// as they are.
+/// as they are. A New tile opens the composer in place, not on a page of
+/// its own: the title, arrows, Done and week strip stay put, and the tiles
+/// fold into one line with Change (P28).
 struct WeekdayPlanSheet: View {
     @ObservedObject var sync: SyncModel
     /// Closes the sheet and opens a workout on the Plan tab's own stack.
@@ -20,6 +22,8 @@ struct WeekdayPlanSheet: View {
     @State private var weekdayKey: String
     @State private var saving = false
     @State private var composing: PlanComposer.Kind?
+    /// The composer in place has a save out: Done and Change wait for it.
+    @State private var composerSaving = false
     /// The New tiles' order, the member's most frequent first, fixed while
     /// the sheet is open.
     @State private var order: [PlanComposer.Kind]
@@ -54,46 +58,18 @@ struct WeekdayPlanSheet: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                if currentWorkout != nil || !extras.isEmpty {
-                    daySection
+            Group {
+                if let composing {
+                    PlanComposerView(sync: sync, kind: composing, days: [weekdayKey],
+                                     day: .init(header: "New for every \(dayName)",
+                                                onChangeKind: { changeKind() },
+                                                onSavingChange: { composerSaving = $0 })) { dismiss() }
+                        .id(composing)
+                        .transition(.opacity)
+                } else {
+                    dayList
+                        .transition(.opacity)
                 }
-                // The tiles sit in the header, not a row: a row's rounded
-                // corners clipped the outer tiles (app-design-pass P24).
-                Section {
-                } header: {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("New for every \(dayName)")
-                        // Three and three, the member's most frequent first.
-                        HStack(spacing: 8) {
-                            ForEach(Array(order.prefix(3))) { kind in newTile(kind) }
-                        }
-                        HStack(spacing: 8) {
-                            ForEach(Array(order.dropFirst(3))) { kind in newTile(kind) }
-                        }
-                    }
-                    .textCase(nil)
-                }
-                Section {
-                    choice(workout: nil)
-                    ForEach(saved) { workout in choice(workout: workout) }
-                } header: {
-                    Text("Or use one you have")
-                } footer: {
-                    Text("Repeats every week. To change one date, use the calendar.")
-                }
-                if let error = sync.loadError {
-                    Section {
-                        Text(error).foregroundStyle(Theme.danger)
-                            .accessibilityIdentifier("weekday.error")
-                    }
-                }
-            }
-            .scrollContentBackground(.hidden)
-            // A sideways swipe moves a day, like the arrows. A mostly
-            // vertical drag stays a scroll.
-            .daySwipe(swipe, isEnabled: canStep) { offset in
-                weekdayKey = Self.weekday(weekdayKey, offset: offset)
             }
             .background(Theme.background)
             .safeAreaInset(edge: .top, spacing: 0) {
@@ -102,6 +78,7 @@ struct WeekdayPlanSheet: View {
                     guard let from = keys.firstIndex(of: weekdayKey), let to = keys.firstIndex(of: key) else { return }
                     step(to - from)
                 }
+                .disabled(composing != nil)
             }
             .navigationTitle(dayName)
             .navigationBarTitleDisplayMode(.inline)
@@ -112,12 +89,9 @@ struct WeekdayPlanSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
-                        .disabled(saving)
+                        .disabled(saving || composerSaving)
                         .accessibilityIdentifier("weekday.done")
                 }
-            }
-            .navigationDestination(item: $composing) { kind in
-                PlanComposerView(sync: sync, kind: kind, days: [weekdayKey]) { dismiss() }
             }
             .sheet(item: $timing) { workout in
                 ScheduleTimeSheet(name: workout.name, weekdayKey: weekdayKey,
@@ -129,7 +103,64 @@ struct WeekdayPlanSheet: View {
                 }
             }
         }
-        .interactiveDismissDisabled(saving)
+        .interactiveDismissDisabled(saving || composerSaving)
+    }
+
+    /// Opens the composer in place of the tiles.
+    private func compose(_ kind: PlanComposer.Kind) {
+        withAnimation(reduceMotion ? nil : .snappy) { composing = kind }
+    }
+
+    /// Change: the tiles again, in the places they were.
+    private func changeKind() {
+        guard !composerSaving else { return }
+        withAnimation(reduceMotion ? nil : .snappy) { composing = nil }
+    }
+
+    /// The day as it is: what it holds, the New tiles, and rest or a saved
+    /// workout.
+    private var dayList: some View {
+        List {
+            if currentWorkout != nil || !extras.isEmpty {
+                daySection
+            }
+            // The tiles sit in the header, not a row: a row's rounded
+            // corners clipped the outer tiles (app-design-pass P24).
+            Section {
+            } header: {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("New for every \(dayName)")
+                    // Three and three, the member's most frequent first.
+                    HStack(spacing: 8) {
+                        ForEach(Array(order.prefix(3))) { kind in newTile(kind) }
+                    }
+                    HStack(spacing: 8) {
+                        ForEach(Array(order.dropFirst(3))) { kind in newTile(kind) }
+                    }
+                }
+                .textCase(nil)
+            }
+            Section {
+                choice(workout: nil)
+                ForEach(saved) { workout in choice(workout: workout) }
+            } header: {
+                Text("Or use one you have")
+            } footer: {
+                Text("Repeats every week. To change one date, use the calendar.")
+            }
+            if let error = sync.loadError {
+                Section {
+                    Text(error).foregroundStyle(Theme.danger)
+                        .accessibilityIdentifier("weekday.error")
+                }
+            }
+        }
+        .scrollContentBackground(.hidden)
+        // A sideways swipe moves a day, like the arrows. A mostly
+        // vertical drag stays a scroll.
+        .daySwipe(swipe, isEnabled: canStep) { offset in
+            weekdayKey = Self.weekday(weekdayKey, offset: offset)
+        }
     }
 
     /// The weekday `offset` days away, wrapping Sunday to Monday.
@@ -154,7 +185,7 @@ struct WeekdayPlanSheet: View {
             Image(systemName: systemImage).font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(Theme.text)
         }
-        .disabled(saving)
+        .disabled(saving || composing != nil)
         .accessibilityLabel(offset < 0 ? "Previous day, \(name)" : "Next day, \(name)")
         .accessibilityIdentifier(id)
     }
@@ -182,7 +213,7 @@ struct WeekdayPlanSheet: View {
     private func newTile(_ kind: PlanComposer.Kind) -> some View {
         let title = kind.title
         let id = Self.tileID(kind)
-        return Button { composing = kind } label: {
+        return Button { compose(kind) } label: {
             VStack(spacing: 6) {
                 Image(systemName: kind.glyph).font(.system(size: 22, weight: .semibold))
                     .foregroundStyle(Theme.accent)
@@ -253,7 +284,7 @@ struct WeekdayPlanSheet: View {
                 .accessibilityIdentifier("weekday.extra.\(workout.id)")
             }
             if extras.count < ScheduleExtras.maxPerDay {
-                Button { composing = .home } label: {
+                Button { compose(.home) } label: {
                     Label("Add something alongside", systemImage: "plus")
                         .font(Theme.mono(14, .bold)).foregroundStyle(Theme.accent)
                         .frame(minHeight: 44)

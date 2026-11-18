@@ -163,7 +163,7 @@ struct HomeRoutineTimingSheet: View {
             }
             .scrollContentBackground(.hidden)
             .background(Theme.background)
-            .navigationTitle("Sets and rests")
+            .navigationTitle("Circuit and timers")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -244,7 +244,8 @@ struct HomeRoutineBuilder {
 
 /// The routine's chips and its list: drag to reorder, swipe to remove, tap
 /// one for its own sets, reps or hold, add more from the no-equipment
-/// catalog, and open its shared sets and rests. Put it in a Form or List and
+/// catalog, set its shared sets, reps, hold and rest, and open its circuit
+/// and timers. Put it in a Form or List and
 /// attach `homeRoutineSheets` to the screen, outside the list.
 struct HomeRoutineSections: View {
     @Binding var builder: HomeRoutineBuilder
@@ -301,14 +302,20 @@ struct HomeRoutineSections: View {
             .disabled(disabled)
             .accessibilityIdentifier("composer.home.add")
             if !builder.exercises.isEmpty {
+                // The shared sets, reps, holds and rest right in the list,
+                // so the usual change needs no sheet (P28). A circuit, timing
+                // every exercise and the timer preview stay one tap away.
+                HomeRoutineSteppers(routine: $builder.routine, exercises: builder.exercises)
+                    .disabled(disabled)
                 Button {
                     beforeEditing()
                     builder.editingTiming = true
                 } label: {
                     HStack {
-                        Label("Sets and rests", systemImage: "timer")
+                        Label("Circuit and timers", systemImage: "timer")
                         Spacer()
-                        Text(builder.timingSummary).font(Theme.mono(12)).foregroundStyle(Theme.muted)
+                        Text(builder.routine.circuit ? "Circuit" : "One exercise at a time")
+                            .font(Theme.mono(12)).foregroundStyle(Theme.muted)
                         Image(systemName: "chevron.right").font(.footnote.weight(.semibold))
                             .foregroundStyle(Theme.muted)
                             .accessibilityHidden(true)
@@ -338,6 +345,67 @@ struct HomeRoutineSections: View {
             beforeEditing()
             builder.choose(start, catalog: catalog)
         }
+    }
+}
+
+/// The routine's shared sets (or rounds), reps, hold and rest as steppers
+/// in its list (app-design-pass P28): what every exercise uses unless it has
+/// its own. Reps show when an exercise is counted, the hold when one is
+/// timed. A value typed out of range in the timing sheet starts the stepper
+/// from the routine's default.
+struct HomeRoutineSteppers: View {
+    @Binding var routine: HomeRoutineDraft
+    let exercises: [ExerciseCatalog]
+
+    static let restStep = 15
+    static let restRange = 0...3_600
+    static let holdStep = 5
+
+    var body: some View {
+        Stepper(value: number(\.sets, default: 3, in: HomeRoutineDraft.setRange), in: HomeRoutineDraft.setRange) {
+            row(routine.circuit ? "Rounds" : "Sets", value: "\(value(\.sets, default: 3, in: HomeRoutineDraft.setRange))")
+        }
+        .accessibilityIdentifier("composer.home.sets")
+        if exercises.contains(where: { !routine.isTimed($0) }) {
+            Stepper(value: number(\.reps, default: 8, in: HomeRoutineDraft.repRange), in: HomeRoutineDraft.repRange) {
+                row("Reps", value: "\(value(\.reps, default: 8, in: HomeRoutineDraft.repRange))")
+            }
+            .accessibilityIdentifier("composer.home.reps")
+        }
+        if exercises.contains(where: routine.isTimed) {
+            Stepper(value: number(\.seconds, default: 45, in: HomeRoutineDraft.secondRange),
+                    in: Self.holdStep...HomeRoutineDraft.secondRange.upperBound, step: Self.holdStep) {
+                row(routine.timeEveryExercise ? "Work" : "Hold", value: "\(value(\.seconds, default: 45, in: HomeRoutineDraft.secondRange)) sec")
+            }
+            .accessibilityIdentifier("composer.home.hold")
+        }
+        let restPath: WritableKeyPath<HomeRoutineDraft, String> = routine.circuit ? \.roundRest : \.rest
+        let restDefault = routine.circuit ? 60 : 120
+        Stepper(value: number(restPath, default: restDefault, in: Self.restRange),
+                in: Self.restRange, step: Self.restStep) {
+            row(routine.circuit ? "Rest between rounds" : "Rest between sets",
+                value: PlanComposer.restPhrase(value(restPath, default: restDefault, in: Self.restRange)))
+        }
+        .accessibilityIdentifier("composer.home.rest")
+    }
+
+    private func row(_ title: String, value: String) -> some View {
+        HStack {
+            Text(title).font(Theme.mono(14))
+            Spacer(minLength: 8)
+            Text(value).font(Theme.mono(14, .bold)).foregroundStyle(Theme.text)
+        }
+    }
+
+    private func value(_ path: WritableKeyPath<HomeRoutineDraft, String>, default fallback: Int,
+                       in range: ClosedRange<Int>) -> Int {
+        HomeRoutineDraft.number(routine[keyPath: path], in: range) ?? fallback
+    }
+
+    private func number(_ path: WritableKeyPath<HomeRoutineDraft, String>, default fallback: Int,
+                        in range: ClosedRange<Int>) -> Binding<Int> {
+        Binding(get: { value(path, default: fallback, in: range) },
+                set: { routine[keyPath: path] = String($0) })
     }
 }
 

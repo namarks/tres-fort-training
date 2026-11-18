@@ -642,6 +642,36 @@ The owner chose to keep importing all Health history. P26 addresses that.
     sets the routine's timing from its list. The mock kit's Add to your week screens show
     the new layout. Needs the owner's look on a TestFlight build like P5.
 
+- [ ] **P28 — Adding to a weekday changes in place**
+  - On TestFlight 83 the owner found the step after a New tile hard to
+    follow: tapping At home on Tuesday opened a new page whose title,
+    buttons and week strip all changed, the tiles came back reordered with
+    the picked one first, a second week row asked for the day again with
+    days that already hold something circled and no key, and "At a set
+    time" sat at the top before the routine. From three mocks he picked
+    the tiles folding into one line.
+  - The weekday's sheet keeps its title, arrows, Done and week strip. A
+    New tile (or Add something alongside) opens the composer in place of
+    the day's list: the tiles fold into one line under the same "New for
+    every Tuesday" header, with Change to bring them back. The arrows and
+    strip wait while it is open, and Done and Change wait while a save is
+    out.
+  - The day is already chosen, so the days, time and "Keep what's on those
+    days" wait, closed, on a line by the add button ("Every Tuesday · no
+    set time", "Time and days"); opening it adds them at the end of the
+    list. No day in the week rows is outlined any more, there or in Add to
+    your week from the Plan tab: the note under them names what a chosen
+    day holds. A run planned step by step still opens its step planner as
+    its own page.
+  - A routine at home sets its shared sets (or rounds), reps, hold and rest
+    with steppers right in its list; "Circuit and timers" opens the circuit
+    choice, timing every exercise and the timer preview. Today's Build one
+    now gets the same steppers.
+  - No backend change and no migration. The weekday journeys check that the
+    day keeps its title, open Time and days before checking the days, and
+    switch kinds through Change; the mock kit's at-home screen shows the
+    sheet in place. Needs the owner's look on a TestFlight build like P5.
+
 ## Execution frontier
 
 - P5
@@ -667,6 +697,7 @@ The owner chose to keep importing all Health history. P26 addresses that.
 - P25
 - P26
 - P27
+- P28
 
 ## Dependencies
 
@@ -676,16 +707,17 @@ The owner chose to keep importing all Health history. P26 addresses that.
 
 ## Next step
 
-**Now (@agent):** Land P27 (Add to your week reads top down) with green
-CI and a clean Codex review, then capture the real sheet on the Mac mini
-along with P25's Today card, Details and Swap.
+**Now (@agent):** Land P28 (adding to a weekday changes in place) with
+green CI and a clean Codex review, then capture the real weekday sheet on
+the Mac mini along with P27's Add to your week and P25's Today card,
+Details and Swap.
 
 **Then (@owner):** TestFlight builds since 66 carry P0 to P8. Try them on the
 iPhone. P9 to P19 are in TestFlight 1.2 (75); P20 reaches the phone with the next TestFlight build,
 which needs its own go-ahead. P24 (rides, swims, routines at home and a
 time while adding) is in TestFlight 79 and needs the same
 look. P25 reaches the phone with the next TestFlight build after it merges.
-P26 (the calendar's list follows its month) reaches it the same way. P27 (Add to your week reads top down) does too.
+P26 (the calendar's list follows its month) reaches it the same way. P27 (Add to your week reads top down) does too. P28 (adding to a weekday changes in place) does too.
 
 ## Notes / open questions
 
