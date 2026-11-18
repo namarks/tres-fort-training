@@ -273,8 +273,12 @@ intervals.icu, which stays the store of completed runs.
     and the week stay as they are, and Details then shows the copy.
   - The change applies to the steps as shown when the step was tapped
     (`RunPlan.replacing`), saved through the existing slot route with the
-    plan version read then; a copy that doesn't hold those steps stops
-    with "This day's run changed." An unchanged step saves nothing.
+    plan version read then. Before anything is written, the save checks
+    again that the plan version, the date's session attempt and the run
+    shown are unchanged and the day can still change (the editor can stay
+    open across a refresh, a start or midnight); otherwise it writes
+    nothing and says "This day's run changed." A copy is made with those
+    same reviewed tokens. An unchanged step saves nothing.
   - Steps opened with no date (the library, the Plan tab) still only read;
     Edit changes the saved run everywhere, as before.
   - No server change: the one-time workout and slot routes already do the

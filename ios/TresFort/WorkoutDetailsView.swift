@@ -36,13 +36,16 @@ struct WorkoutDetailsView: View {
         let plan: RunPlan
         let change: StepChange
         let version: Int
+        /// The date's session attempt then; a copy is assigned only while
+        /// the date still holds what was reviewed.
+        let attempt: Int?
         var id: RunPlan.StepPath { path }
     }
 
     /// How a tapped step is saved for its day: on a run that is already
     /// that day's own, or on a copy made for the day so the saved run and
     /// the week stay as they are.
-    private enum StepChange { case inPlace(String), forDay(String) }
+    private enum StepChange: Equatable { case inPlace(String), forDay(String) }
 
     private var shownID: String { copyID ?? workoutID }
     /// The workout as it reads on its date, with a block week's targets;
@@ -75,7 +78,14 @@ struct WorkoutDetailsView: View {
     /// record keeps the plan it was run against. A saved run opened with no
     /// date only reads here; Edit changes it everywhere.
     private func stepChange(for workout: Workout, shown plan: RunPlan) -> StepChange? {
-        guard !workout.isArchived, !savingStep, !copying, !sync.isRoutineMutationInFlight else { return nil }
+        guard !savingStep, !copying, !sync.isRoutineMutationInFlight else { return nil }
+        return eligibleChange(for: workout, shown: plan)
+    }
+
+    /// The rule above without this screen's busy states, so a save can
+    /// check it again just before it writes.
+    private func eligibleChange(for workout: Workout, shown plan: RunPlan) -> StepChange? {
+        guard !workout.isArchived else { return nil }
         if let day = changeDate(for: workout) { return .forDay(day) }
         guard let day = workout.one_time_date,
               sync.calendarAssignmentUnavailableReason(date: day) == nil,
@@ -220,8 +230,25 @@ struct WorkoutDetailsView: View {
     private func selectStep(in plan: RunPlan, change: StepChange) -> (RunPlan.StepPath) -> Void {
         { path in
             guard let step = plan.step(at: path), let version = sync.plan?.version else { return }
-            editingStep = StepEdit(path: path, step: step, plan: plan, change: change, version: version)
+            editingStep = StepEdit(path: path, step: step, plan: plan, change: change, version: version,
+                                   attempt: sync.sessionsByDate[day(of: change)]?.attempt)
         }
+    }
+
+    private func day(of change: StepChange) -> String {
+        switch change { case .forDay(let day), .inPlace(let day): return day }
+    }
+
+    /// The tapped step still applies when Done is pressed: the plan, the
+    /// date's assignment and the run shown are as they were, and the day
+    /// can still change (the editor may stay open across a refresh, a
+    /// start or midnight). Nothing is written otherwise.
+    private func stillApplies(_ edit: StepEdit) -> Bool {
+        guard sync.plan?.version == edit.version,
+              sync.sessionsByDate[day(of: edit.change)]?.attempt == edit.attempt,
+              let shown = workout, shown.id == shownID,
+              PlannedRunCreation.runSlot(in: shown)?.runPlan == edit.plan else { return false }
+        return eligibleChange(for: shown, shown: edit.plan) == edit.change
     }
 
     private func stepChangeNote(_ change: StepChange) -> String {
@@ -235,6 +262,10 @@ struct WorkoutDetailsView: View {
     /// day, which this screen then shows. Unchanged steps save nothing.
     private func saveStep(_ edit: StepEdit, as step: RunPlan.Step) {
         guard step != edit.step, let changed = edit.plan.replacing(edit.path, with: step) else { return }
+        guard stillApplies(edit) else {
+            sync.loadError = "This day's run changed. Check its steps and try again."
+            return
+        }
         savingStep = true
         Task {
             defer { savingStep = false }
