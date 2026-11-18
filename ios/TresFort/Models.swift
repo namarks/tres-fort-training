@@ -236,18 +236,25 @@ struct PlanProgram: Equatable {
     let start: String
     let repeats: Bool
     let weeks: [Week]
+    /// The block's own workouts (`program.workout_ids`, web-app P2): a block
+    /// that lists them is "layered", and what repeats every week carries on
+    /// beside it. Nil for a block that replaces the whole week, as before.
+    /// Stored weeks always hold the whole day either way (`BlockLayers`).
+    var workoutIDs: [String]? = nil
 
     /// The server's limits (`MAX_PROGRAM_*`).
     static let maxWeeks = 52
     static let maxLabel = 40
     static let maxName = 60
 
-    init(id: String, name: String?, start: String, repeats: Bool, weeks: [Week]) {
+    init(id: String, name: String?, start: String, repeats: Bool, weeks: [Week],
+         workoutIDs: [String]? = nil) {
         self.id = id
         self.name = name
         self.start = start
         self.repeats = repeats
         self.weeks = weeks
+        self.workoutIDs = workoutIDs
     }
 
     /// Mirror of `normalizeProgram` (src/types.ts); nil when malformed.
@@ -287,8 +294,16 @@ struct PlanProgram: Equatable {
         }
         guard !weeks.isEmpty else { return nil }
         let name = (p["name"] as? String).map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(PlanProgram.maxName)) }
+        // Mirror of `normalizeWorkoutIds`: non-empty strings without repeats,
+        // nil unless an array, so a block that never listed them stays whole.
+        var workoutIDs: [String]?
+        if let raw = p["workout_ids"] as? [Any] {
+            var ids: [String] = []
+            for case let id as String in raw where !id.isEmpty && !ids.contains(id) { ids.append(id) }
+            workoutIDs = ids
+        }
         self.init(id: id, name: name?.isEmpty == false ? name : nil, start: start,
-                  repeats: (p["repeat"] as? Bool) == true, weeks: weeks)
+                  repeats: (p["repeat"] as? Bool) == true, weeks: weeks, workoutIDs: workoutIDs)
     }
 
     private static func isYMD(_ s: String) -> Bool {

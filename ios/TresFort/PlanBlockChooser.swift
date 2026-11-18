@@ -37,7 +37,7 @@ struct PlanBlockChooserSheet: View {
             Form {
                 Section {
                     choiceRow("Start from my week",
-                              detail: "Any mix: lifting, runs, swims, rides and sports. Each week starts as a copy of your week. Choose each week's workouts here; edit week-specific targets on the web.",
+                              detail: "Any mix: lifting, runs, swims, rides and sports. Pick which workouts the block plans week by week; the rest carry on every week beside it.",
                               systemImage: "rectangle.split.3x1", id: "plan.blockSetup") {
                         onPick(.ownWeek)
                     }

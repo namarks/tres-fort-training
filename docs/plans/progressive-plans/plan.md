@@ -127,9 +127,39 @@ spec.md holds the data format, the date rule and the limits.
     2026-11-17 before the web app and TestFlight 1.2 (83), both from the same
     commit. Device acceptance belongs to P5.
 
+- [ ] **P7 — The block's own workouts on the phone**
+  - The iPhone app reads and writes `program.workout_ids`, so phone and web
+    plan the same way (the owner, 2026-11-18: close the biggest gap between
+    them). Starting a block from your week asks which workouts it plans week
+    by week (each weekday's main workout with exercises is switched on); the
+    rest carry on every week beside it, and the picked ones leave Your week
+    in the same plan version, as the web's guided start does.
+  - The block's week shows what comes from Your week muted and tagged
+    "Every week"; a day change touches only the block's own workouts (sent
+    in own form; the server lays Your week back over it). "In this block"
+    lists its workouts with their days: one opens to change its days in
+    every week of the block, edit that week's targets or remove it from the
+    block (with the targets the block gave it); "Add a workout to the block"
+    moves one from Your week on its days or puts another on chosen days. A
+    block that never listed its workouts (started on an older build, by the
+    coach or by the event builder) gets "Choose the block's own workouts".
+  - Your week reads "Carries on beside the block every week" while a layered
+    block is in use. Whole-week edits (labels, copy, add or remove a week,
+    targets) keep the list.
+  - Pure rules in `ios/TresFort/BlockLayers.swift` mirror `src/programLayers.ts`
+    and `web/src/blockLayers.ts`; `ios/TresFortTests/Fixtures/BlockLayers.json`
+    pins layering, own form and the trimmed repeating week on both sides
+    (`web/test/blockLayersFixture.test.ts`, `BlockLayersTests`). No API
+    change: `PUT /api/plan/program` already takes `workout_ids` and
+    `schedule`.
+  - Layout: mock options A, B and C are in the project files at
+    `block-on-iphone/` and in the mock kit (`plan-block-*.html`). A (list
+    under the block's week) is built while the owner chooses.
+
 ## Execution frontier
 
 - P5
+- P7
 
 ## Dependencies
 
@@ -139,6 +169,8 @@ spec.md holds the data format, the date rule and the limits.
 | P3 | coordinates_with | plan:coach-free-planning#P1 | The goal date for a taper is the race goal the member will set in the app. |
 | P4 | coordinates_with | plan:web-app | The web planner edits the same plan document. |
 | P5 | gated_by | external:owner-progressive-plan-release-and-device-check | Repository implementation does not establish deployment or physical acceptance. |
+| P7 | coordinates_with | plan:web-app | The phone writes the same block list and repeating week the web Block tab does. |
+| P7 | gated_by | external:owner-block-layout-choice-and-device-check | The owner picks the layout from the mocks, then checks a layered block on a TestFlight build. |
 
 ## Next step
 
@@ -149,7 +181,14 @@ progress. Set up a block on the iPhone, change one week's target and then
 that week through the end, preview a lighter week, and check the same week
 on the phone, the web, Today and the calendar. A block started on the web
 with its own workout list (web-app P2) also shows on those dates beside what
-repeats every week; the iPhone app still edits such a block as whole weeks.
+repeats every week.
+
+**Then (@owner):** P7: pick the layout for the block's own workouts (A is
+built), then review its pull request. After a TestFlight build with it,
+start a block on the iPhone with some workouts switched off, check that they
+carry on beside it on Today and the calendar, move a block workout to
+another day, add one from Your week and see the same block on the web's
+Block tab.
 
 The rule-based event and open builders (`EventBuildSheet`, `programBuilder`,
 `build_program`), the native block chooser and the web target and ramp
@@ -165,8 +204,8 @@ check cannot protect a recorded session on another device by itself.
 - A block can list its own workouts (`program.workout_ids`, web-app P2,
   2026-11-16): the repeating week then carries on beside it. Stored weeks
   still hold the whole day, so the app's `PlanTree.schedule(on:)` and the
-  parity fixture are unchanged; the app does not yet write the list, and a
-  block edited there keeps a list it was given.
+  parity fixture are unchanged. P7 teaches the app to write the list;
+  builds before it keep a list they were given.
 - Older clients that predate block support show the repeating week. Current
   source supports blocks, but source inspection does not identify the build
   installed on a member's device. P5 verifies the chosen release candidate.

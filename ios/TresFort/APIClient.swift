@@ -670,11 +670,20 @@ struct APIClient {
     func setProgram(_ program: [String: Any]?, expectedVersion: Int, jwt: String) async throws
         -> ProgramWriteResult
     {
+        try await setProgram(program, schedule: nil, expectedVersion: expectedVersion, jwt: jwt)
+    }
+
+    /// The same, with the repeating week (`{week, extras}`) saved in the same
+    /// plan version: a workout that becomes the block's own leaves it.
+    func setProgram(_ program: [String: Any]?, schedule: [String: Any]?, expectedVersion: Int,
+                    jwt: String) async throws -> ProgramWriteResult
+    {
         guard let program else {
             return try await delete("api/plan/program?expected_version=\(expectedVersion)", jwt: jwt)
         }
-        return try await put("api/plan/program",
-                             body: ["program": program, "expected_version": expectedVersion], jwt: jwt)
+        var body: [String: Any] = ["program": program, "expected_version": expectedVersion]
+        if let schedule { body["schedule"] = schedule }
+        return try await put("api/plan/program", body: body, jwt: jwt)
     }
 
     /// Lays out a block of weeks to an event by the server's fixed rules
@@ -1192,6 +1201,8 @@ protocol RoutineEditingAPI {
         -> APIClient.TripWriteResult
     func setProgram(_ program: [String: Any]?, expectedVersion: Int, jwt: String) async throws
         -> APIClient.ProgramWriteResult
+    func setProgram(_ program: [String: Any]?, schedule: [String: Any]?, expectedVersion: Int,
+                    jwt: String) async throws -> APIClient.ProgramWriteResult
     func buildEventBlock(_ body: [String: Any], expectedVersion: Int?, jwt: String) async throws
         -> APIClient.EventBuildResult
 
@@ -1245,6 +1256,15 @@ extension RoutineEditingAPI {
         -> APIClient.ProgramWriteResult
     {
         throw APIError.http(501, "program_unavailable")
+    }
+
+    /// A double that predates the schedule beside a block takes the
+    /// block alone; one that would also change the repeating week can't.
+    func setProgram(_ program: [String: Any]?, schedule: [String: Any]?, expectedVersion: Int,
+                    jwt: String) async throws -> APIClient.ProgramWriteResult
+    {
+        guard schedule == nil else { throw APIError.http(501, "program_schedule_unavailable") }
+        return try await setProgram(program, expectedVersion: expectedVersion, jwt: jwt)
     }
 
     func buildEventBlock(_ body: [String: Any], expectedVersion: Int?, jwt: String) async throws
