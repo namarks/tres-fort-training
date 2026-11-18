@@ -726,14 +726,14 @@ struct TodayView: View {
         } else {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
-                    daySection(sync.todayString) {
-                        // The recovery card adds its own top gap, so nothing
-                        // moves when WHOOP isn't connected.
-                        VStack(spacing: 0) {
+                    // The recovery card adds its own top gap, so nothing
+                    // moves when WHOOP isn't connected.
+                    VStack(alignment: .leading, spacing: 0) {
+                        daySection(sync.todayString, agendaLeads: agendaOwnsActions) {
                             todayCard
                                 .modifier(TodayDaySwipe(state: daySwipe, canMove: canMoveDay, apply: applyDayMove, move: moveDay))
-                            RecoveryCard(auth: auth)
                         }
+                        RecoveryCard(auth: auth)
                     }
                     weekSection
                     if let error = sync.loadError {
@@ -748,24 +748,45 @@ struct TodayView: View {
     }
 
     /// Today's first section: the date (with the goal event beside it) as
-    /// its heading, the day's agenda once it holds more than one workout,
-    /// then the day's card.
-    private func daySection<Card: View>(_ dateString: String, @ViewBuilder card: () -> Card) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            TodayDayHeading(sync: sync, dateString: dateString)
-            VStack(alignment: .leading, spacing: 12) {
-                dayWorkouts
-                card()
+    /// its heading over the day's card, then the day's agenda once it holds
+    /// more than one workout. The card leads so its action sits at the top
+    /// on every day. The agenda leads only when it holds the day's actions
+    /// (`agendaOwnsActions`) and the card has none of its own.
+    @ViewBuilder
+    private func daySection<Card: View>(_ dateString: String, agendaLeads: Bool = false,
+                                        @ViewBuilder card: () -> Card) -> some View {
+        if agendaLeads {
+            VStack(alignment: .leading, spacing: 4) {
+                TodayDayHeading(sync: sync, dateString: dateString)
+                VStack(alignment: .leading, spacing: 12) {
+                    dayWorkouts(underCard: false)
+                    card()
+                }
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 4) {
+                    TodayDayHeading(sync: sync, dateString: dateString)
+                    card()
+                }
+                dayWorkouts(underCard: true)
             }
         }
+    }
+
+    /// The agenda holds the day's actions: an activity to log leads the
+    /// day, or workouts were added to a day with nothing planned. The card
+    /// then offers only other ways to train.
+    private var agendaOwnsActions: Bool {
+        showsDailyAgenda && !sync.isFreestyle
+            && (sync.todayPreviewWorkout.map(PlannedActivity.isActivity) == true
+                || (sync.todayPreviewWorkout == nil && sync.todaySession == nil))
     }
 
     /// Everything about today in one card: what's planned and how to start
     /// it, or that nothing is, then other ways to train.
     @ViewBuilder private var todayCard: some View {
-        if showsDailyAgenda && !sync.isFreestyle,
-           sync.todayPreviewWorkout.map(PlannedActivity.isActivity) == true
-               || (sync.todayPreviewWorkout == nil && sync.todaySession == nil) {
+        if agendaOwnsActions {
             // The agenda already owns the activity actions (or the extras on
             // a rest day). Don't repeat them or call the same date unplanned.
             VStack(alignment: .leading, spacing: 0) {
@@ -870,9 +891,9 @@ struct TodayView: View {
 
     private var showsDailyAgenda: Bool { DailyWorkoutAgenda.showsCombinedAgenda(sync.dailyWorkoutAgenda) }
 
-    @ViewBuilder private var dayWorkouts: some View {
+    @ViewBuilder private func dayWorkouts(underCard: Bool) -> some View {
         if sync.plan != nil, showsDailyAgenda {
-            DayWorkoutsView(sync: sync, onLogPlannedActivity: onLogPlannedActivity)
+            DayWorkoutsView(sync: sync, onLogPlannedActivity: onLogPlannedActivity, underCard: underCard)
         }
     }
 
@@ -1315,90 +1336,90 @@ private struct WorkoutDoneView<QuickStarts: View>: View {
                 let doneExtras = extras.filter { arrangement.done.contains($0.id) }
                 VStack(alignment: .leading, spacing: 4) {
                     TodayDayHeading(sync: sync, dateString: sync.todayString)
-                    VStack(alignment: .leading, spacing: 12) {
-                        if sync.plan != nil, DailyWorkoutAgenda.showsCombinedAgenda(sync.dailyWorkoutAgenda) {
-                            DayWorkoutsView(sync: sync, onLogPlannedActivity: onLogActivity)
-                        }
-                        Group {
-                            if let lead = extras.first(where: { $0.id == arrangement.lead }) {
-                                // An activity still to log leads on navy; the
-                                // finished workout shrinks to a check line above it.
+                    Group {
+                        if let lead = extras.first(where: { $0.id == arrangement.lead }) {
+                            // An activity still to log leads on navy; the
+                            // finished workout shrinks to a check line above it.
+                            VStack(alignment: .leading, spacing: 0) {
                                 VStack(alignment: .leading, spacing: 0) {
-                                    VStack(alignment: .leading, spacing: 0) {
-                                        TodayDoneLine(title: doneTemplateTitle, detail: doneSummary,
-                                                      actionTitle: isRunWorkout ? "View run" : "View workout",
-                                                      action: { recordDate = IdentifiedString(id: sync.todayString) },
-                                                      detailIdentifier: "today.completedSummary",
-                                                      actionIdentifier: "today.viewCompletedWorkout",
+                                    TodayDoneLine(title: doneTemplateTitle, detail: doneSummary,
+                                                  actionTitle: isRunWorkout ? "View run" : "View workout",
+                                                  action: { recordDate = IdentifiedString(id: sync.todayString) },
+                                                  detailIdentifier: "today.completedSummary",
+                                                  actionIdentifier: "today.viewCompletedWorkout",
+                                                  dividerBelow: false)
+                                    ForEach(doneExtras) { workout in
+                                        TodayDoneLine(title: workout.name, detail: "Logged",
+                                                      detailIdentifier: "today.extra.logged.\(workout.id)",
                                                       dividerBelow: false)
-                                        ForEach(doneExtras) { workout in
-                                            TodayDoneLine(title: workout.name, detail: "Logged",
-                                                          detailIdentifier: "today.extra.logged.\(workout.id)",
-                                                          dividerBelow: false)
-                                        }
                                     }
-                                    .todayDoneBand()
-                                    TodayNextActivity(workout: lead, onLog: onLogActivity)
-                                        .todayLeadBand(hasAction: onLogActivity != nil)
-                                    VStack(alignment: .leading, spacing: 0) {
-                                        TodayLaterList(extras: arrangement.later.compactMap { id in extras.first { $0.id == id } },
-                                                       onLog: onLogActivity)
-                                        quickStarts
-                                        AddAnotherWorkoutLine(sync: sync)
-                                    }
-                                    .todayFootRows()
                                 }
-                                .todayCardShell()
-                            } else {
-                                // Everything is done: nothing to start, so no navy.
+                                .todayDoneBand()
+                                TodayNextActivity(workout: lead, onLog: onLogActivity)
+                                    .todayLeadBand(hasAction: onLogActivity != nil)
                                 VStack(alignment: .leading, spacing: 0) {
-                                    VStack(alignment: .leading, spacing: 0) {
-                                        HStack(spacing: 6) {
-                                            Image(systemName: "checkmark.seal.fill")
-                                                .font(.subheadline)
-                                                .foregroundStyle(Theme.done)
-                                                .accessibilityHidden(true)
-                                            TodaySectionLabel(text: isRunWorkout ? "RUN COMPLETE" : "WORKOUT COMPLETE", color: Theme.done)
-                                        }
-                                        Text(doneTemplateTitle)
-                                            .font(Theme.display(30)).foregroundStyle(Theme.text)
-                                            .lineLimit(2).minimumScaleFactor(0.7)
-                                            .padding(.top, 8)
-                                        Text(doneSummary)
-                                            .font(.headline.monospacedDigit()).foregroundStyle(Theme.text)
-                                            .padding(.top, 4)
-                                            .accessibilityIdentifier("today.completedSummary")
-                                        Button {
-                                            recordDate = IdentifiedString(id: sync.todayString)
-                                        } label: {
-                                            HStack(spacing: 4) {
-                                                Text(isRunWorkout ? "View run" : "View workout")
-                                                Image(systemName: "chevron.right").font(.caption.weight(.bold))
-                                            }
-                                            .font(.subheadline.weight(.semibold)).foregroundStyle(Theme.accent)
-                                            .frame(minHeight: 44).contentShape(Rectangle())
-                                        }
-                                        .buttonStyle(.plain)
-                                        .accessibilityIdentifier("today.viewCompletedWorkout")
-                                        // Activities logged beside it, under the workout.
-                                        ForEach(doneExtras) { workout in
-                                            TodayDoneLine(title: workout.name, detail: "Logged",
-                                                          detailIdentifier: "today.extra.logged.\(workout.id)",
-                                                          dividerBelow: false)
-                                        }
-                                    }
-                                    .padding(.horizontal, 20).padding(.top, 20).padding(.bottom, 8)
-                                    VStack(alignment: .leading, spacing: 0) {
-                                        quickStarts
-                                        AddAnotherWorkoutLine(sync: sync)
-                                    }
-                                    .todayFootRows()
+                                    TodayLaterList(extras: arrangement.later.compactMap { id in extras.first { $0.id == id } },
+                                                   onLog: onLogActivity)
+                                    quickStarts
+                                    AddAnotherWorkoutLine(sync: sync)
                                 }
-                                .todayCardShell()
+                                .todayFootRows()
                             }
+                            .todayCardShell()
+                        } else {
+                            // Everything is done: nothing to start, so no navy.
+                            VStack(alignment: .leading, spacing: 0) {
+                                VStack(alignment: .leading, spacing: 0) {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "checkmark.seal.fill")
+                                            .font(.subheadline)
+                                            .foregroundStyle(Theme.done)
+                                            .accessibilityHidden(true)
+                                        TodaySectionLabel(text: isRunWorkout ? "RUN COMPLETE" : "WORKOUT COMPLETE", color: Theme.done)
+                                    }
+                                    Text(doneTemplateTitle)
+                                        .font(Theme.display(30)).foregroundStyle(Theme.text)
+                                        .lineLimit(2).minimumScaleFactor(0.7)
+                                        .padding(.top, 8)
+                                    Text(doneSummary)
+                                        .font(.headline.monospacedDigit()).foregroundStyle(Theme.text)
+                                        .padding(.top, 4)
+                                        .accessibilityIdentifier("today.completedSummary")
+                                    Button {
+                                        recordDate = IdentifiedString(id: sync.todayString)
+                                    } label: {
+                                        HStack(spacing: 4) {
+                                            Text(isRunWorkout ? "View run" : "View workout")
+                                            Image(systemName: "chevron.right").font(.caption.weight(.bold))
+                                        }
+                                        .font(.subheadline.weight(.semibold)).foregroundStyle(Theme.accent)
+                                        .frame(minHeight: 44).contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityIdentifier("today.viewCompletedWorkout")
+                                    // Activities logged beside it, under the workout.
+                                    ForEach(doneExtras) { workout in
+                                        TodayDoneLine(title: workout.name, detail: "Logged",
+                                                      detailIdentifier: "today.extra.logged.\(workout.id)",
+                                                      dividerBelow: false)
+                                    }
+                                }
+                                .padding(.horizontal, 20).padding(.top, 20).padding(.bottom, 8)
+                                VStack(alignment: .leading, spacing: 0) {
+                                    quickStarts
+                                    AddAnotherWorkoutLine(sync: sync)
+                                }
+                                .todayFootRows()
+                            }
+                            .todayCardShell()
                         }
-                        .modifier(daySwipe)
                     }
+                    .modifier(daySwipe)
+                }
+                // The day's other workouts sit under the card, as on a day
+                // still to do.
+                if sync.plan != nil, DailyWorkoutAgenda.showsCombinedAgenda(sync.dailyWorkoutAgenda) {
+                    DayWorkoutsView(sync: sync, onLogPlannedActivity: onLogActivity)
                 }
 
                 TodayWeekSection(sync: sync, onOpenCalendar: onOpenCalendar, onOpenActivity: onOpenActivity)

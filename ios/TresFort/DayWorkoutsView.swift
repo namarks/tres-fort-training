@@ -1,24 +1,39 @@
 import SwiftUI
 
 /// One daily agenda for the main workout, separate workouts and activities,
-/// shown over the day's card once the day holds more than one of them. The
-/// selected workout's detailed start/runner/recap stays immediately below.
-/// Adding another workout is the last line of that card
+/// shown once the day holds more than one of them: a single list in the
+/// day's time order under the day's card, so the card's action stays at the
+/// top of Today. Each row carries a short action of its own (Start, Log,
+/// Open). Adding another workout is the last line of the card
 /// (`AddAnotherWorkoutLine`).
 struct DayWorkoutsView: View {
     @ObservedObject var sync: SyncModel
     var onLogPlannedActivity: ((String) -> Void)? = nil
+    /// False when the list leads the day and the card under it holds only
+    /// other ways to train, so no row is "shown above".
+    var underCard = true
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     private var items: [DailyWorkoutAgenda.Item] { sync.dailyWorkoutAgenda }
+    private static let badgeSize: CGFloat = 30
 
     var body: some View {
         if DailyWorkoutAgenda.showsCombinedAgenda(items) {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
                 TodaySectionLabel(text: "TODAY'S AGENDA")
-                ForEach(items) { item in
-                    agendaRow(item)
+                    .frame(minHeight: 28)
+                    .padding(.horizontal, 4)
+                VStack(spacing: 0) {
+                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                        if index > 0 {
+                            Rectangle().fill(Theme.surface2).frame(height: 1)
+                                .padding(.leading, 14 + Self.badgeSize + 12)
+                        }
+                        agendaRow(item)
+                    }
                 }
+                .background(Theme.surface)
+                .clipShape(RoundedRectangle(cornerRadius: 16))
             }
         }
     }
@@ -30,57 +45,78 @@ struct DayWorkoutsView: View {
             ? AnyLayout(VStackLayout(alignment: .leading, spacing: 2))
             : AnyLayout(HStackLayout(spacing: 12))
         return layout {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: item.isDone ? "checkmark.circle.fill"
-                      : item.workout.map(PlanItemSummary.glyph) ?? "list.bullet.clipboard")
-                    .foregroundStyle(item.isDone ? Theme.done : Theme.accent)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(item.title).font(.headline).foregroundStyle(Theme.text)
+            HStack(alignment: .center, spacing: 12) {
+                if item.isDone {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.title3).foregroundStyle(Theme.done)
+                        .frame(width: Self.badgeSize, height: Self.badgeSize)
+                        .accessibilityHidden(true)
+                } else {
+                    PlanItemBadge(glyph: item.workout.map(PlanItemSummary.glyph) ?? "list.bullet.clipboard",
+                                  size: Self.badgeSize)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.title).font(.subheadline.weight(.semibold)).foregroundStyle(Theme.text)
+                        .lineLimit(2)
                     Text(TodayLineup.detail(item.statusLabel, minutes: item.minutes))
-                        .font(.subheadline.monospacedDigit()).foregroundStyle(Theme.muted)
+                        .font(.footnote.monospacedDigit()).foregroundStyle(Theme.muted)
                         .accessibilityIdentifier("today.agenda.status.\(item.id)")
                 }
             }
             if !dynamicTypeSize.isAccessibilitySize { Spacer(minLength: 8) }
             rowAction(item, selected: selected)
+                .font(.subheadline.weight(.semibold))
         }
-        .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-        .background(selected ? Theme.surface2 : Theme.surface, in: RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal, 14).padding(.vertical, 4)
+        .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+        .background(selected ? Theme.surface2.opacity(0.6) : Color.clear)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("today.agenda.\(item.id)")
     }
 
+    /// The row's one action, in a word; the row already names the workout,
+    /// and VoiceOver hears the full "Start Evening Core".
     @ViewBuilder private func rowAction(_ item: DailyWorkoutAgenda.Item, selected: Bool) -> some View {
         if item.isActivity, let workout = item.workout {
             if !item.isDone, let onLogPlannedActivity {
-                Button("Log \(workout.name)") { onLogPlannedActivity(workout.name) }
+                Button("Log") { onLogPlannedActivity(workout.name) }
                     .disabled(sync.partnerReserved)
-                    .frame(minHeight: 44)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .accessibilityLabel("Log \(workout.name)")
                     .accessibilityIdentifier(item.source == .primary ? "today.logPlannedActivity" : "today.extra.log.\(workout.id)")
             }
         } else if let session = item.session {
-            Button(selected ? "Selected" : "Open") { _ = sync.selectWorkout(session) }
+            Button(selectionTitle(selected)) { _ = sync.selectWorkout(session) }
+                .tint(selected ? Theme.muted : nil)
                 .frame(minWidth: 44, minHeight: 44).disabled(!sync.canSwitchWorkout)
                 .accessibilityLabel("Open \(item.title), \(item.statusLabel)")
                 .accessibilityAddTraits(selected ? .isSelected : [])
                 .accessibilityIdentifier("today.session.\(session.slot ?? 0)")
         } else if item.source == .primary {
-            Button(selected ? "Selected" : "Open") { _ = sync.selectPrimaryWorkout() }
+            Button(selectionTitle(selected)) { _ = sync.selectPrimaryWorkout() }
+                .tint(selected ? Theme.muted : nil)
                 .frame(minWidth: 44, minHeight: 44).disabled(!sync.canSwitchWorkout)
                 .accessibilityLabel("Open \(item.title)")
                 .accessibilityAddTraits(selected ? .isSelected : [])
                 .accessibilityIdentifier("today.session.0")
         } else if let workout = item.workout {
-            Button("Start \(workout.name)") {
+            Button("Start") {
                 Task {
                     await RestCue.requestNotificationPermissionIfNeeded()
                     _ = await sync.addAnotherWorkout(workout.id)
                 }
             }
-            .frame(minHeight: 44).disabled(!sync.canAddAnotherWorkout)
+            .frame(minWidth: 44, minHeight: 44).disabled(!sync.canAddAnotherWorkout)
+            .accessibilityLabel("Start \(workout.name)")
             .accessibilityIdentifier("today.scheduledAdditional.\(workout.id)")
         }
+    }
+
+    /// The workout the card over the list is showing says so; the others
+    /// open in its place.
+    private func selectionTitle(_ selected: Bool) -> String {
+        guard selected else { return "Open" }
+        return underCard ? "Shown above" : "Selected"
     }
 }
 
