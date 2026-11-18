@@ -48,10 +48,15 @@ enum BrandPalette {
     static let liveAccent = Color(red: 0x97 / 255, green: 0xBA / 255, blue: 0xE7 / 255)
 
     /// The fort: the app icon's navy and orange, the same in light and dark
-    /// mode. Today's week card draws each trained day as an orange tower.
+    /// mode. Activity's week card is navy; Today's week chart sits on the
+    /// page and draws each trained day as an orange tower.
     static let fortNavy = fixed(0x15273E)
-    /// Towers and marks on fortNavy (graphics only, 4:1 on navy).
+    /// Towers and marks on fortNavy (graphics only, 4:1 on navy) and on the
+    /// page in Today's week chart (3.4:1 or better).
     static let fortOrange = fixed(0xED4929)
+    /// A planned day's tower in Today's week chart, on the page: a quiet
+    /// blue that still keeps the 3:1 graphics minimum in both modes.
+    static let weekPlanned = dynamic(light: 0x798EA8, dark: 0x556E8E)
     /// Text on fortNavy: orange (4.9:1) and a quiet ink blue (5.9:1).
     static let fortOrangeText = fixed(0xEE694F)
     static let fortLabel = fixed(0x83A4CE)

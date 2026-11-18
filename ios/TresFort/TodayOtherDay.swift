@@ -70,8 +70,8 @@ struct TodayOtherDayCard: View {
         let extras = isPast ? [] : sync.plannedExtras(on: dateString, today: today)
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .center, spacing: 8) {
-                TodaySectionLabel(text: TodayCard.kicker(dateString,
-                                                         TodayDays.status(day, workout: workout, isPast: isPast)))
+                // The date is the heading over the card (`TodayDayHeading`).
+                TodaySectionLabel(text: TodayDays.status(day, workout: workout, isPast: isPast).uppercased())
                     .accessibilityIdentifier("today.otherDay.kicker")
                 Spacer(minLength: 8)
                 Button(action: onBackToToday) {
@@ -129,7 +129,10 @@ struct TodayOtherDayCard: View {
                 ScheduleTimes.minutes(workout.id, onDate: dateString, plan: sync.plan)
             }
         }
-        .todayCardSurface()
+        // Nothing starts or logs from another day, so its card stays plain:
+        // navy on Today always means "do this" (app-design-pass P29).
+        .padding(.bottom, extras.isEmpty ? -8 : 0)
+        .todayPlainCard()
     }
 
     private func title(_ day: TrainingAgendaDay) -> String {

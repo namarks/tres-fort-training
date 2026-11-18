@@ -7,8 +7,9 @@ current screens:
 
 | Screen | Copies |
 |---|---|
-| `screens/today.html` | Today with a workout scheduled (`TodayView`, `TodayWeekSection`, `WeekFortView`) |
-| `screens/today-run.html` | Today with a planned run: its figures, then Details, Swap and Skip (`PlannedRunGlance`, `DayActionsRow`) |
+| `screens/today.html` | Today with a workout planned: the date and goal event over the two-tone card, the light week chart and Coming up (`TodayView.lineupCard`, `TodayDayHeading`, `TodayWeekSection`, `WeekFortView`) |
+| `screens/today-run.html` | Today with a planned run: one line of figures and Start on navy, then Details, Swap and Skip as links (`PlannedRunGlance`, `DayActionsRow`) |
+| `screens/today-rest.html` | Today on a rest day: a plain card with no navy (`TodayView.selectedWorkoutCard`, `todayPlainCard`) |
 | `screens/day-details.html` | Details for a planned run, with Edit (`WorkoutDetailsView`) |
 | `screens/day-edit-run.html` | Edit a run for one day: one kind of run and one amount (`DayRunChangeView`) |
 | `screens/day-swap.html` | Swap: tiles by kind (`WorkoutDatePickerView`, `DayKindGrid`) |

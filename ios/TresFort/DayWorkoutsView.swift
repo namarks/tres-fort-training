@@ -1,38 +1,26 @@
 import SwiftUI
 
-/// One daily agenda for the main workout, separate workouts and activities.
-/// The selected workout's detailed start/runner/recap stays immediately below.
+/// One daily agenda for the main workout, separate workouts and activities,
+/// shown over the day's card once the day holds more than one of them. The
+/// selected workout's detailed start/runner/recap stays immediately below.
+/// Adding another workout is the last line of that card
+/// (`AddAnotherWorkoutLine`).
 struct DayWorkoutsView: View {
     @ObservedObject var sync: SyncModel
     var onLogPlannedActivity: ((String) -> Void)? = nil
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-    @State private var adding = false
 
     private var items: [DailyWorkoutAgenda.Item] { sync.dailyWorkoutAgenda }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if DailyWorkoutAgenda.showsCombinedAgenda(items) {
+        if DailyWorkoutAgenda.showsCombinedAgenda(items) {
+            VStack(alignment: .leading, spacing: 8) {
                 TodaySectionLabel(text: "TODAY'S AGENDA")
                 ForEach(items) { item in
                     agendaRow(item)
                 }
             }
-            if sync.pendingAdditionalWorkout != nil {
-                Button(sync.isAddingWorkout ? "Adding workout…" : "Retry adding workout") {
-                    Task { _ = await sync.retryAddingWorkout() }
-                }.disabled(!sync.canAddAnotherWorkout).frame(minHeight: 44)
-                    .accessibilityIdentifier("today.retryAdditionalWorkout")
-            } else {
-                Button { adding = true } label: {
-                    Label("Add another workout", systemImage: "plus")
-                        .font(.subheadline.weight(.semibold)).frame(minHeight: 44)
-                }
-                .disabled(!sync.canAddAnotherWorkout)
-                .accessibilityIdentifier("today.addAnotherWorkout")
-            }
         }
-        .sheet(isPresented: $adding) { AdditionalWorkoutPicker(sync: sync) }
     }
 
     private func agendaRow(_ item: DailyWorkoutAgenda.Item) -> some View {
@@ -96,11 +84,51 @@ struct DayWorkoutsView: View {
     }
 }
 
+/// "Add another workout" as the last plain row of the day's card
+/// (app-design-pass P29), or the retry for one whose request is still out.
+/// A day with nothing planned offers its own ways to train on the card and
+/// keeps this in the + menu, so there it shows only the retry.
+struct AddAnotherWorkoutLine: View {
+    @ObservedObject var sync: SyncModel
+    var retryOnly = false
+    /// False when the row is the first thing on its card.
+    var ruled = true
+    @State private var adding = false
+
+    var body: some View {
+        // The stack stays put while the row inside it changes, so the sheet
+        // survives the request going out.
+        VStack(alignment: .leading, spacing: 0) {
+            if sync.pendingAdditionalWorkout != nil {
+                Button(sync.isAddingWorkout ? "Adding workout…" : "Retry adding workout") {
+                    Task { _ = await sync.retryAddingWorkout() }
+                }
+                .disabled(!sync.canAddAnotherWorkout)
+                .accessibilityIdentifier("today.retryAdditionalWorkout")
+                .font(.subheadline.weight(.semibold))
+                .frame(minHeight: 44)
+                .todayFootRow(ruled: ruled)
+            } else if !retryOnly {
+                Button { adding = true } label: {
+                    Label("Add another workout", systemImage: "plus")
+                        .font(.subheadline.weight(.semibold)).frame(minHeight: 44)
+                }
+                .disabled(!sync.canAddAnotherWorkout)
+                .accessibilityIdentifier("today.addAnotherWorkout")
+                .todayFootRow(ruled: ruled)
+            }
+        }
+        .sheet(isPresented: $adding) { AdditionalWorkoutPicker(sync: sync) }
+    }
+}
+
 /// Today's Add another workout (app-design-pass P27): build a routine
 /// right now from your own exercises or a suggestion you can change, follow
 /// a freestyle workout, or start a saved one.
 struct AdditionalWorkoutPicker: View {
     @ObservedObject var sync: SyncModel
+    /// "Add a workout" from the + menu on a day with nothing planned.
+    var title = "Add another workout"
     @Environment(\.dismiss) private var dismiss
     @State private var freestyle = false
     @State private var building: PlanComposer.HomeStart?
@@ -155,7 +183,7 @@ struct AdditionalWorkoutPicker: View {
                 if let error = sync.loadError { Text(error).foregroundStyle(Theme.danger) }
             }
             .disabled(sync.isAddingWorkout)
-            .navigationTitle("Add another workout").navigationBarTitleDisplayMode(.inline)
+            .navigationTitle(title).navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(sync.isAddingWorkout) } }
             .navigationDestination(item: $building) { start in
                 TodayRoutineBuilderView(sync: sync, start: start, isBusy: $routineBusy) { dismiss() }

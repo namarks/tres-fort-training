@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Today's week as a fort, in the app icon's colors: every day you trained
 /// raises an orange tower, a day with training still planned (or missed)
-/// stands as a dark tower, and a rest day stays low. It reads the same
+/// stands as a quiet blue tower, and a rest day stays low. It reads the same
 /// projection, sessions and activities as the calendar cells below it.
 enum WeekFort {
     enum State: Equatable { case trained, planned, rest }
@@ -15,19 +15,24 @@ enum WeekFort {
 
     /// One day's tower. Logged work wins: a completed session, an in-progress
     /// one with sets, or an activity that day. A session or schedule entry
-    /// still to do, or a planned ride, is a planned tower; anything else rests.
-    /// Endurance on a hard-blackout day is ignored, as the calendar does.
+    /// still to do, an activity planned beside the day's workout (a schedule
+    /// extra, such as Friday's core work) or a planned ride is a planned
+    /// tower; anything else rests. Endurance on a hard-blackout day is
+    /// ignored, as the calendar does; the projection already leaves extras
+    /// off past dates and trip days.
     static func state(kind: DayProjection.Kind,
                       loggedSets: Int,
                       hasActivity: Bool,
                       hasPlannedRide: Bool,
-                      suppressesEndurance: Bool) -> State {
+                      suppressesEndurance: Bool,
+                      hasPlannedExtra: Bool = false) -> State {
         if kind == .completed || (kind == .inProgress && loggedSets > 0) { return .trained }
         if hasActivity && !suppressesEndurance { return .trained }
         switch kind {
         case .planned, .projected, .inProgress: return .planned
         default: break
         }
+        if hasPlannedExtra { return .planned }
         if hasPlannedRide && !suppressesEndurance { return .planned }
         return .rest
     }
@@ -43,7 +48,8 @@ enum WeekFort {
                                       hasActivity: !sync.activities(on: ymd).isEmpty
                                           || !sync.manualActivities(on: ymd).isEmpty,
                                       hasPlannedRide: !sync.rides(on: ymd).isEmpty,
-                                      suppressesEndurance: projection.suppressesScheduleAndEndurance)
+                                      suppressesEndurance: projection.suppressesScheduleAndEndurance,
+                                      hasPlannedExtra: !sync.plannedExtras(on: ymd, today: today).isEmpty)
             return Day(ymd: ymd, state: dayState, isToday: ymd == today)
         }
     }
@@ -107,73 +113,49 @@ private extension String {
     var capitalizedFirst: String { prefix(1).uppercased() + dropFirst() }
 }
 
-/// The navy card itself: a count line, then seven towers, Monday first,
-/// each over its weekday letter and date. Tapping a day opens it.
+/// The week as a light chart on the page, with no card of its own
+/// (app-design-pass P29): seven towers, Monday first, each over its weekday
+/// letter and date. Trained days are the only orange; planned days stand in
+/// a quiet blue, rest days stay low, and today's date is ringed. The count
+/// ("2 of 5 done") is in the section's heading. Tapping a day opens it.
 struct WeekFortView: View {
-    let title: String
     let days: [WeekFort.Day]
     var onSelect: ((String) -> Void)? = nil
-    /// A chevron beside the summary when the whole card opens somewhere.
-    var showsDisclosure = false
-    @Environment(\.colorScheme) private var colorScheme
 
-    private static let towerHeight: CGFloat = 40
-    private static let restHeight: CGFloat = 10
+    private static let towerHeight: CGFloat = 28
+    private static let restHeight: CGFloat = 6
+    private static let dateSize: CGFloat = 28
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 4) {
-                Text(WeekFort.summary(days))
-                    .font(Theme.mono(12, .bold))
-                    .foregroundStyle(days.contains { $0.state == .trained }
-                                     ? BrandPalette.fortOrangeText : BrandPalette.fortLabel)
-                    .accessibilityLabel(WeekFort.accessibilityLabel(title: title, days: days))
-                    .accessibilityIdentifier("today.weekFort")
-                if showsDisclosure {
-                    Spacer(minLength: 4)
-                    Image(systemName: "chevron.right")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(BrandPalette.fortLabel)
-                        .accessibilityHidden(true)
-                }
-            }
-            .padding(.horizontal, 2)
-            HStack(alignment: .top, spacing: 6) {
-                ForEach(days, id: \.ymd) { day in
-                    dayColumn(day)
-                        .frame(maxWidth: .infinity)
-                }
+        HStack(alignment: .top, spacing: 6) {
+            ForEach(days, id: \.ymd) { day in
+                dayColumn(day)
+                    .frame(maxWidth: .infinity)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.top, 12)
-        .padding(.bottom, 8)
-        .background(BrandPalette.fortNavy)
-        .clipShape(RoundedRectangle(cornerRadius: 16))
-        .overlay {
-            // On a dark page the navy card needs an edge to read as a card.
-            if colorScheme == .dark {
-                RoundedRectangle(cornerRadius: 16).strokeBorder(BrandPalette.fortIdle, lineWidth: 1)
-            }
-        }
+        .padding(.horizontal, 4)
     }
 
     @ViewBuilder
     private func dayColumn(_ day: WeekFort.Day) -> some View {
-        let column = VStack(spacing: 6) {
+        let column = VStack(spacing: 4) {
             tower(day)
                 .frame(height: Self.towerHeight, alignment: .bottom)
-            VStack(spacing: 1) {
-                Text(WeekFort.weekdayLetter(day.ymd))
-                    .font(Theme.mono(10, .bold))
-                    .foregroundStyle(day.isToday ? BrandPalette.fortOrangeText : BrandPalette.fortLabel)
-                Text(WeekFort.dayNumber(day.ymd))
-                    .font(.subheadline.weight(.semibold).monospacedDigit())
-                    .foregroundStyle(day.isToday ? BrandPalette.fortOrangeText : BrandPalette.fortText)
-            }
-            .lineLimit(1).minimumScaleFactor(0.7)
+            Text(WeekFort.weekdayLetter(day.ymd))
+                .font(Theme.mono(10, .bold))
+                .foregroundStyle(day.isToday ? Theme.signal : Theme.muted)
+                .lineLimit(1)
+                .padding(.top, 2)
+            Text(WeekFort.dayNumber(day.ymd))
+                .font(.subheadline.weight(day.isToday ? .bold : .semibold).monospacedDigit())
+                .foregroundStyle(day.isToday ? Theme.signal : Theme.text)
+                .lineLimit(1).minimumScaleFactor(0.7)
+                .frame(minWidth: Self.dateSize, minHeight: Self.dateSize)
+                .overlay {
+                    // Where you are in the week.
+                    if day.isToday { Capsule().strokeBorder(Theme.signal, lineWidth: 2) }
+                }
         }
-        .padding(.bottom, 4)
         .frame(minHeight: 44)
         .contentShape(Rectangle())
         if let onSelect {
@@ -188,21 +170,15 @@ struct WeekFortView: View {
         }
     }
 
-    @ViewBuilder
     private func tower(_ day: WeekFort.Day) -> some View {
-        let shape = UnevenRoundedRectangle(topLeadingRadius: 3, topTrailingRadius: 3)
-        let height = day.state == .rest ? Self.restHeight : Self.towerHeight
+        let fill: Color
         switch day.state {
-        case .trained:
-            shape.fill(BrandPalette.fortOrange).frame(height: height)
-        case .planned, .rest:
-            shape.fill(day.isToday ? Color.clear : BrandPalette.fortIdle)
-                .overlay {
-                    if day.isToday {
-                        shape.stroke(BrandPalette.fortOrange, lineWidth: 2)
-                    }
-                }
-                .frame(height: height)
+        case .trained: fill = BrandPalette.fortOrange
+        case .planned: fill = BrandPalette.weekPlanned
+        case .rest: fill = Theme.surface2
         }
+        return UnevenRoundedRectangle(topLeadingRadius: 3, topTrailingRadius: 3)
+            .fill(fill)
+            .frame(height: day.state == .rest ? Self.restHeight : Self.towerHeight)
     }
 }

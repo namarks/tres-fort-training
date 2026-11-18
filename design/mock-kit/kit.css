@@ -99,15 +99,69 @@ body.light .card, body.light .quick > div { box-shadow: 0 1px 3px rgb(15 29 47 /
 .route.plain { background: transparent; padding: 4px 0; }
 .route .t { font-weight: 600; } .route .s { font-size: 15px; color: var(--muted); margin-top: 3px; }
 
-/* WeekFortView. */
-.fort { background: var(--fort-navy); border-radius: 14px; padding: 12px 14px 0; }
-.fort .sum { font-size: 12px; font-weight: 700; color: var(--fort-label); }
-.fort .sum.trained { color: var(--fort-orange-text); }
-.fort .towers { display: flex; gap: 6px; align-items: flex-end; height: 40px; margin-top: 10px; }
-.fort .towers i { flex: 1; border-radius: 3px 3px 0 0; background: var(--fort-idle); height: 40px; }
-.fort .towers i.trained { background: var(--fort-orange); }
-.fort .towers i.rest { height: 10px; }
-.fort .towers i.today { background: transparent; box-shadow: inset 0 0 0 2px var(--fort-orange); border-bottom: 0; }
+/* Today's section headings (TodaySectionLabel, TodayDayHeading,
+   TodayWeekSection): a small heading with a link beside it, 28pt tall. */
+.sec-head { display: flex; align-items: center; justify-content: space-between; min-height: 28px; padding: 0 4px; }
+.sec { font-size: 11px; font-weight: 700; letter-spacing: 1.6px; text-transform: uppercase; color: var(--muted); }
+.sec-link { color: var(--accent); font-size: 15px; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; }
+.sec-link.event { font-size: 13px; gap: 5px; }
+
+/* Today's card in two tones (todayCardShell, todayActionBand, todayFootRows):
+   navy holds what to do now and its one orange action, the plain foot holds
+   the other choices as rows under thin rules. todayPlainCard is .card. */
+.today-card { border-radius: 16px; overflow: hidden; background: var(--surface); }
+body.light .today-card { box-shadow: 0 1px 3px rgb(15 29 47 / .06), 0 4px 16px rgb(15 29 47 / .04); }
+.today-card .hero { border-radius: 0; border: 0; }
+.today-card .name { font-family: Bebas, 'Arial Narrow', sans-serif; font-size: 30px; line-height: 1; letter-spacing: .01em; margin-top: 8px; }
+.today-card .sum { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 6px; }
+.today-card .names { font-size: 13px; color: var(--muted); margin-top: 2px; }
+.today-card .btn-primary { margin-top: 16px; }
+.today-card .foot { padding: 0 20px 4px; }
+.today-card .foot > * + * { border-top: 1px solid var(--surface2); }
+/* DayActionsRow: Details, Swap and Skip as links with thin dividers. */
+.day-actions { display: flex; }
+.day-actions > span { flex: 1; min-height: 44px; display: flex; align-items: center; justify-content: center; gap: 6px;
+  font-size: 15px; font-weight: 600; color: var(--accent); position: relative; }
+.day-actions > span + span::before { content: ''; position: absolute; left: 0; top: 12px; bottom: 12px; width: 1px; background: var(--surface2); }
+/* AddAnotherWorkoutLine, and the rest day's "Do a saved workout". */
+.foot-link { min-height: 44px; display: flex; align-items: center; gap: 6px; font-size: 15px; font-weight: 600; color: var(--accent); }
+/* quickStartButtons: Lift, Run, Log. */
+.quick-row { display: flex; gap: 8px; }
+.quick-row > span { flex: 1; min-height: 44px; border-radius: 12px; background: var(--surface2); display: flex; align-items: center;
+  justify-content: center; gap: 6px; font-size: 15px; font-weight: 600; }
+.quick-row > span svg { color: var(--accent); }
+
+/* WeekFortView: a light chart on the page. Trained days are the only
+   orange, planned days a quiet blue (weekPlanned), rest days stay low and
+   today's date is ringed in signal. */
+.week-chart { display: flex; gap: 6px; padding: 0 4px; }
+.week-chart > div { flex: 1; display: flex; flex-direction: column; align-items: center; }
+.week-chart .tw { height: 28px; width: 100%; display: flex; align-items: flex-end; }
+.week-chart .tw i { width: 100%; height: 28px; border-radius: 3px 3px 0 0; display: block; background: var(--week-planned); }
+.week-chart .tw i.rest { height: 6px; background: var(--surface2); }
+.week-chart .tw i.trained { background: var(--fort-orange); }
+.week-chart .l { font-size: 10px; font-weight: 700; color: var(--muted); margin-top: 6px; }
+.week-chart .n { min-width: 28px; height: 28px; border-radius: 14px; display: grid; place-items: center; font-size: 15px; font-weight: 600;
+  font-variant-numeric: tabular-nums; margin-top: 4px; }
+.week-chart .now .l { color: var(--signal); }
+.week-chart .now .n { box-shadow: inset 0 0 0 2px var(--signal); color: var(--signal); font-weight: 700; }
+
+/* Coming up (UpcomingDayRow): date column, then each thing the day holds
+   as a glyph and a name on one center line. */
+.upcoming { background: var(--surface); border-radius: 16px; overflow: hidden; }
+.upcoming .r { display: flex; align-items: center; gap: 12px; padding: 10px 14px; min-height: 52px; position: relative; }
+.upcoming .r + .r::before { content: ''; position: absolute; top: 0; left: 64px; right: 0; height: 1px; background: var(--surface2); }
+.upcoming .d { width: 40px; text-align: center; }
+.upcoming .d .w { font-size: 10px; font-weight: 700; letter-spacing: 1px; color: var(--muted); }
+.upcoming .d .n { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.15; }
+.upcoming .lines { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.upcoming .line { display: flex; align-items: center; gap: 10px; }
+.upcoming .g { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; flex: none;
+  color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.upcoming .g.endurance { color: var(--cat4); background: color-mix(in srgb, var(--cat4) 12%, transparent); }
+.upcoming .t { font-size: 15px; font-weight: 600; } .upcoming .line + .line .t { font-weight: 400; }
+.upcoming .s { font-size: 13px; color: var(--muted); margin-top: 2px; }
+.upcoming .c { margin-left: auto; color: var(--dim); }
 
 /* Week row of CalendarDayCell: weekday label mono 10 dim, 56pt cell, radius 10. */
 .weekrow { display: flex; gap: 6px; }

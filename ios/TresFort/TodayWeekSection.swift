@@ -1,12 +1,15 @@
 import SwiftUI
 
-/// Today's look ahead: the week as a fort (`WeekFortView`), one tower per
-/// day over its date, opening on the current week and paging sideways into
-/// the next few; then the next few days that carry a workout or planned ride
-/// as one list, headed by the route to the full calendar. This week's fort
-/// opens the Activity tab, where the week is told in full; a later week's
-/// towers and each upcoming day open the same date sheet the calendar uses,
-/// so assigning or replacing a workout works from here too.
+/// Today's look ahead, as two sections under small headings like the day's
+/// own (app-design-pass P29). THIS WEEK: the count ("2 of 5 done") beside
+/// the heading, then a light chart with one tower per day
+/// (`WeekFortView`), opening on the current week and paging sideways into
+/// the next few. COMING UP: the next few days that carry a workout, an
+/// activity or a planned ride as one list, with the route to the full
+/// calendar beside the heading. This week's count and chart open the
+/// Activity tab, where the week is told in full; a later week's towers and
+/// each upcoming day open the same date sheet the calendar uses, so
+/// assigning or replacing a workout works from here too.
 struct TodayWeekSection: View {
     @ObservedObject var sync: SyncModel
     let onOpenCalendar: () -> Void
@@ -19,14 +22,22 @@ struct TodayWeekSection: View {
 
     /// This week plus the next seven. Further out belongs to the calendar.
     static let weekCount = 8
+    /// How many days Coming up lists.
+    static let upcomingLimit = 4
+    /// A heading row's height. Its links reach the 44 pt tap target through
+    /// a taller hit shape, so the headings stay close to what they head.
+    private static let headingHeight: CGFloat = 28
+    private static let headingHitOutset: CGFloat = 8
 
     var body: some View {
         let weeks = Self.weeks(startingWith: sync.todayString, count: Self.weekCount)
-        let upcoming = sync.upcomingDays()
+        let upcoming = sync.upcomingDays(limit: Self.upcomingLimit)
         let page = min(visibleWeek ?? 0, max(weeks.count - 1, 0))
+        let pageTitle = weeks.isEmpty ? "THIS WEEK" : Self.title(forWeek: page, days: weeks[page])
+        let pageDays = weeks.isEmpty ? [] : WeekFort.days(for: weeks[page], sync: sync)
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                TodaySectionLabel(text: weeks.isEmpty ? "THIS WEEK" : Self.title(forWeek: page, days: weeks[page]))
+            HStack(spacing: 8) {
+                TodaySectionLabel(text: pageTitle)
                     .accessibilityIdentifier("today.weekTitle")
                 if page > 0 {
                     Button {
@@ -35,16 +46,17 @@ struct TodayWeekSection: View {
                         Image(systemName: "arrow.uturn.backward")
                             .font(.system(size: 11, weight: .bold))
                             .foregroundStyle(Theme.accent)
-                            .frame(minWidth: 44, minHeight: 44)
-                            .contentShape(Rectangle())
+                            .frame(minWidth: 44, minHeight: Self.headingHeight)
+                            .contentShape(Rectangle().inset(by: -Self.headingHitOutset))
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Back to this week")
                     .accessibilityIdentifier("today.thisWeek")
                 }
-                Spacer()
+                Spacer(minLength: 8)
+                weekCount(page: page, title: pageTitle, days: pageDays)
             }
-            .frame(minHeight: 44)
+            .frame(minHeight: Self.headingHeight)
             .padding(.horizontal, 4)
             ScrollView(.horizontal) {
                 LazyHStack(spacing: 0) {
@@ -53,21 +65,17 @@ struct TodayWeekSection: View {
                         // orange. This week opens Activity as a whole; a
                         // later week has nothing done yet, so each of its
                         // towers opens its day for planning.
-                        let title = Self.title(forWeek: index, days: weeks[index])
                         let days = WeekFort.days(for: weeks[index], sync: sync)
                         Group {
                             if index == 0, let onOpenActivity {
-                                Button(action: onOpenActivity) {
-                                    WeekFortView(title: title, days: days, showsDisclosure: true)
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityElement(children: .ignore)
-                                .accessibilityLabel(WeekFort.accessibilityLabel(title: title, days: days))
-                                .accessibilityHint("Opens Activity")
-                                .accessibilityAddTraits(.isButton)
-                                .accessibilityIdentifier("today.weekActivity")
+                                // The count in the heading is the button
+                                // VoiceOver reads; the chart is the same tap.
+                                WeekFortView(days: days)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture(perform: onOpenActivity)
+                                    .accessibilityHidden(true)
                             } else {
-                                WeekFortView(title: title, days: days) { ymd in
+                                WeekFortView(days: days) { ymd in
                                     selectedDate = IdentifiedString(id: ymd)
                                 }
                             }
@@ -81,9 +89,10 @@ struct TodayWeekSection: View {
             .scrollTargetBehavior(.paging)
             .scrollPosition(id: $visibleWeek)
             .scrollIndicators(.hidden)
-            HStack {
+            .padding(.top, 8)
+            HStack(spacing: 8) {
                 TodaySectionLabel(text: "COMING UP")
-                Spacer()
+                Spacer(minLength: 8)
                 Button(action: onOpenCalendar) {
                     HStack(spacing: 4) {
                         Text("Calendar")
@@ -91,14 +100,15 @@ struct TodayWeekSection: View {
                     }
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(Theme.accent)
-                    .frame(minWidth: 44, minHeight: 44, alignment: .trailing)
-                    .contentShape(Rectangle())
+                    .frame(minWidth: 44, minHeight: Self.headingHeight, alignment: .trailing)
+                    .contentShape(Rectangle().inset(by: -Self.headingHitOutset))
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("today.calendar")
             }
+            .frame(minHeight: Self.headingHeight)
             .padding(.horizontal, 4)
-            .padding(.top, 16).padding(.bottom, upcoming.isEmpty ? 0 : 4)
+            .padding(.top, 24).padding(.bottom, 4)
             if upcoming.isEmpty {
                 Text("Nothing planned in the next two weeks.")
                     .font(.footnote).foregroundStyle(Theme.muted)
@@ -134,6 +144,34 @@ struct TodayWeekSection: View {
             }
             .presentationDetents([.large])
             .presentationDragIndicator(.visible)
+        }
+    }
+
+    /// The week's count beside its heading: "2 of 5 done". This week's opens
+    /// Activity; a later week's is only read.
+    @ViewBuilder
+    private func weekCount(page: Int, title: String, days: [WeekFort.Day]) -> some View {
+        if page == 0, let onOpenActivity {
+            Button(action: onOpenActivity) {
+                HStack(spacing: 4) {
+                    Text(WeekFort.summary(days))
+                    Image(systemName: "chevron.right").font(.caption.weight(.bold))
+                }
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Theme.accent)
+                .frame(minWidth: 44, minHeight: Self.headingHeight, alignment: .trailing)
+                .contentShape(Rectangle().inset(by: -Self.headingHitOutset))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(WeekFort.accessibilityLabel(title: title, days: days))
+            .accessibilityHint("Opens Activity")
+            .accessibilityIdentifier("today.weekActivity")
+        } else {
+            Text(WeekFort.summary(days))
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Theme.muted)
+                .accessibilityLabel(WeekFort.accessibilityLabel(title: title, days: days))
+                .accessibilityIdentifier("today.weekFort")
         }
     }
 
@@ -190,7 +228,10 @@ struct TodayWeekSection: View {
 }
 
 /// One upcoming day: its date, the workout it resolves to, the activities
-/// beside it, and any planned ride or run. A workout whose template isn't cached still shows its date.
+/// beside it, and any planned ride or run. Every line is a glyph and a name
+/// on one center line; the day's first line is the heavier one, whether it
+/// is a workout or an activity. A workout whose template isn't cached still
+/// shows its date.
 private struct UpcomingDayRow: View {
     @ObservedObject var sync: SyncModel
     let day: SyncModel.UpcomingDay
@@ -201,59 +242,70 @@ private struct UpcomingDayRow: View {
         HStack(spacing: 12) {
             VStack(spacing: 1) {
                 Text(weekday)
-                    .font(Theme.mono(9, .bold)).tracking(1)
+                    .font(Theme.mono(10, .bold)).tracking(1)
                     .foregroundStyle(Theme.muted)
                     .lineLimit(1).minimumScaleFactor(0.6)
                 Text(dayNumber)
-                    .font(.title3.weight(.bold).monospacedDigit()).foregroundStyle(Theme.text)
+                    .font(.body.weight(.semibold).monospacedDigit()).foregroundStyle(Theme.text)
             }
             .frame(width: 40)
             VStack(alignment: .leading, spacing: 6) {
                 if day.hasWorkout {
                     let isRun = day.workout.map { !$0.exercises.isEmpty && $0.exercises.allSatisfy(\.isOutdoorRun) } ?? false
                     let isActivity = day.workout.map(PlannedActivity.isActivity) ?? false
-                    HStack(alignment: .top, spacing: 10) {
-                        glyph(isRun ? "figure.run" : isActivity ? "sportscourt" : "dumbbell.fill",
-                              color: isRun || isActivity ? WorkoutCategory.endurance.color : WorkoutCategory.lift.color)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(day.workout?.name ?? "Workout scheduled")
-                                .font(.subheadline.weight(.semibold)).foregroundStyle(Theme.text)
-                                .lineLimit(1)
-                            if let workout = day.workout, !workout.exercises.isEmpty {
-                                // A planned run reads as its steps, a lift as its exercises.
-                                Text(workout.exercises.map { $0.isOutdoorRun ? $0.runPrescriptionLabel(in: runUnit) : $0.exercise_name }
-                                    .joined(separator: " · "))
-                                    .font(.footnote).foregroundStyle(Theme.muted)
-                                    .lineLimit(isRun ? 2 : 1)
-                            }
-                        }
-                    }
+                    line(glyph: day.workout.map(PlanItemSummary.glyph(for:)) ?? "dumbbell",
+                         color: isRun || isActivity ? WorkoutCategory.endurance.color : WorkoutCategory.lift.color,
+                         title: day.workout?.name ?? "Workout scheduled",
+                         detail: contents(day.workout),
+                         detailLines: isRun ? 2 : 1,
+                         leads: true)
                 }
                 // Activities beside the day's workout, such as stretching.
-                ForEach(day.extras) { extra in
-                    HStack(spacing: 10) {
-                        glyph(PlanItemSummary.glyph(for: extra), color: WorkoutCategory.endurance.color)
-                        Text(day.hasWorkout ? "+ \(extra.name)" : extra.name)
-                            .font(.subheadline).foregroundStyle(Theme.text)
-                            .lineLimit(1)
-                    }
-                    .accessibilityLabel(day.hasWorkout ? "Also \(extra.name)" : extra.name)
+                ForEach(Array(day.extras.enumerated()), id: \.element.id) { index, extra in
+                    line(glyph: PlanItemSummary.glyph(for: extra), color: WorkoutCategory.endurance.color,
+                         title: extra.name, leads: !day.hasWorkout && index == 0)
+                        .accessibilityLabel(day.hasWorkout ? "Also \(extra.name)" : extra.name)
                 }
-                ForEach(day.rides) { ride in
-                    HStack(spacing: 10) {
-                        glyph(ExternalActivity.glyph(forKind: ride.kind), color: WorkoutCategory.endurance.color)
-                        Text(ride.durationLabel.map { "\(ride.displayTitle) · \($0)" } ?? ride.displayTitle)
-                            .font(.subheadline).foregroundStyle(Theme.text)
-                            .lineLimit(1)
-                    }
+                ForEach(Array(day.rides.enumerated()), id: \.element.id) { index, ride in
+                    line(glyph: ExternalActivity.glyph(forKind: ride.kind), color: WorkoutCategory.endurance.color,
+                         title: ride.durationLabel.map { "\(ride.displayTitle) · \($0)" } ?? ride.displayTitle,
+                         leads: !day.hasWorkout && day.extras.isEmpty && index == 0)
                 }
             }
             Spacer(minLength: 4)
             Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(Theme.dim)
         }
-        .padding(.horizontal, 14).padding(.vertical, 11)
-        .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
         .contentShape(Rectangle())
+    }
+
+    /// What's in the day's workout: a planned run reads as its steps, a lift
+    /// as its exercises.
+    private func contents(_ workout: Workout?) -> String? {
+        guard let workout, !workout.exercises.isEmpty else { return nil }
+        return workout.exercises
+            .map { $0.isOutdoorRun ? $0.runPrescriptionLabel(in: runUnit) : $0.exercise_name }
+            .joined(separator: " · ")
+    }
+
+    /// One thing the day holds: its glyph, its name and, for a workout,
+    /// what's in it. `leads` marks the day's first line.
+    private func line(glyph systemName: String, color: Color, title: String, detail: String? = nil,
+                      detailLines: Int = 1, leads: Bool) -> some View {
+        HStack(alignment: .center, spacing: 10) {
+            glyph(systemName, color: color)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.subheadline.weight(leads ? .semibold : .regular)).foregroundStyle(Theme.text)
+                    .lineLimit(1)
+                if let detail {
+                    Text(detail)
+                        .font(.footnote).foregroundStyle(Theme.muted)
+                        .lineLimit(detailLines)
+                }
+            }
+        }
     }
 
     /// The kind of day in a small tinted square, as in the Activity list.

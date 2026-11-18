@@ -31,10 +31,13 @@ accent, for links, tints and selection. Orange is the one signal color:
   every surface) colors the selected tab, set progress, the rest timer bar
   and route lines.
 - `heroCard()` makes a screen's key card solid navy, the icon in miniature,
-  with its content in the dark-mode colors. Today's workout card uses it.
-- Today's week card (`WeekFortView`) is the icon itself: a navy card where
-  every day you trained raises an orange tower, planned days stand as dark
-  towers and rest days stay low.
+  with its content in the dark-mode colors. Today's card keeps that navy
+  for what to do now and its one orange action (`todayActionBand()`); the
+  rest of the card is plain.
+- Today's week chart (`WeekFortView`) is the icon's fort on the page:
+  every day you trained raises an orange tower, planned days stand as
+  quiet blue towers (`weekPlanned`) and rest days stay low. Activity's
+  week card keeps the navy fort.
 
 The website keeps the earlier Ink palette until it is redesigned. How to use
 the colors, type and components is in `docs/DESIGN-SYSTEM.md`.

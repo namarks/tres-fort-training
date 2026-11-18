@@ -51,7 +51,8 @@ reason, and a contrast check.
 | `danger` | `#AF3C3A` | `#EB827B` | Destructive actions and errors |
 | `hero` / `heroEdge` | `#15273E` | `#1A314E` / `#314968` | A screen's key card (`heroCard()`) |
 | `heroRaised` | `#2A4466` | same | Tiles and rules inside a hero card (`RaisedFill`) |
-| `fort*` | fixed | fixed | Today's week fort card only |
+| `weekPlanned` | `#798EA8` | `#556E8E` | A planned day's tower in Today's week chart, 3:1 on the page |
+| `fort*` | fixed | fixed | The icon's fort: Activity's navy week card, and the orange towers of Today's week chart |
 | `categorical` | six hues | six hues | Telling series apart, never emphasis |
 
 Rules:
@@ -111,7 +112,19 @@ Rules:
   use `RaisedFill()`, which turns `surface2` into `heroRaised` inside the
   card. At most one per screen.
 - **Card**: `surface` background, radius 14, optional 1 pt `surface2` edge.
-- **Week fort**: `WeekFortView` on Today, every trained day an orange tower.
+- **Today's card**: two tones. `todayActionBand()` puts what to do now and
+  its one orange action on navy (the hero recipe, so ordinary `Theme`
+  tokens inside it); everything else about the day sits on the plain card
+  as `todayFootRow()` rows under thin rules, inside `todayCardShell()`. A
+  day with nothing to start or log is a `todayPlainCard()` with no navy, so
+  navy on Today always means "do this".
+- **Section heading**: `TodaySectionLabel` with its link beside it, 28 pt
+  tall; the link reaches 44 pt through a taller hit shape. Today's three
+  sections (the day, This week, Coming up) all use it, 24 pt apart.
+- **Week chart**: `WeekFortView` on Today, on the page with no card. Every
+  trained day is an orange tower (the only orange in it), a planned day a
+  quiet blue one (`weekPlanned`), a rest day stays low, and today's date
+  is ringed in `signal`. Activity's week card keeps the navy fort.
 - **Tab bar**: tinted `signal` (the selected tab is orange); each tab's
   content is re-tinted `accent`.
 - **iPad workout screen**: `WorkoutDisplayView` (the iPad runner and the

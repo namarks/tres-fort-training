@@ -232,6 +232,9 @@ struct TodayView: View {
     /// one-time notification permission prompt before a new workout.
     @State private var isPreparingWorkoutStart = false
     @State private var showFreestyle = false
+    /// "Build a workout" in the + menu: the same picker as the card's Add
+    /// another workout, for a day whose card doesn't carry that line.
+    @State private var showAddWorkout = false
     @State private var showStation = false
     @State private var showStationConnection = false
     @StateObject private var partner = PartnerPhoneModel()
@@ -455,6 +458,9 @@ struct TodayView: View {
             }
             .sheet(isPresented: $showPartner) { PartnerPhoneSetup(model: partner, sync: sync) }
             .sheet(isPresented: $showFreestyle) { FreestyleExercisePicker(sync: sync, starting: true) }
+            .sheet(isPresented: $showAddWorkout) {
+                AdditionalWorkoutPicker(sync: sync, title: todayHoldsNothing ? "Add a workout" : "Add another workout")
+            }
             .sheet(isPresented: $showRoutine) {
                 CreateWorkoutView(sync: sync, onStart: sync.todayIsCompleted ? nil : startChosenWorkout)
             }
@@ -534,9 +540,21 @@ struct TodayView: View {
     private var canOfferSavedWorkouts: Bool {
         !sync.running && !sync.partnerReserved && sync.plan != nil
     }
+    /// Building a routine right now, or adding a workout beside the day's
+    /// own. The day's card carries the same thing as its last line, except
+    /// on a day with nothing planned.
+    private var canOfferBuildWorkout: Bool {
+        !sync.running && !sync.partnerReserved && sync.plan != nil
+    }
     private var hasMoreWaysToTrain: Bool {
         canOfferFreestyle || canOfferLogActivity || canOfferRecordRun || canOfferTrainTogether
             || canOfferSavedWorkouts || (offersDisplayInMenu && !sync.running)
+    }
+    /// Today has no workout, session or activity planned: the card reads
+    /// "Rest day".
+    private var todayHoldsNothing: Bool {
+        !sync.isFreestyle && sync.todayPreviewWorkout == nil && sync.todaySession == nil
+            && todayArrangement(main: nil).lead == nil
     }
     /// Record a run is a quick start for a member who runs, or whose plan
     /// says nothing yet. A plan of workouts with no run keeps it in the +
@@ -576,6 +594,13 @@ struct TodayView: View {
                 }
                 .accessibilityIdentifier("today.trainTogether")
             }
+            if canOfferBuildWorkout {
+                Button { showAddWorkout = true } label: {
+                    Label("Build a workout", systemImage: "square.stack.3d.up")
+                }
+                .disabled(!sync.canAddAnotherWorkout)
+                .accessibilityIdentifier("today.buildWorkout")
+            }
             if canOfferSavedWorkouts {
                 Divider()
                 Button { showOverridePicker = true } label: {
@@ -609,27 +634,37 @@ struct TodayView: View {
         } else if sync.running && !workoutFocused {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
-                    dayWorkouts
-                    VStack(alignment: .leading, spacing: 0) {
-                        TodaySectionLabel(text: TodayCard.kicker(sync.todayString, "In progress"))
-                        Text("Workout in progress").font(.title3.weight(.bold)).padding(.top, 6)
-                        if let ex = sync.currentExercise {
-                            Text(ex.exercise_name).font(.headline).padding(.top, 10)
-                            Text("Set \(sync.currentPhysicalSetNumber)").font(.subheadline).foregroundStyle(Theme.muted)
+                    daySection(sync.todayString) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            VStack(alignment: .leading, spacing: 0) {
+                                TodaySectionLabel(text: "IN PROGRESS")
+                                Text("Workout in progress").font(.title3.weight(.bold))
+                                    .foregroundStyle(Theme.text).padding(.top, 8)
+                                if let ex = sync.currentExercise {
+                                    Text("\(ex.exercise_name) · Set \(sync.currentPhysicalSetNumber)")
+                                        .font(.headline.monospacedDigit()).foregroundStyle(Theme.text)
+                                        .padding(.top, 6)
+                                }
+                                Button {
+                                    isLocallyMinimized = false
+                                    onResumeWorkout?()
+                                } label: {
+                                    Label("Resume workout", systemImage: "play.fill")
+                                }
+                                .buttonStyle(WorkoutPrimaryButtonStyle())
+                                .accessibilityIdentifier("runner.resume")
+                                .padding(.top, 16)
+                            }
+                            .todayActionBand()
+                            VStack(alignment: .leading, spacing: 0) {
+                                TodayLaterList(extras: todayExtras.filter { !plannedActivityLogged($0) },
+                                               onLog: onLogPlannedActivity, minutes: todayMinutes)
+                                AddAnotherWorkoutLine(sync: sync)
+                            }
+                            .todayFootRows()
                         }
-                        Button {
-                            isLocallyMinimized = false
-                            onResumeWorkout?()
-                        } label: {
-                            Label("Resume workout", systemImage: "play.fill")
-                        }
-                        .buttonStyle(WorkoutPrimaryButtonStyle())
-                        .accessibilityIdentifier("runner.resume")
-                        .padding(.top, 14)
-                        TodayLaterList(extras: todayExtras.filter { !plannedActivityLogged($0) },
-                                       onLog: onLogPlannedActivity, minutes: todayMinutes)
+                        .todayCardShell()
                     }
-                    .todayCardSurface()
                     weekSection
                 }
                 .readableColumn()
@@ -662,12 +697,15 @@ struct TodayView: View {
         } else if let other = otherDate {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
-                    TodayOtherDayCard(
-                        sync: sync, dateString: other,
-                        onBackToToday: { moveDay(-(TodayDays.offset(of: other, from: sync.todayString) ?? 0)) },
-                        onViewDay: { otherDayAgenda = IdentifiedString(id: other) },
-                        onChangeDay: { otherDayPicker = IdentifiedString(id: other) })
-                        .modifier(TodayDaySwipe(state: daySwipe, canMove: canMoveDay, apply: applyDayMove, move: moveDay))
+                    VStack(alignment: .leading, spacing: 4) {
+                        TodayDayHeading(sync: sync, dateString: other)
+                        TodayOtherDayCard(
+                            sync: sync, dateString: other,
+                            onBackToToday: { moveDay(-(TodayDays.offset(of: other, from: sync.todayString) ?? 0)) },
+                            onViewDay: { otherDayAgenda = IdentifiedString(id: other) },
+                            onChangeDay: { otherDayPicker = IdentifiedString(id: other) })
+                            .modifier(TodayDaySwipe(state: daySwipe, canMove: canMoveDay, apply: applyDayMove, move: moveDay))
+                    }
                     weekSection
                 }
                 .readableColumn()
@@ -688,14 +726,14 @@ struct TodayView: View {
         } else {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
-                    EventTodayLine(sync: sync)
-                    dayWorkouts
-                    // The recovery card adds its own top gap, so nothing
-                    // moves when WHOOP isn't connected.
-                    VStack(spacing: 0) {
-                        todayCard
-                            .modifier(TodayDaySwipe(state: daySwipe, canMove: canMoveDay, apply: applyDayMove, move: moveDay))
-                        RecoveryCard(auth: auth)
+                    daySection(sync.todayString) {
+                        // The recovery card adds its own top gap, so nothing
+                        // moves when WHOOP isn't connected.
+                        VStack(spacing: 0) {
+                            todayCard
+                                .modifier(TodayDaySwipe(state: daySwipe, canMove: canMoveDay, apply: applyDayMove, move: moveDay))
+                            RecoveryCard(auth: auth)
+                        }
                     }
                     weekSection
                     if let error = sync.loadError {
@@ -709,6 +747,19 @@ struct TodayView: View {
         }
     }
 
+    /// Today's first section: the date (with the goal event beside it) as
+    /// its heading, the day's agenda once it holds more than one workout,
+    /// then the day's card.
+    private func daySection<Card: View>(_ dateString: String, @ViewBuilder card: () -> Card) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            TodayDayHeading(sync: sync, dateString: dateString)
+            VStack(alignment: .leading, spacing: 12) {
+                dayWorkouts
+                card()
+            }
+        }
+    }
+
     /// Everything about today in one card: what's planned and how to start
     /// it, or that nothing is, then other ways to train.
     @ViewBuilder private var todayCard: some View {
@@ -717,63 +768,86 @@ struct TodayView: View {
                || (sync.todayPreviewWorkout == nil && sync.todaySession == nil) {
             // The agenda already owns the activity actions (or the extras on
             // a rest day). Don't repeat them or call the same date unplanned.
-            if hasQuickStarts {
-                VStack(alignment: .leading, spacing: 8) {
-                    TodaySectionLabel(text: "SOMETHING ELSE")
-                    quickStartButtons
+            VStack(alignment: .leading, spacing: 0) {
+                if hasQuickStarts {
+                    TodaySectionLabel(text: "SOMETHING ELSE").padding(.top, 16)
+                    quickStartButtons.padding(.top, 8).padding(.bottom, 12)
                 }
-                .todayCardSurface()
+                AddAnotherWorkoutLine(sync: sync, ruled: hasQuickStarts)
             }
+            .padding(.horizontal, 20).padding(.vertical, 4)
+            .todayCardShell()
         } else {
             selectedWorkoutCard
         }
     }
 
-    private var selectedWorkoutCard: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if sync.isFreestyle {
-                TodaySectionLabel(text: TodayCard.kicker(sync.todayString, "Freestyle"))
-                Text("Freestyle").font(Theme.display(30)).foregroundStyle(Theme.text).padding(.top, 8)
-                Text("Add exercises as you go. Your weekly schedule stays unchanged.")
-                    .font(.subheadline).foregroundStyle(Theme.muted).padding(.top, 4)
-                if sync.hasResumableWorkout {
-                    Button("Continue freestyle") { sync.resumeWorkout() }
-                        .buttonStyle(WorkoutPrimaryButtonStyle()).accessibilityIdentifier("today.resumeFreestyle")
-                        .padding(.top, 14)
+    /// The day's card in two tones (app-design-pass P29): what to do now and
+    /// its one orange action on navy, everything else on the plain card.
+    /// With nothing to start or log the whole card is plain.
+    @ViewBuilder private var selectedWorkoutCard: some View {
+        if sync.isFreestyle {
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 0) {
+                    TodaySectionLabel(text: "FREESTYLE")
+                    Text("Freestyle").font(Theme.display(30)).foregroundStyle(Theme.text).padding(.top, 8)
+                    Text("Add exercises as you go. Your weekly schedule stays unchanged.")
+                        .font(.subheadline).foregroundStyle(Theme.muted).padding(.top, 4)
+                    if sync.hasResumableWorkout {
+                        Button("Continue freestyle") { sync.resumeWorkout() }
+                            .buttonStyle(WorkoutPrimaryButtonStyle()).accessibilityIdentifier("today.resumeFreestyle")
+                            .padding(.top, 16)
+                    }
                 }
-                extrasBeside
-                somethingElse
-            } else if let workout = sync.todayPreviewWorkout {
-                // A planned day changes through Swap; training off the plan
-                // stays in the + menu (app-design-pass P25).
-                lineupCard(main: workout)
-            } else if let session = sync.todaySession,
-                      ["planned", "in_progress"].contains(session.status) {
-                TodaySectionLabel(text: TodayCard.kicker(sync.todayString, ""))
-                Text("Workout needs review").font(.title3.weight(.bold)).foregroundStyle(Theme.text).padding(.top, 6)
-                Text("There is a workout for today, but its saved workout details are unavailable. Your recorded sets are still available.")
-                    .font(.subheadline).foregroundStyle(Theme.muted).padding(.top, 4)
-                Button("View workout record") { unresolvedDate = IdentifiedString(id: session.date) }
-                    .frame(minHeight: 44).accessibilityIdentifier("today.viewUnresolvedWorkout")
-                Button("Refresh workout") { Task { await sync.load() } }.frame(minHeight: 44)
-                extrasBeside
-                somethingElse
-            } else if todayArrangement(main: nil).lead != nil {
-                lineupCard(main: nil)
-                somethingElse
-            } else {
+                .todayLeadBand(hasAction: sync.hasResumableWorkout)
+                VStack(alignment: .leading, spacing: 0) {
+                    extrasBeside
+                    somethingElse
+                    AddAnotherWorkoutLine(sync: sync)
+                }
+                .todayFootRows()
+            }
+            .todayCardShell()
+        } else if let workout = sync.todayPreviewWorkout {
+            // A planned day changes through Swap; training off the plan
+            // stays in the + menu (app-design-pass P25).
+            lineupCard(main: workout)
+        } else if let session = sync.todaySession,
+                  ["planned", "in_progress"].contains(session.status) {
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("Workout needs review").font(.title3.weight(.bold)).foregroundStyle(Theme.text)
+                    Text("There is a workout for today, but its saved workout details are unavailable. Your recorded sets are still available.")
+                        .font(.subheadline).foregroundStyle(Theme.muted).padding(.top, 4)
+                    Button("View workout record") { unresolvedDate = IdentifiedString(id: session.date) }
+                        .frame(minHeight: 44).accessibilityIdentifier("today.viewUnresolvedWorkout")
+                    Button("Refresh workout") { Task { await sync.load() } }.frame(minHeight: 44)
+                }
+                .todayLeadBand(hasAction: false)
+                VStack(alignment: .leading, spacing: 0) {
+                    extrasBeside
+                    somethingElse
+                    AddAnotherWorkoutLine(sync: sync)
+                }
+                .todayFootRows()
+            }
+            .todayCardShell()
+        } else if todayArrangement(main: nil).lead != nil {
+            lineupCard(main: nil)
+        } else {
+            // Nothing to start or log: a plain card, and no navy.
+            VStack(alignment: .leading, spacing: 0) {
                 doneExtraLines(todayArrangement(main: nil))
-                TodaySectionLabel(text: TodayCard.kicker(sync.todayString, "Rest day"))
-                Text("Nothing planned today").font(.title3.weight(.bold)).foregroundStyle(Theme.text)
-                    .padding(.top, 6)
-                Text("Train anyway, or take the day off.")
-                    .font(.subheadline).foregroundStyle(Theme.muted).padding(.top, 2)
+                Text("Rest day").font(.title2.weight(.bold)).foregroundStyle(Theme.text)
+                Text("Nothing planned. Train anyway, or take the day off.")
+                    .font(.subheadline).foregroundStyle(Theme.muted).padding(.top, 4)
+                    .fixedSize(horizontal: false, vertical: true)
                 if sync.canOfferWeekPlanning {
                     Text("Your saved workouts are ready. Choose the days you do them to see what's next here.")
                         .font(.subheadline).foregroundStyle(Theme.muted).padding(.top, 10)
                     planWeekButton.padding(.top, 10)
                 }
-                if hasQuickStarts { quickStartButtons.padding(.top, 14) }
+                if hasQuickStarts { quickStartButtons.padding(.top, 16) }
                 Button { showOverridePicker = true } label: {
                     HStack(spacing: 4) {
                         Text("Do a saved workout")
@@ -783,17 +857,21 @@ struct TodayView: View {
                     .frame(minHeight: 44).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .padding(.top, 4).padding(.bottom, -8)
+                .padding(.top, 6)
                 .accessibilityIdentifier("today.savedWorkout")
+                // Building a routine is in the + menu on a day like this;
+                // one whose request is still out can be retried here.
+                AddAnotherWorkoutLine(sync: sync, retryOnly: true)
             }
+            .padding(.bottom, -8)
+            .todayPlainCard()
         }
-        .todayCardSurface()
     }
 
     private var showsDailyAgenda: Bool { DailyWorkoutAgenda.showsCombinedAgenda(sync.dailyWorkoutAgenda) }
 
     @ViewBuilder private var dayWorkouts: some View {
-        if sync.plan != nil {
+        if sync.plan != nil, showsDailyAgenda {
             DayWorkoutsView(sync: sync, onLogPlannedActivity: onLogPlannedActivity)
         }
     }
@@ -824,27 +902,39 @@ struct TodayView: View {
         }
     }
 
-    /// Today's planned workout, run or activity as a summary and the one
-    /// action that starts or logs it, with Details, Swap and Skip under it
-    /// (app-design-pass P25). A run's steps are behind Details.
+    /// Whether today's planned item has something to start or log. A
+    /// planned activity that's already logged, or one that can't be logged
+    /// from here, is only something to read.
+    private func plannedWorkoutHasAction(_ workout: Workout) -> Bool {
+        if soloPlannedRun(workout) != nil, onStartRun != nil, !sync.hasResumableWorkout { return true }
+        guard PlannedActivity.isActivity(workout) else { return true }
+        return !plannedActivityLogged(workout) && onLogPlannedActivity != nil
+    }
+
+    /// Today's planned workout, run or activity: its name, one line on how
+    /// much it is, and the one action that starts or logs it. Details, Swap
+    /// and Skip follow on the plain card (app-design-pass P25, P29). A run's
+    /// steps are behind Details.
     @ViewBuilder private func plannedWorkout(_ workout: Workout) -> some View {
         let run = soloPlannedRun(workout)
         let isActivity = PlannedActivity.isActivity(workout)
         let status = sync.hasResumableWorkout ? "In progress"
             : workout.isOneTime ? "Just for today"
             : run != nil ? "Planned run" : isActivity ? "Planned activity" : "Planned workout"
-        TodaySectionLabel(text: TodayCard.kicker(sync.todayString, status))
-        Text(workout.name).font(Theme.display(30)).foregroundStyle(Theme.text).padding(.top, 8)
+        TodaySectionLabel(text: status.uppercased())
+        Text(workout.name).font(Theme.display(30)).foregroundStyle(Theme.text)
+            .lineLimit(2).minimumScaleFactor(0.7)
+            .padding(.top, 8)
         Group {
             if run != nil {
-                PlannedRunGlance(workout: workout)
+                PlannedRunGlance(workout: workout, oneLine: true)
             } else if isActivity {
                 Text(plannedActivityLogged(workout) ? "Activity · logged" : "Activity")
-                    .font(.subheadline).foregroundStyle(Theme.muted)
+                    .font(.headline).foregroundStyle(Theme.text)
             } else {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(workout.exercises.count) \(workout.exercises.count == 1 ? "exercise" : "exercises")")
-                        .font(.subheadline).foregroundStyle(Theme.muted)
+                        .font(.headline.monospacedDigit()).foregroundStyle(Theme.text)
                     if !workout.exercises.isEmpty {
                         Text(workout.exercises.map(\.exercise_name).joined(separator: " · "))
                             .font(.footnote).foregroundStyle(Theme.muted)
@@ -853,7 +943,7 @@ struct TodayView: View {
                 }
             }
         }
-        .padding(.top, 4)
+        .padding(.top, 6)
         Group {
             if let run, let onStartRun, !sync.hasResumableWorkout {
                 // A run on its own starts in the recorder, not the set runner.
@@ -897,27 +987,31 @@ struct TodayView: View {
                     || (sync.blocksNewWorkoutStart && !sync.hasResumableWorkout))
             }
         }
-        .padding(.top, 14)
+        .padding(.top, 16)
+    }
+
+    /// Details, Swap and Skip for today's planned item, the first plain row
+    /// under it.
+    private func plannedWorkoutChoices(_ workout: Workout) -> some View {
         DayActionsRow(
             showsChanges: !sync.hasResumableWorkout && !sync.blocksNewWorkoutStart,
             onDetails: { previewTarget = IdentifiedString(id: workout.id) },
             onSwap: { showTodayPicker = IdentifiedString(id: sync.todayString) },
             onSkip: { confirmSkipToday = true })
-            .padding(.top, 10)
+            .todayFootRow()
     }
 
-    /// Unplanned training at the foot of today's card: a freestyle lift, a
-    /// run to record or an activity that's already done. The + menu keeps the
-    /// same choices plus the occasional ones.
+    /// Unplanned training among the plain rows of today's card: a freestyle
+    /// lift, a run to record or an activity that's already done. The + menu
+    /// keeps the same choices plus the occasional ones.
     @ViewBuilder private var somethingElse: some View {
         if hasQuickStarts {
             VStack(alignment: .leading, spacing: 8) {
                 TodaySectionLabel(text: "SOMETHING ELSE")
                 quickStartButtons
             }
-            .padding(.top, 12)
-            .overlay(alignment: .top) { RaisedFill().frame(height: 1) }
-            .padding(.top, 8)
+            .padding(.top, 12).padding(.bottom, 12)
+            .todayFootRow()
         }
     }
 
@@ -982,24 +1076,44 @@ struct TodayView: View {
     }
 
     /// The card's plan for today: finished items as check lines, then the
-    /// item that leads with its one orange action, then Later today.
+    /// item that leads on navy with its one orange action, then the plain
+    /// rows: its Details, Swap and Skip, Later today, and adding another.
     @ViewBuilder private func lineupCard(main: Workout?) -> some View {
         let arrangement = todayArrangement(main: main)
         let extras = todayExtras
-        if let main, arrangement.done.contains(main.id) {
-            TodayDoneLine(title: main.name, detail: "Logged",
-                          actionTitle: "View details", action: { previewTarget = IdentifiedString(id: main.id) },
-                          actionIdentifier: "today.viewWorkout")
+        let mainDone = main.map { arrangement.done.contains($0.id) } ?? false
+        let hasDoneExtras = extras.contains { arrangement.done.contains($0.id) }
+        VStack(alignment: .leading, spacing: 0) {
+            if mainDone || hasDoneExtras {
+                VStack(alignment: .leading, spacing: 0) {
+                    if let main, mainDone {
+                        TodayDoneLine(title: main.name, detail: "Logged",
+                                      actionTitle: "View details", action: { previewTarget = IdentifiedString(id: main.id) },
+                                      actionIdentifier: "today.viewWorkout", dividerBelow: false)
+                    }
+                    doneExtraLines(arrangement, dividers: false)
+                }
+                .todayDoneBand()
+            }
+            if let main, arrangement.lead == main.id {
+                VStack(alignment: .leading, spacing: 0) { plannedWorkout(main) }
+                    .todayLeadBand(hasAction: plannedWorkoutHasAction(main))
+            } else if let lead = extras.first(where: { $0.id == arrangement.lead }) {
+                TodayNextActivity(workout: lead, onLog: onLogPlannedActivity, minutes: todayMinutes(lead))
+                    .todayLeadBand(hasAction: onLogPlannedActivity != nil)
+            }
+            VStack(alignment: .leading, spacing: 0) {
+                if let main, arrangement.lead == main.id { plannedWorkoutChoices(main) }
+                TodayLaterList(extras: arrangement.later.compactMap { id in extras.first { $0.id == id } },
+                               onLog: onLogPlannedActivity, minutes: todayMinutes)
+                // A day with only activities keeps unplanned training here;
+                // a planned workout changes through Swap (P25).
+                if main == nil { somethingElse }
+                AddAnotherWorkoutLine(sync: sync)
+            }
+            .todayFootRows()
         }
-        doneExtraLines(arrangement)
-        if let main, arrangement.lead == main.id {
-            plannedWorkout(main)
-        } else if let lead = extras.first(where: { $0.id == arrangement.lead }) {
-            TodayNextActivity(workout: lead, dateString: sync.todayString, onLog: onLogPlannedActivity,
-                              minutes: todayMinutes(lead))
-        }
-        TodayLaterList(extras: arrangement.later.compactMap { id in extras.first { $0.id == id } },
-                       onLog: onLogPlannedActivity, minutes: todayMinutes)
+        .todayCardShell()
     }
 
     /// Today's activities under a workout the card can't lead with (a
@@ -1018,10 +1132,12 @@ struct TodayView: View {
     }
 
     /// Activities beside today's workout that are already logged.
-    @ViewBuilder private func doneExtraLines(_ arrangement: TodayLineup.Arrangement) -> some View {
+    @ViewBuilder private func doneExtraLines(_ arrangement: TodayLineup.Arrangement,
+                                             dividers: Bool = true) -> some View {
         ForEach(todayExtras.filter { arrangement.done.contains($0.id) }) { workout in
             TodayDoneLine(title: workout.name, detail: "Logged",
-                          detailIdentifier: "today.extra.logged.\(workout.id)")
+                          detailIdentifier: "today.extra.logged.\(workout.id)",
+                          dividerBelow: dividers)
         }
     }
 
@@ -1194,65 +1310,96 @@ private struct WorkoutDoneView<QuickStarts: View>: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                if sync.plan != nil { DayWorkoutsView(sync: sync, onLogPlannedActivity: onLogActivity) }
                 let arrangement = TodayLineup.arrange(main: (id: "workout", done: true),
                                                       extras: extras.map { (id: $0.id, done: isLogged($0)) })
                 let doneExtras = extras.filter { arrangement.done.contains($0.id) }
-                VStack(alignment: .leading, spacing: 0) {
-                    if let lead = extras.first(where: { $0.id == arrangement.lead }) {
-                        // An activity still to log leads; the finished workout
-                        // shrinks to a check line above it.
-                        TodayDoneLine(title: doneTemplateTitle, detail: doneSummary,
-                                      actionTitle: isRunWorkout ? "View run" : "View workout",
-                                      action: { recordDate = IdentifiedString(id: sync.todayString) },
-                                      detailIdentifier: "today.completedSummary",
-                                      actionIdentifier: "today.viewCompletedWorkout")
-                        ForEach(doneExtras) { workout in
-                            TodayDoneLine(title: workout.name, detail: "Logged",
-                                          detailIdentifier: "today.extra.logged.\(workout.id)")
+                VStack(alignment: .leading, spacing: 4) {
+                    TodayDayHeading(sync: sync, dateString: sync.todayString)
+                    VStack(alignment: .leading, spacing: 12) {
+                        if sync.plan != nil, DailyWorkoutAgenda.showsCombinedAgenda(sync.dailyWorkoutAgenda) {
+                            DayWorkoutsView(sync: sync, onLogPlannedActivity: onLogActivity)
                         }
-                        TodayNextActivity(workout: lead, dateString: sync.todayString, onLog: onLogActivity)
-                        TodayLaterList(extras: arrangement.later.compactMap { id in extras.first { $0.id == id } },
-                                       onLog: onLogActivity)
-                    } else {
-                        HStack(spacing: 6) {
-                            Image(systemName: "checkmark.seal.fill")
-                                .font(.subheadline)
-                                .foregroundStyle(Theme.done)
-                                .accessibilityHidden(true)
-                            TodaySectionLabel(text: isRunWorkout ? "RUN COMPLETE" : "WORKOUT COMPLETE", color: Theme.done)
-                        }
-                        Text(doneTemplateTitle)
-                            .font(Theme.display(30)).foregroundStyle(Theme.text)
-                            .lineLimit(2).minimumScaleFactor(0.7)
-                            .padding(.top, 8)
-                        Text(doneSummary)
-                            .font(.headline.monospacedDigit()).foregroundStyle(Theme.text)
-                            .padding(.top, 4)
-                            .accessibilityIdentifier("today.completedSummary")
-                        Button {
-                            recordDate = IdentifiedString(id: sync.todayString)
-                        } label: {
-                            HStack(spacing: 4) {
-                                Text(isRunWorkout ? "View run" : "View workout")
-                                Image(systemName: "chevron.right").font(.caption.weight(.bold))
+                        Group {
+                            if let lead = extras.first(where: { $0.id == arrangement.lead }) {
+                                // An activity still to log leads on navy; the
+                                // finished workout shrinks to a check line above it.
+                                VStack(alignment: .leading, spacing: 0) {
+                                    VStack(alignment: .leading, spacing: 0) {
+                                        TodayDoneLine(title: doneTemplateTitle, detail: doneSummary,
+                                                      actionTitle: isRunWorkout ? "View run" : "View workout",
+                                                      action: { recordDate = IdentifiedString(id: sync.todayString) },
+                                                      detailIdentifier: "today.completedSummary",
+                                                      actionIdentifier: "today.viewCompletedWorkout",
+                                                      dividerBelow: false)
+                                        ForEach(doneExtras) { workout in
+                                            TodayDoneLine(title: workout.name, detail: "Logged",
+                                                          detailIdentifier: "today.extra.logged.\(workout.id)",
+                                                          dividerBelow: false)
+                                        }
+                                    }
+                                    .todayDoneBand()
+                                    TodayNextActivity(workout: lead, onLog: onLogActivity)
+                                        .todayLeadBand(hasAction: onLogActivity != nil)
+                                    VStack(alignment: .leading, spacing: 0) {
+                                        TodayLaterList(extras: arrangement.later.compactMap { id in extras.first { $0.id == id } },
+                                                       onLog: onLogActivity)
+                                        quickStarts
+                                        AddAnotherWorkoutLine(sync: sync)
+                                    }
+                                    .todayFootRows()
+                                }
+                                .todayCardShell()
+                            } else {
+                                // Everything is done: nothing to start, so no navy.
+                                VStack(alignment: .leading, spacing: 0) {
+                                    VStack(alignment: .leading, spacing: 0) {
+                                        HStack(spacing: 6) {
+                                            Image(systemName: "checkmark.seal.fill")
+                                                .font(.subheadline)
+                                                .foregroundStyle(Theme.done)
+                                                .accessibilityHidden(true)
+                                            TodaySectionLabel(text: isRunWorkout ? "RUN COMPLETE" : "WORKOUT COMPLETE", color: Theme.done)
+                                        }
+                                        Text(doneTemplateTitle)
+                                            .font(Theme.display(30)).foregroundStyle(Theme.text)
+                                            .lineLimit(2).minimumScaleFactor(0.7)
+                                            .padding(.top, 8)
+                                        Text(doneSummary)
+                                            .font(.headline.monospacedDigit()).foregroundStyle(Theme.text)
+                                            .padding(.top, 4)
+                                            .accessibilityIdentifier("today.completedSummary")
+                                        Button {
+                                            recordDate = IdentifiedString(id: sync.todayString)
+                                        } label: {
+                                            HStack(spacing: 4) {
+                                                Text(isRunWorkout ? "View run" : "View workout")
+                                                Image(systemName: "chevron.right").font(.caption.weight(.bold))
+                                            }
+                                            .font(.subheadline.weight(.semibold)).foregroundStyle(Theme.accent)
+                                            .frame(minHeight: 44).contentShape(Rectangle())
+                                        }
+                                        .buttonStyle(.plain)
+                                        .accessibilityIdentifier("today.viewCompletedWorkout")
+                                        // Activities logged beside it, under the workout.
+                                        ForEach(doneExtras) { workout in
+                                            TodayDoneLine(title: workout.name, detail: "Logged",
+                                                          detailIdentifier: "today.extra.logged.\(workout.id)",
+                                                          dividerBelow: false)
+                                        }
+                                    }
+                                    .padding(.horizontal, 20).padding(.top, 20).padding(.bottom, 8)
+                                    VStack(alignment: .leading, spacing: 0) {
+                                        quickStarts
+                                        AddAnotherWorkoutLine(sync: sync)
+                                    }
+                                    .todayFootRows()
+                                }
+                                .todayCardShell()
                             }
-                            .font(.subheadline.weight(.semibold)).foregroundStyle(Theme.accent)
-                            .frame(minHeight: 44).contentShape(Rectangle())
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityIdentifier("today.viewCompletedWorkout")
-                        // Activities logged beside it, under the workout.
-                        ForEach(doneExtras) { workout in
-                            TodayDoneLine(title: workout.name, detail: "Logged",
-                                          detailIdentifier: "today.extra.logged.\(workout.id)",
-                                          dividerBelow: false)
-                        }
+                        .modifier(daySwipe)
                     }
-                    quickStarts
                 }
-                .todayCardSurface()
-                .modifier(daySwipe)
 
                 TodayWeekSection(sync: sync, onOpenCalendar: onOpenCalendar, onOpenActivity: onOpenActivity)
 
