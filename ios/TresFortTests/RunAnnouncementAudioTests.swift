@@ -131,6 +131,28 @@ final class RunAnnouncementAudioTests: XCTestCase {
         XCTAssertFalse(audio.isHolding)
     }
 
+    /// Countdown beeps a second apart hold the audio between them, so music
+    /// stays ducked from the first beep to the step's announcement.
+    func testABeepHoldsTheAudioUntilTheNextCue() async {
+        let audio = makeAudio()
+        audio.willSpeak()
+        // The next beep comes while the first one's hold waits.
+        clock.onWait = { count in if count == 1 { audio.willSpeak() } }
+        audio.didStopSpeaking(holding: .seconds(1))
+        await audio.settled()
+        XCTAssertEqual(clock.waits, [.seconds(1)])
+        XCTAssertEqual(session.deactivationTries, 0)
+        XCTAssertTrue(audio.isHolding)
+
+        // Without another cue the audio goes back after the hold.
+        clock.onWait = nil
+        audio.didStopSpeaking(holding: .seconds(1))
+        await audio.settled()
+        XCTAssertEqual(clock.waits, [.seconds(1), .seconds(1), RunAnnouncementAudio.settleDelay])
+        XCTAssertEqual(session.deactivations, 1)
+        XCTAssertFalse(audio.isHolding)
+    }
+
     func testAnEndWithoutAnAnnouncementTouchesNothing() async {
         let audio = makeAudio()
         audio.didStopSpeaking()

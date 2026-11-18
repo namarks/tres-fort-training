@@ -90,27 +90,37 @@ struct RunTargetCoach: Equatable {
 }
 
 extension RunPlanFormat {
-    /// "Step 3 of 9. Rep 1 of 4. 800 meters at 6 34 to 6 50 a mile."
-    static func spoken(_ step: RunPlan.ExpandedStep, index: Int, count: Int, unit: RunDistanceUnit) -> String {
-        var parts = ["Step \(index + 1) of \(count)."]
-        if let round = step.round, let rounds = step.rounds { parts.append("Rep \(round) of \(rounds).") }
+    /// A step this short hears only what to do and for how long, so the cue
+    /// takes about a second of it (the owner, 2026-11-17, after 20-second
+    /// strides).
+    static let shortStepSeconds = 60
+    static let shortStepMeters = 300.0
+
+    /// What the runner hears as a step starts, what to do first:
+    /// "Run 800 meters at 6 34 to 6 50 a mile. Rep 1 of 4.",
+    /// "Warm up 10 minutes.", or for a short step just "Run 20 seconds.".
+    /// Before 2026-11-17 a step opened with "Step 2 of 10" and a work step
+    /// without a target never said what to do: "Step 2 of 10. Rep 1 of 4.
+    /// 20 seconds."
+    static func spoken(_ step: RunPlan.ExpandedStep, unit: RunDistanceUnit) -> String {
         let amount: String
         if let meters = step.step.distanceMeters {
             amount = spokenDistance(meters, unit: unit)
         } else {
             amount = RunSplit.spoken(Double(step.step.durationSeconds ?? 0))
         }
-        let kind: String
-        switch step.step.kind {
-        case .warmup: kind = " warm-up"
-        case .work: kind = ""
-        case .recovery: kind = " recovery"
-        case .cooldown: kind = " cool-down"
-        }
-        var sentence = amount + kind
+        var sentence = kindTitle(step.step.kind) + " " + amount
+        if isShort(step.step) { return sentence + "." }
         if let target = step.step.target { sentence += " at " + spokenTarget(target, unit: unit) }
-        parts.append(sentence + ".")
+        var parts = [sentence + "."]
+        if let round = step.round, let rounds = step.rounds { parts.append("Rep \(round) of \(rounds).") }
         return parts.joined(separator: " ")
+    }
+
+    /// Under a minute, or under 300 m.
+    static func isShort(_ step: RunPlan.Step) -> Bool {
+        if let meters = step.distanceMeters { return meters < shortStepMeters }
+        return (step.durationSeconds ?? 0) < shortStepSeconds
     }
 
     /// "800 meters", "1 mile", "3.11 miles", "5 kilometers".

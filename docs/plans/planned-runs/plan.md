@@ -106,6 +106,9 @@ intervals.icu, which stays the store of completed runs.
     on the minute), never as "6:34", which the speech voice reads as a time
     of day. Split announcements use the same form.
     The end of the plan says "Plan complete."
+    Since run-recorder P9 (2026-11-18) a cue opens with what to do and
+    drops "Step N of M": "Run 800 meters at 6 34 to 6 50 a mile. Rep 1 of
+    4.", and a step under a minute or 300 m says only "Run 20 seconds.".
   - `RunTargetCoach` says when pace or heart rate leaves the step's target
     ("Speed up", "Ease off", "Heart rate high. Ease off", "Heart rate low.
     Pick it up") and when it's back ("On pace", "Heart rate on target").

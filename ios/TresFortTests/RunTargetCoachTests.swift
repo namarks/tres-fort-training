@@ -121,14 +121,11 @@ final class RunTargetCoachTests: XCTestCase {
             .step(.init(kind: .work, durationSeconds: nil, distanceMeters: 1_609.344,
                         target: .heartRate(minBPM: 150, maxBPM: 150))),
         ]).expandedSteps
-        XCTAssertEqual(RunPlanFormat.spoken(steps[0], index: 0, count: steps.count, unit: .miles),
-                       "Step 1 of 10. 10 minutes warm-up.")
-        XCTAssertEqual(RunPlanFormat.spoken(steps[1], index: 1, count: steps.count, unit: .kilometers),
-                       "Step 2 of 10. Rep 1 of 4. 800 meters at 4 oh 5 to 4 15 a kilometer.")
-        XCTAssertEqual(RunPlanFormat.spoken(steps[2], index: 2, count: steps.count, unit: .miles),
-                       "Step 3 of 10. Rep 1 of 4. 1 minute 30 seconds recovery.")
-        XCTAssertEqual(RunPlanFormat.spoken(steps[9], index: 9, count: steps.count, unit: .miles),
-                       "Step 10 of 10. 1 mile at 150 beats per minute.")
+        XCTAssertEqual(RunPlanFormat.spoken(steps[0], unit: .miles), "Warm up 10 minutes.")
+        XCTAssertEqual(RunPlanFormat.spoken(steps[1], unit: .kilometers),
+                       "Run 800 meters at 4 oh 5 to 4 15 a kilometer. Rep 1 of 4.")
+        XCTAssertEqual(RunPlanFormat.spoken(steps[2], unit: .miles), "Recover 1 minute 30 seconds. Rep 1 of 4.")
+        XCTAssertEqual(RunPlanFormat.spoken(steps[9], unit: .miles), "Run 1 mile at 150 beats per minute.")
         XCTAssertEqual(RunPlanFormat.spokenDistance(5_000, unit: .miles), "3.11 miles")
         XCTAssertEqual(RunPlanFormat.spokenDistance(5_000, unit: .kilometers), "5 kilometers")
     }
@@ -151,8 +148,68 @@ final class RunTargetCoachTests: XCTestCase {
             .step(.init(kind: .work, durationSeconds: 1_200, distanceMeters: nil,
                         target: .pace(fastestSecondsPerKm: 261, slowestSecondsPerKm: 261))),
         ]).expandedSteps[0]
-        let spoken = RunPlanFormat.spoken(step, index: 0, count: 1, unit: .miles)
-        XCTAssertEqual(spoken, "Step 1 of 1. 20 minutes at 7 minutes a mile.")
+        let spoken = RunPlanFormat.spoken(step, unit: .miles)
+        XCTAssertEqual(spoken, "Run 20 minutes at 7 minutes a mile.")
         XCTAssertFalse(spoken.contains(":"))
+    }
+
+    /// The owner's 2026-11-17 strides: a 20-second work step without a target
+    /// said only "Step 2 of 10. Rep 1 of 4. 20 seconds.", which never said
+    /// what to do and took a good part of the stride. A short step now hears
+    /// what to do and for how long, and nothing else.
+    func testAShortStepGetsAShortCue() {
+        let steps = RunPlan(items: [
+            .step(.init(kind: .work, durationSeconds: 1_500, distanceMeters: nil,
+                        target: .heartRate(minBPM: 135, maxBPM: 148))),
+            .repeated(times: 4, steps: [
+                .init(kind: .work, durationSeconds: 20, distanceMeters: nil,
+                      target: .pace(fastestSecondsPerKm: 200, slowestSecondsPerKm: 210)),
+                .init(kind: .recovery, durationSeconds: 60, distanceMeters: nil, target: nil),
+            ]),
+            .step(.init(kind: .work, durationSeconds: nil, distanceMeters: 200, target: nil)),
+            .step(.init(kind: .cooldown, durationSeconds: 300, distanceMeters: nil, target: nil)),
+        ]).expandedSteps
+        XCTAssertEqual(RunPlanFormat.spoken(steps[0], unit: .miles),
+                       "Run 25 minutes at 135 to 148 beats per minute.")
+        XCTAssertEqual(RunPlanFormat.spoken(steps[1], unit: .miles), "Run 20 seconds.",
+                       "No target or rep on a stride")
+        XCTAssertEqual(RunPlanFormat.spoken(steps[2], unit: .miles), "Recover 1 minute. Rep 1 of 4.")
+        XCTAssertEqual(RunPlanFormat.spoken(steps[9], unit: .miles), "Run 200 meters.")
+        XCTAssertEqual(RunPlanFormat.spoken(steps[10], unit: .miles), "Cool down 5 minutes.")
+    }
+
+    func testTheCountdownBeepsOnATimedStepsLastThreeSeconds() {
+        let stride = RunPlan.Step(kind: .work, durationSeconds: 20, distanceMeters: nil, target: nil)
+        var countdown = RunStepCountdown()
+        var beeps: [Int] = []
+        for tenth in 0...210 {
+            if let beep = countdown.beep(stepIndex: 1, step: stride, stepStartSeconds: 1_500,
+                                         elapsed: Double(tenth) / 10) {
+                beeps.append(beep)
+            }
+        }
+        XCTAssertEqual(beeps, [3, 2, 1], "Once each, none at the start or after the end")
+
+        // A late check beeps for the second it's in, never a burst of missed ones.
+        var late = RunStepCountdown()
+        XCTAssertNil(late.beep(stepIndex: 3, step: stride, stepStartSeconds: 1_580, elapsed: 10))
+        XCTAssertEqual(late.beep(stepIndex: 3, step: stride, stepStartSeconds: 1_580, elapsed: 18.5), 2)
+        XCTAssertNil(late.beep(stepIndex: 3, step: stride, stepStartSeconds: 1_580, elapsed: 18.9))
+        XCTAssertEqual(late.beep(stepIndex: 3, step: stride, stepStartSeconds: 1_580, elapsed: 19.2), 1)
+        // The next step counts down afresh.
+        XCTAssertEqual(late.beep(stepIndex: 5, step: stride, stepStartSeconds: 1_660, elapsed: 17.5), 3)
+
+        // Too short to beep without talking over its own announcement, and
+        // a distance step, whose end GPS decides.
+        let blip = RunPlan.Step(kind: .work, durationSeconds: 8, distanceMeters: nil, target: nil)
+        XCTAssertNil(late.beep(stepIndex: 6, step: blip, stepStartSeconds: 1_700, elapsed: 6))
+        let rep = RunPlan.Step(kind: .work, durationSeconds: nil, distanceMeters: 400, target: nil)
+        XCTAssertNil(late.beep(stepIndex: 7, step: rep, stepStartSeconds: 1_710, elapsed: 80))
+
+        // The ticker wakes just past each countdown second and the end.
+        XCTAssertEqual(RunStepCountdown.wait(secondsLeft: 10), 1)
+        XCTAssertEqual(RunStepCountdown.wait(secondsLeft: 3.5), 0.52, accuracy: 1e-9)
+        XCTAssertEqual(RunStepCountdown.wait(secondsLeft: 2.98), 1, accuracy: 1e-9)
+        XCTAssertEqual(RunStepCountdown.wait(secondsLeft: 0.4), 0.42, accuracy: 1e-9)
     }
 }
