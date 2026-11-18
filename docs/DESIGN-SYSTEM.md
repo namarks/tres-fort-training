@@ -118,9 +118,14 @@ Rules:
   as `todayFootRow()` rows under thin rules, inside `todayCardShell()`. A
   day with nothing to start or log is a `todayPlainCard()` with no navy, so
   navy on Today always means "do this".
+- **Today's agenda**: on a day with more than one workout, `DayWorkoutsView`
+  lists the day in time order under the card, never over it, so the card's
+  action stays at the top. One list card, each row a badge, the name, its
+  status and time, and a one-word action (Start, Log, Open); the row the
+  card is showing is tinted and says "Shown above".
 - **Section heading**: `TodaySectionLabel` with its link beside it, 28 pt
-  tall; the link reaches 44 pt through a taller hit shape. Today's three
-  sections (the day, This week, Coming up) all use it, 24 pt apart.
+  tall; the link reaches 44 pt through a taller hit shape. Today's sections
+  (the day, Today's agenda, This week, Coming up) all use it, 24 pt apart.
 - **Week chart**: `WeekFortView` on Today, on the page with no card. Every
   trained day is an orange tower (the only orange in it), a planned day a
   quiet blue one (`weekPlanned`), a rest day stays low, and today's date

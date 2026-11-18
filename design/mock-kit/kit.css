@@ -131,6 +131,20 @@ body.light .today-card { box-shadow: 0 1px 3px rgb(15 29 47 / .06), 0 4px 16px r
   justify-content: center; gap: 6px; font-size: 15px; font-weight: 600; }
 .quick-row > span svg { color: var(--accent); }
 
+/* DayWorkoutsView: the day's agenda as one list under the card, each row a
+   badge, a name, its status and time, and a one-word action. */
+.day-list { background: var(--surface); border-radius: 16px; overflow: hidden; }
+.day-list .r { display: flex; align-items: center; gap: 12px; padding: 4px 14px; min-height: 52px; position: relative; }
+.day-list .r + .r::before { content: ''; position: absolute; top: 0; left: 56px; right: 0; height: 1px; background: var(--surface2); }
+.day-list .r.sel { background: color-mix(in srgb, var(--surface2) 60%, transparent); }
+.day-list .g { width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; flex: none;
+  color: var(--accent); background: var(--surface2); }
+.day-list .g.done { background: none; color: var(--done); }
+.day-list .t { font-size: 15px; font-weight: 600; }
+.day-list .s { font-size: 13px; color: var(--muted); margin-top: 2px; font-variant-numeric: tabular-nums; }
+.day-list .a { margin-left: auto; color: var(--accent); font-size: 15px; font-weight: 600; }
+.day-list .r.sel .a { color: var(--muted); }
+
 /* WeekFortView: a light chart on the page. Trained days are the only
    orange, planned days a quiet blue (weekPlanned), rest days stay low and
    today's date is ringed in signal. */

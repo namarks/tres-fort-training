@@ -70,6 +70,11 @@ day with only an activity as rest, and uneven Coming up rows. From mocks
 (project files today-space) the owner picked the same three sections with
 tidied spacing, a light week chart ("too many blue blocks means none of
 them are important") and navy kept for the action alone. P29 builds that.
+Shown real simulator screens of P29 the same day, the owner found it much
+better, except that on a day with several workouts the agenda's cards sat
+over the card and pushed its action halfway down the screen. From two mocks
+(project files today-space, round 3) the card now leads on every day and
+the agenda is one list under it.
 
 ## Phases
 
@@ -709,6 +714,14 @@ them are important") and navy kept for the action alone. P29 builds that.
   - Coming up rows are one height and one alignment, every line a glyph
     and a name with the day's first line the heavier one, and the list
     shows up to four days.
+  - On a day with several workouts the card still leads, so its action
+    sits at the top as on every other day. Today's agenda follows as a
+    fourth section: one list in time order, each row a badge, the name,
+    its status and time and a one-word action (Start, Log, Open), with the
+    row the card is showing marked "Shown above". The agenda leads only
+    when it holds the day's actions and the card has none (an activity to
+    log leads the day, or workouts were added to a rest day). Its heading
+    lines up with the date's.
   - No backend change and no migration. Unit tests cover the planned tower
     for an add-on activity and the chart's contrast on the page; the
     design system and the mock kit's Today screens (planned workout,
@@ -752,16 +765,19 @@ them are important") and navy kept for the action alone. P29 builds that.
 
 ## Next step
 
-**Now (@agent):** With a Remote Control session on the Mac mini, capture
-Today from a simulator build of P29's branch and of main, with synthetic
-data (a planned run, a planned lift, a rest day, light and dark), for the
-owner's before and after against the mocks in project files today-space.
-Capture the real weekday sheet (P28), Add to your week (P27) and P25's
-Details and Swap in the same session.
+**Now (@agent):** Watch the first nightly release check on `main` after
+P29 for the Today journeys (the agenda's identifiers are unchanged, but it
+now sits under the card), and capture a day with several workouts from a
+simulator build once the agenda change is merged. The before and after of
+P29 itself was captured on 2026-11-18 (a planned lift, a planned run with
+add-ons, a finished run and a rest day, light and dark) and shown to the
+owner. The real weekday sheet (P28), Add to your week (P27) and P25's
+Details and Swap are still to capture.
 
 **Then (@owner):** On the next TestFlight build (after 83, on the owner's
 go-ahead), look at Today (P29): the date and event over the card, navy only
-around what to do now, the light week chart and Coming up. On the same
+around what to do now, the light week chart, Coming up, and on a day with
+several workouts the agenda under the card. On the same
 build, add something to a weekday from the Plan tab and check that P28's
 sheet changes in place: the picked type folds into one line, nothing jumps,
 and the day and time sit by the Add button. P28 merged on 2026-11-18 (public
