@@ -442,6 +442,12 @@ struct APIClient {
         let ok: Bool
         let version: Int
     }
+    /// `PUT`/`DELETE /api/plan/race`: the new plan version (unchanged when
+    /// a clear found no event).
+    struct RaceWriteResult: Decodable {
+        let ok: Bool
+        let version: Int
+    }
     /// `PUT`/`DELETE /api/plan/program`: the new plan version.
     struct ProgramWriteResult: Decodable {
         let ok: Bool
@@ -689,6 +695,18 @@ struct APIClient {
             body["expected_version"] = expectedVersion
         }
         return try await post("api/plan/program/build", body: body, jwt: jwt)
+    }
+
+    /// Sets the whole goal event (`PlanEvent.wire`) at the reviewed version.
+    func setRace(_ race: [String: Any], expectedVersion: Int, jwt: String) async throws
+        -> RaceWriteResult
+    {
+        try await put("api/plan/race", body: ["race": race, "expected_version": expectedVersion], jwt: jwt)
+    }
+
+    /// Clears the goal event; with none set the server writes nothing.
+    func clearRace(expectedVersion: Int, jwt: String) async throws -> RaceWriteResult {
+        try await delete("api/plan/race?expected_version=\(expectedVersion)", jwt: jwt)
     }
 
     func addTrip(fields: [String: Any], expectedVersion: Int, jwt: String) async throws
@@ -1194,12 +1212,25 @@ protocol RoutineEditingAPI {
         -> APIClient.ProgramWriteResult
     func buildEventBlock(_ body: [String: Any], expectedVersion: Int?, jwt: String) async throws
         -> APIClient.EventBuildResult
+    func setRace(_ race: [String: Any], expectedVersion: Int, jwt: String) async throws
+        -> APIClient.RaceWriteResult
+    func clearRace(expectedVersion: Int, jwt: String) async throws -> APIClient.RaceWriteResult
 
 }
 
 extension APIClient: RoutineEditingAPI {}
 
 extension RoutineEditingAPI {
+    func setRace(_ race: [String: Any], expectedVersion: Int, jwt: String) async throws
+        -> APIClient.RaceWriteResult
+    {
+        throw APIError.http(501, "race_unavailable")
+    }
+
+    func clearRace(expectedVersion: Int, jwt: String) async throws -> APIClient.RaceWriteResult {
+        throw APIError.http(501, "race_unavailable")
+    }
+
     func createPrescribedWorkout(request: WorkoutPrescriptionRequest, jwt: String) async throws
         -> WorkoutPrescriptionReceipt
     {

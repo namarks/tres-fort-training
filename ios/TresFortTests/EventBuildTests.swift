@@ -179,7 +179,7 @@ final class EventBuildTests: XCTestCase {
     func testRaceDayLineShowsOverABlockThatReachesTheEvent() {
         let tree = plan(week: ["sun": "long"], race: ["name": "Spring Marathon", "date": "2031-06-01",
                                                       "discipline": "running"])
-        XCTAssertEqual(tree.event, PlanEvent(name: "Spring Marathon", date: "2031-06-01"))
+        XCTAssertEqual(tree.event, PlanEvent(name: "Spring Marathon", date: "2031-06-01", discipline: "running"))
         let weeks = Array(repeating: PlanProgram.Week(label: nil, week: [:], extras: nil), count: 17)
         let block = PlanProgram(id: "b", name: "Spring Marathon", start: "2031-02-03", repeats: false, weeks: weeks)
         XCTAssertEqual(EventBuilding.raceDayLine(tree.event!, program: block, today: "2031-02-16"),

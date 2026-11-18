@@ -103,6 +103,8 @@ struct WorkoutsView: View {
     @State private var preparingWeek = false
     @State private var showCalendar = false
     @State private var showAwayDates = false
+    /// The goal event's editor (coach-free-planning P1), opened from its card.
+    @State private var eventTarget: EventGoalEditTarget?
     @State private var planSide = PlanSide.schedule
     /// The block of weeks (P2): setup, the week shown, a day opened, and the
     /// week being renamed or the block being ended.
@@ -259,6 +261,11 @@ struct WorkoutsView: View {
             .sheet(item: $programTargetEdit) { request in ProgramTargetEditorSheet(sync: sync, request: request) }
             .sheet(isPresented: $showProgramSetup) { ProgramSetupSheet(sync: sync) }
             .sheet(isPresented: $showEventBuild) { EventBuildSheet(sync: sync) }
+            .sheet(item: $eventTarget) { target in
+                NavigationStack {
+                    EventGoalEditor(sync: sync, draft: target.draft, expectedVersion: target.version)
+                }
+            }
             .sheet(isPresented: $showKeepBuilding) { EventBuildSheet(sync: sync, keepBuilding: true) }
             .sheet(item: $programDay) { target in
                 if let program = sync.plan?.program {
@@ -433,6 +440,10 @@ struct WorkoutsView: View {
     @ViewBuilder private var scheduleSections: some View {
         let program = sync.plan?.program
         let blockInUse = program.map { ProgramEditing.isInUse($0, today: sync.todayString) } ?? false
+        // A goal event leads: what the weeks below build toward.
+        if sync.plan?.event != nil {
+            Section { EventPlanCard(sync: sync) { eventTarget = $0 } }
+        }
         // Exactly one schedule is in use on any day: it leads, marked so.
         if let program, blockInUse {
             programSection(program)
@@ -459,6 +470,12 @@ struct WorkoutsView: View {
                 .disabled(sync.isRoutineMutationInFlight || sync.plan == nil)
             }
             planLink("Calendar", systemImage: "calendar", id: "plan.calendar") { showCalendar = true }
+            if sync.plan?.event == nil {
+                planLink("Set an event", systemImage: "flag.checkered", detail: "Optional", id: "plan.event.set") {
+                    eventTarget = EventGoalEditTarget.opening(sync)
+                }
+                .disabled(sync.isRoutineMutationInFlight || sync.plan == nil)
+            }
             planLink("Away dates", systemImage: "airplane",
                      detail: nextAwayDates.map(AwayDatesText.range), id: "plan.awayDates") {
                 showAwayDates = true

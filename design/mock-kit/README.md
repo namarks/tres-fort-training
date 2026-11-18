@@ -18,6 +18,8 @@ current screens:
 | `screens/plan-add.html` | Add to your week (`PlanComposerView`) |
 | `screens/plan-add-ride.html` | Add to your week with Ride chosen (`PlanComposerView.enduranceSections`) |
 | `screens/plan-add-home.html` | A weekday after tapping At home: the composer in place, the tile folded into one line (`WeekdayPlanSheet`, `PlanComposerView.DayContext`, `HomeRoutineSteppers`) |
+| `screens/plan-event.html` | The Plan tab with a goal event leading the Schedule side (`EventPlanCard`) |
+| `screens/plan-event-edit.html` | Set or edit the goal event (`EventGoalEditor`) |
 | `screens/activity.html` | Activity, History side (`ActivityTabView`, `ActivityHistoryView`) |
 | `screens/run-detail.html` | A run opened from History (`DayAgendaView` focused on one activity, `ActivityChartsView`) |
 | `screens/coach-connect.html` | Connect your coach before sharing is allowed (`CoachConnectView.consentSection`) |
