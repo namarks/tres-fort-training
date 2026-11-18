@@ -266,6 +266,17 @@ final class BlockLayersTests: XCTestCase {
         XCTAssertNil(change.after.weeks[0].week["mon"] ?? nil, "Your week's Monday is the server's to lay back.")
         XCTAssertEqual(change.after.workoutIDs, ["intervals", "long_run"])
 
+        // Nothing from the block clears every workout it owns that day,
+        // extras included, for the weeks in scope.
+        let crowded = BlockLayers.adding(BlockLayers.ownForm(block, schedule: BlockLayers.repeatingWeek(tree)),
+                                         workoutID: "tempo", on: ["sun"])
+        XCTAssertEqual(crowded.weeks[0].extras?["sun"], ["tempo"])
+        let cleared = ProgramEditing.dayChange("sun", to: nil, week: 0, scope: .thisAndLater, in: crowded, plan: tree)
+        XCTAssertNil(cleared.after.weeks[0].week["sun"] ?? nil)
+        XCTAssertNil(cleared.after.weeks[0].extras?["sun"])
+        XCTAssertNil(cleared.after.weeks[1].week["sun"] ?? nil)
+        XCTAssertEqual(cleared.after.weeks[1].week["sat"] ?? nil, "long_run")
+
         // Picking what the day already has changes nothing.
         let same = ProgramEditing.dayChange("tue", to: "intervals", week: 0, scope: .thisWeek, in: block, plan: tree)
         XCTAssertEqual(same.after, same.before)

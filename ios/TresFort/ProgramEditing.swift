@@ -287,9 +287,19 @@ enum ProgramEditing {
     /// lays Your week back over it.
     static func dayChange(_ weekdayKey: String, to workoutID: String?, week index: Int, scope: Scope,
                           in program: PlanProgram, plan: PlanTree?) -> (before: PlanProgram, after: PlanProgram) {
-        let base = BlockLayers.isLayered(program)
-            ? BlockLayers.ownForm(program, schedule: BlockLayers.repeatingWeek(plan)) : program
-        return (base, setting(weekdayKey, to: workoutID, week: index, scope: scope, in: base))
+        let layered = BlockLayers.isLayered(program)
+        let base = layered ? BlockLayers.ownForm(program, schedule: BlockLayers.repeatingWeek(plan)) : program
+        guard layered, workoutID == nil else {
+            return (base, setting(weekdayKey, to: workoutID, week: index, scope: scope, in: base))
+        }
+        // "Nothing from the block": every workout the block owns that day
+        // leaves, its extras too; Your week's are laid back by the server.
+        let reach = scope == .thisWeek ? index...index : index...max(index, base.weeks.count - 1)
+        var weeks = base.weeks
+        for i in reach where weeks.indices.contains(i) {
+            weeks[i] = BlockLayers.withDay(weeks[i], weekdayKey, [])
+        }
+        return (base, replacing(weeks: weeks, in: base))
     }
 
     /// Whether a week differs from Your week (its days, extras or targets).
