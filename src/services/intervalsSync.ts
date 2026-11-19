@@ -166,6 +166,10 @@ interface IntervalsSyncDependencies {
     expectedIntervalsFence?: { generation: number; attempt: number }): Promise<number>;
   /** Recompute effective training load after provider rows changed. */
   refreshActivityLoads(db: D1Database, userId: string, window?: { fromDate?: string; toDate?: string }): Promise<number>;
+  /** Keep synced rides' heart rate, power, cadence, distance and altitude
+   * (run-detail-charts P8); best effort, never fails the sync. */
+  keepIntervalsRideSeries(db: D1Database, env: Env, userId: string,
+    window: { fromDate: string; toDate: string }, deps?: { fetcher?: Fetcher }): Promise<number>;
 }
 
 /** Identity selection and cross-source matching stay with their existing
@@ -174,6 +178,7 @@ export function createIntervalsSyncService({
   getUserIntervalsCreds, findOwnerRow, userHasTouchedIntervalsCreds,
   seedOwnerIntervalsCredsFromEnv, ensureOwnerUser, getIntervalsConnectionStatus,
   getUserTimezone, todayInTz, dedupeHealthKitAgainstIntervals, refreshActivityLoads,
+  keepIntervalsRideSeries,
 }: IntervalsSyncDependencies) {
   function intervalsSyncAttemptColumn(cache: IntervalsCache): string {
     return cache === 'events'
@@ -1645,6 +1650,13 @@ export function createIntervalsSyncService({
       attempts,
     );
     if (!stamped) return { status: 'superseded', synced: 0, detail: 'superseded' };
+    // The synced rides' streams, kept so their charts don't depend on
+    // intervals.icu (run-detail-charts P8). The sync has already succeeded.
+    try {
+      await keepIntervalsRideSeries(db, env, userId, { fromDate: oldest, toDate: today }, { fetcher: deps.fetcher });
+    } catch (error) {
+      console.warn({ event: 'intervals_ride_series_failed', error_type: diagnosticErrorType(error) });
+    }
     return { status: 'ok', synced: cnt?.c ?? 0 };
   }
 

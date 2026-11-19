@@ -413,8 +413,11 @@ chat start) and a **prompt** (`coach_brief`).
   recorded run or an Apple Health or `.fit` workout (`activity_heart_rates`,
   migration 0068, `src/heartRateSeries.ts`) and the power and cadence
   series kept for a `.fit`, Garmin or Apple Health ride
-  (`activity_power_series`, migration 0074, `src/powerSeries.ts`). Private
-  like routes; see
+  (`activity_power_series`, migration 0074, `src/powerSeries.ts`). An
+  intervals.icu ride keeps its heart rate, power, cadence, distance and
+  altitude in those two tables after it syncs (`keepIntervalsRideSeries`,
+  `src/intervalsRideSeries.ts`, at most three rides a sync), read when
+  intervals.icu can't answer. Private like routes; see
   the plan (historical maintainer record).
   `GET /api/me/thresholds/suggestions` offers the
   thresholds intervals.icu scored the member's latest synced workouts with;

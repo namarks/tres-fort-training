@@ -5,6 +5,7 @@
 // output is a few hundred evenly spaced points, so a phone draws it as is.
 
 import { decodeRoute, type EncodedRoute } from './activityRoute';
+import { decodeValues, type EncodedPowerSeries } from './powerSeries';
 import { summarizeCadence, summarizePower, MAX_CADENCE_RPM, MAX_POWER_W, type CadenceSummary, type PowerSummary } from './ridePower';
 
 /** One sample of the activity's timeline. */
@@ -153,6 +154,30 @@ export function trackFromRoute(route: EncodedRoute): TrackSample[] {
     }
   }
   return track;
+}
+
+/**
+ * A kept ride series' timeline (run-detail-charts P8): its distance and
+ * altitude, in decimeters, back in meters on its moving clock, with a
+ * sample at every second power or cadence was read too, so a stretch with
+ * no distance isn't taken for a pause. Empty when it kept neither.
+ */
+export function trackFromPowerSeries(series: EncodedPowerSeries): TrackSample[] {
+  if (!series.distance && !series.altitude) return [];
+  const at = new Map<number, TrackSample>();
+  const sample = (t: number) => {
+    let s = at.get(t);
+    if (!s) {
+      s = { t, d: null, alt: null };
+      at.set(t, s);
+    }
+    return s;
+  };
+  for (const r of decodeValues(series.distance ?? null)) sample(r.t).d = r.v / 10;
+  for (const r of decodeValues(series.altitude ?? null)) sample(r.t).alt = r.v / 10;
+  for (const r of decodeValues(series.power)) sample(r.t);
+  for (const r of decodeValues(series.cadence)) sample(r.t);
+  return [...at.values()].sort((a, b) => a.t - b.t);
 }
 
 /** A provider's index-aligned streams, as intervals.icu sends them. */

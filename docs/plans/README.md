@@ -212,8 +212,9 @@ integration or social breadth.
   rate and elevation charts for a run in the app and on the web, the map
   following the chart, and a ride's power, cadence, best efforts and time in
   zones, kept for `.fit`, Garmin and Apple Health rides. P0 to P3 and P5 to
-  P7 are released and in TestFlight 1.2 (83); P4's device checks remain,
-  then this plan is archived.
+  P7 are released and in TestFlight 1.2 (83). P8 (keep intervals.icu rides'
+  streams, so Zwift rides keep their charts) is in review; then P4's device
+  checks, and this plan is archived.
 - [Planned runs with pace and heart rate targets](planned-runs/plan.md) —
   **active**; the coach or the member plans runs with steps and pace or
   heart rate targets in the Tres Fort plan, and the recorder follows them
