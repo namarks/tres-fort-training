@@ -156,8 +156,12 @@ needs these changes in the App Store build:
   `MixedWeekSetupJourneyTests.testCoreScheduleFailureRetriesSavedPrescriptionWithoutCreatingAnotherWorkout`
   (`composer.home.timeEveryExercise` and `composer.home.circuit` never became
   tappable); public PR #9 also saw a mixed-week core-setup journey pass
-  only on retry. Make it reliable so the next upload has a clean full run. Confirm
-  the check on the exact commit before every upload.
+  only on retry. The release check on `2e2fe86` (the build 84 candidate) failed
+  the same journey: once the day, time and alongside rows scrolled the composer
+  down, the test searched downward for the exercise list's add button, which
+  sat above. The composer test fix makes it search upward; build 84 waits for a
+  clean full run on the merged commit. Confirm the check on the exact commit
+  before every upload.
 - **Still open:** run the waived device checks on the live build.
 
 **Backend constraint:** the live 1.1 (70) client, and 1.0 (55) until users update, must
