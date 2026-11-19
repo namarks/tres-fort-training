@@ -1,6 +1,6 @@
 # Run detail charts
 
-Slug: run-detail-charts · Status: gated · Updated: 2026-11-18 · Theme: connected-training
+Slug: run-detail-charts · Status: gated · Updated: 2026-11-19 · Theme: connected-training
 
 ## Goal
 
@@ -9,10 +9,10 @@ how it went over time: pace, heart rate and elevation charts beside the map,
 with the value at any point a tap or drag away, and the climb in meters or
 feet. It works without AI and without intervals.icu: a run recorded in the
 app or saved to Apple Health by another app has all three charts from data
-Tres Fort keeps, and an intervals.icu activity is charted from intervals.icu
-without storing its streams. A series the activity has no data for is left
-out, never made up. Charts are private to the member, like routes: never in
-group views or coach tools.
+Tres Fort keeps, and an intervals.icu activity is charted from intervals.icu,
+with a ride's own streams kept so its charts survive intervals.icu (P8). A
+series the activity has no data for is left out, never made up. Charts are
+private to the member, like routes: never in group views or coach tools.
 
 ## Phases
 
@@ -153,6 +153,47 @@ group views or coach tools.
     with the workout, on Garmin disconnect and on account deletion; in the
     account export. The privacy policy and the Apple Health settings text
     say so.
+- [ ] **P8 — Keep intervals.icu rides' streams**
+  - The owner asked on 2026-11-19 (thread "Get full Zwift ride data into
+    Tres Fort"), before a Zwift ride, whether its full data reaches Tres
+    Fort, then to keep it, elevation and the other stats included. Zwift
+    rides arrive through intervals.icu's own Zwift connection (not Strava,
+    whose activities intervals.icu withholds), but their streams were only
+    read live, so a ride gone from intervals.icu, or intervals.icu down,
+    lost its charts.
+  - After each successful activity sync, `keepIntervalsRideSeries`
+    (`src/db.ts`) reads the streams of intervals.icu rides in the synced
+    window that have none kept yet and whose `stream_types` name heart
+    rate, power, cadence, distance or altitude: at most three a sync (one
+    request each), the newest first and the rest in turn from the sync
+    attempt counter, so a backlog clears over a few hourly syncs and a ride
+    that never yields a series can't hold the others back. A refusal skips
+    the ride this time; a 429, timeout or 5xx ends the run; nothing fails
+    the sync. Rides older than the window keep reading intervals.icu live.
+    A change to an activity's `stream_types` alone now reaches its stored
+    JSON, so streams intervals.icu adds after the first sync are kept.
+  - `src/intervalsRideSeries.ts` (pure) puts the streams on moving time
+    from zero at the first reading (a gap over 30 seconds adds no time,
+    and distance counted across it is dropped, as the live charts count
+    them):
+    heart rate in `activity_heart_rates`, and power, cadence, distance
+    and altitude in `activity_power_series`, whose JSON gains optional
+    `distance` and `altitude` in decimeters (no migration; older rows have
+    neither). A trainer ride whose distance never moves keeps none. GPS
+    positions are not kept: an outdoor ride's map still comes from
+    intervals.icu. The first series kept stays.
+  - `GET /api/activities/:id/streams` still reads intervals.icu first;
+    when it can't answer, the kept series draw the same charts (speed,
+    elevation, heart rate, power, cadence, best efforts and zones), the
+    timeline built from the kept distance and altitude
+    (`trackFromPowerSeries`, a sample every moving second, so a sensor
+    drop-out is not taken for a pause). A `.fit` or Garmin copy's series is still
+    preferred to the ride's own.
+  - Private like the others: never in group views or coach tools; in the
+    account export; removed with the account, and when a ride in the sync
+    window leaves intervals.icu (the sync tombstones it and the series are
+    forgotten). The privacy policy says intervals.icu rides' readings are
+    kept.
 - [ ] **P4 — Release and check on device**
   - On the owner's written go-ahead for each: apply migration 0068 and
     deploy the API, deploy `tres-fort-web` and the website (privacy
@@ -174,6 +215,10 @@ group views or coach tools.
     Worker, web and website. The release check failed three Add
     to your week UI journeys (fixed under app-design-pass P24); run then passed in full, and TestFlight 1.2
     (79) was uploaded on the owner's written go-ahead.
+  - P8 goes out on the owner's written go-ahead: the API Worker and the
+    website (privacy policy); no migration and no app build. Then a new
+    Zwift ride shows rows in `activity_heart_rates` and
+    `activity_power_series` (diagnostics `/activities/:id` and `/sync`).
   - P5 shipped with the 2026-11-08 release (API, web and TestFlight 69, no
     migration; 2026-11-08). On device: dragging a chart moves the dot on a
     recorded run's, an intervals.icu run's and an Apple Health run's map,
@@ -181,6 +226,7 @@ group views or coach tools.
 
 ## Execution frontier
 
+- P8
 - P4
 
 ## Dependencies
@@ -197,7 +243,11 @@ series, so it can follow P1 or run beside it.
 
 ## Next step
 
-**Now (@owner):** The P4 device checks, on TestFlight 1.2 (83) or later,
+**Now (@agent):** P8 in review (keep intervals.icu rides' streams). Once
+merged, the owner's written go-ahead deploys the API Worker and the website
+(privacy policy); then check a new Zwift ride kept its series.
+
+**Then (@owner):** The P4 device checks, on TestFlight 1.2 (83) or later,
 which carries P0 to P7 (the owner already saw charts on build 68): drag a
 chart and watch the dot move on a recorded run's, an intervals.icu run's and
 an Apple Health run's map, open the map full screen (P5); then a Zwift ride
@@ -212,3 +262,8 @@ those look right.
   later ideas, not in this plan.
 - Opening an intervals.icu run asks intervals.icu twice (route and
   streams); fine at a member's pace of use, revisit if it rate-limits.
+- P8 keeps rides only. Keeping intervals.icu runs' heart rate the same way,
+  and backfilling rides older than the sync window, are later ideas.
+- P8 can't mark a ride whose streams never encode (every reading invalid),
+  so it is asked again in turn until it leaves the 90-day window; taking
+  the rest in turn keeps it from blocking the others.

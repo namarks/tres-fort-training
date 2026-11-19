@@ -5,6 +5,7 @@
 // output is a few hundred evenly spaced points, so a phone draws it as is.
 
 import { decodeRoute, type EncodedRoute } from './activityRoute';
+import { decodeValues, type EncodedPowerSeries, type EncodedValues } from './powerSeries';
 import { summarizeCadence, summarizePower, MAX_CADENCE_RPM, MAX_POWER_W, type CadenceSummary, type PowerSummary } from './ridePower';
 
 /** One sample of the activity's timeline. */
@@ -78,7 +79,7 @@ const ELEVATION_WINDOW_S = 30;
 /** A climb counts once it rises this far above the last low point. */
 const GAIN_THRESHOLD_M = 3;
 /** Faster than this is a GPS jump, not a person. */
-const MAX_SPEED_MPS = 30;
+export const MAX_SPEED_MPS = 30;
 
 const EARTH_RADIUS_M = 6_371_008.8;
 
@@ -152,6 +153,29 @@ export function trackFromRoute(route: EncodedRoute): TrackSample[] {
       track.push({ t, d, alt: p.alt, newSegment: i === 0 && track.length > 0, lat: p.lat, lon: p.lon });
     }
   }
+  return track;
+}
+
+/**
+ * A kept ride series' timeline (run-detail-charts P8): its distance and
+ * altitude, in decimeters, back in meters. The series is already on moving
+ * time with its pauses taken out, so the timeline has a sample every second
+ * up to its last reading, or `endT` (the last heart-rate reading) when
+ * later: a stretch where a sensor dropped out is not taken for a pause.
+ * Empty when it kept neither distance nor altitude.
+ */
+export function trackFromPowerSeries(series: EncodedPowerSeries, endT = 0): TrackSample[] {
+  if (!series.distance && !series.altitude) return [];
+  const last = (values: EncodedValues | null | undefined) =>
+    values ? values.dt.reduce((sum, dt) => sum + dt, 0) : 0;
+  const end = Math.max(
+    Math.floor(Number.isFinite(endT) ? endT : 0),
+    last(series.distance), last(series.altitude), last(series.power), last(series.cadence),
+  );
+  const track: TrackSample[] = [];
+  for (let t = 0; t <= end; t++) track.push({ t, d: null, alt: null });
+  for (const r of decodeValues(series.distance ?? null)) track[r.t]!.d = r.v / 10;
+  for (const r of decodeValues(series.altitude ?? null)) track[r.t]!.alt = r.v / 10;
   return track;
 }
 
