@@ -7,7 +7,7 @@
 // .fit or Apple Health ride already uses. GPS positions are not kept: an
 // outdoor ride's map still comes from intervals.icu.
 
-import { PAUSE_GAP_S, samplesFromProvider, type ProviderStreams } from './activityStreams';
+import { MAX_SPEED_MPS, PAUSE_GAP_S, samplesFromProvider, type ProviderStreams } from './activityStreams';
 import { encodeHeartRate, type EncodedHeartRate } from './heartRateSeries';
 import { encodePowerSeries, type EncodedPowerSeries } from './powerSeries';
 import type { Sample } from './trainingLoad';
@@ -29,19 +29,23 @@ export function rideSeriesFromIntervals(streams: ProviderStreams, startMs: numbe
   const onMoving = (samples: readonly Sample[]) => samples.map(({ t, v }) => ({ t: clock.moving(t), v }));
   const distance: Sample[] = [];
   const altitude: Sample[] = [];
-  // Ground a provider's distance counted across a pause is dropped, as the
-  // clock drops the time and the live charts do: the first reading after a
-  // pause continues from the last one before it.
-  let last: { d: number; stretch: number } | null = null;
+  // The live charts' distance rules: ground a provider's distance counted
+  // across a pause is dropped, as the clock drops the time, so the first
+  // reading after a pause continues from the last accepted one; and a
+  // reading that goes backwards, or forwards faster than a person moves, is
+  // a glitch and is not kept.
+  let accepted: { d: number; m: number; stretch: number } | null = null;
   let offset = 0;
   for (const s of track) {
     const t = clock.moving(s.t);
     if (s.d !== null) {
       const stretch = clock.stretch(s.t);
-      if (last && stretch !== last.stretch) offset = s.d - last.d;
+      if (accepted && stretch !== accepted.stretch) offset = s.d - accepted.d;
       const d = s.d - offset;
-      distance.push({ t, v: d });
-      last = { d, stretch };
+      if (!accepted || (d >= accepted.d && d - accepted.d <= MAX_SPEED_MPS * Math.max(1, t - accepted.m))) {
+        distance.push({ t, v: d });
+        accepted = { d, m: t, stretch };
+      }
     }
     if (s.alt !== null) altitude.push({ t, v: s.alt });
   }

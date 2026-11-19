@@ -123,6 +123,28 @@ describe('rideSeriesFromIntervals', () => {
     expect(kept).toEqual(live);
   });
 
+  it('measures a pause from the last good distance, past a spike before it', () => {
+    const time = [...range(100), ...range(100, 200)];
+    const streams = {
+      time,
+      distance: time.map((t) => (t === 99 ? 10_000 : t * 8)),
+      altitude: null,
+      heartrate: time.map(() => 130),
+      watts: null,
+      cadence: null,
+      lat: null,
+      lon: null,
+    };
+    const { heartRate, power } = rideSeriesFromIntervals(streams, null);
+    const hr = decodeHeartRate(heartRate!);
+    const kept = buildActivityStreams(trackFromPowerSeries(power!, hr.at(-1)!.t), hr, { heartRateClock: 'moving' })!;
+    const fresh = samplesFromProvider(streams);
+    const live = buildActivityStreams(fresh.track, fresh.heartRate)!;
+    expect(live.total_distance_m).toBe(1576);
+    expect(kept.total_distance_m).toBe(live.total_distance_m);
+    expect(kept.moving_s).toBe(live.moving_s);
+  });
+
   it('keeps the moving timeline through a sensor drop-out', () => {
     // Heart rate throughout; distance and altitude missing for 400 seconds.
     const time = range(600);

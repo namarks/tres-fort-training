@@ -79,7 +79,7 @@ const ELEVATION_WINDOW_S = 30;
 /** A climb counts once it rises this far above the last low point. */
 const GAIN_THRESHOLD_M = 3;
 /** Faster than this is a GPS jump, not a person. */
-const MAX_SPEED_MPS = 30;
+export const MAX_SPEED_MPS = 30;
 
 const EARTH_RADIUS_M = 6_371_008.8;
 
