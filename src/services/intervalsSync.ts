@@ -90,6 +90,13 @@ export interface ActivitySyncDeps extends ActivityFetchDeps {
   expectedCredentialGeneration?: number;
 }
 
+/** The streams intervals.icu says an activity has, as JSON text: a change
+ * reaches the stored JSON, so the ride series keeper (run-detail-charts P8)
+ * sees streams added after the first sync. */
+function streamTypesSQL(raw: string): string {
+  return `(CASE WHEN json_valid(${raw}) THEN json_extract(${raw}, '$.stream_types') END)`;
+}
+
 export interface IntervalsImportResult {
   status: 'synced' | 'retry' | 'reconnect' | 'disconnected' | 'superseded';
   connection: IntervalsConnectionStatus | null;
@@ -1487,7 +1494,8 @@ export function createIntervalsSyncService({
                  external_activities.calories IS NOT excluded.calories OR
                  external_activities.elevation_gain_m IS NOT excluded.elevation_gain_m OR
                  ${deviceNameSQL('external_activities.raw')} IS NOT ${deviceNameSQL('excluded.raw')} OR
-                 ${thresholdSettingsSQL('external_activities.raw')} IS NOT ${thresholdSettingsSQL('excluded.raw')}
+                 ${thresholdSettingsSQL('external_activities.raw')} IS NOT ${thresholdSettingsSQL('excluded.raw')} OR
+                 ${streamTypesSQL('external_activities.raw')} IS NOT ${streamTypesSQL('excluded.raw')}
                THEN excluded.raw ELSE external_activities.raw END,
                synced_at=CASE
                  WHEN excluded.synced_at > external_activities.synced_at THEN excluded.synced_at
@@ -1519,7 +1527,8 @@ export function createIntervalsSyncService({
                  external_activities.calories IS NOT excluded.calories OR
                  external_activities.elevation_gain_m IS NOT excluded.elevation_gain_m OR
                  ${deviceNameSQL('external_activities.raw')} IS NOT ${deviceNameSQL('excluded.raw')} OR
-                 ${thresholdSettingsSQL('external_activities.raw')} IS NOT ${thresholdSettingsSQL('excluded.raw')}
+                 ${thresholdSettingsSQL('external_activities.raw')} IS NOT ${thresholdSettingsSQL('excluded.raw')} OR
+                 ${streamTypesSQL('external_activities.raw')} IS NOT ${streamTypesSQL('excluded.raw')}
                )`,
           )
           .bind(

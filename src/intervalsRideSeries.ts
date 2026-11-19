@@ -52,8 +52,9 @@ export function rideSeriesFromIntervals(streams: ProviderStreams, startMs: numbe
 }
 
 /** Elapsed seconds to moving seconds over the timeline's samples (every
- * reading of every stream is at one): a gap longer than a pause is taken
- * out and starts a new stretch. Unknown times map to -1, which no encoder
+ * reading of every stream is at one), starting at zero on the first one as
+ * the live chart's clock does: a gap longer than a pause is taken out and
+ * starts a new stretch. Unknown times map to -1, which no encoder
  * keeps. */
 function movingClock(times: readonly number[]): { moving(t: number): number; stretch(t: number): number } {
   const sorted = [...new Set(times.filter((t) => Number.isFinite(t) && t >= 0))].sort((a, b) => a - b);
@@ -65,8 +66,6 @@ function movingClock(times: readonly number[]): { moving(t: number): number; str
       const gap = sorted[i]! - sorted[i - 1]!;
       if (gap <= PAUSE_GAP_S) movingT += gap;
       else stretch += 1;
-    } else {
-      movingT = sorted[0]!;
     }
     at.set(sorted[i]!, { m: movingT, stretch });
   }

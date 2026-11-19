@@ -170,9 +170,12 @@ private to the member, like routes: never in group views or coach tools.
     that never yields a series can't hold the others back. A refusal skips
     the ride this time; a 429, timeout or 5xx ends the run; nothing fails
     the sync. Rides older than the window keep reading intervals.icu live.
+    A change to an activity's `stream_types` alone now reaches its stored
+    JSON, so streams intervals.icu adds after the first sync are kept.
   - `src/intervalsRideSeries.ts` (pure) puts the streams on moving time
-    (a gap over 30 seconds adds no time, and distance counted across it is
-    dropped, as the live charts count them):
+    from zero at the first reading (a gap over 30 seconds adds no time,
+    and distance counted across it is dropped, as the live charts count
+    them):
     heart rate in `activity_heart_rates`, and power, cadence, distance
     and altitude in `activity_power_series`, whose JSON gains optional
     `distance` and `altitude` in decimeters (no migration; older rows have

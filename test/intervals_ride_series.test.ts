@@ -99,6 +99,30 @@ describe('rideSeriesFromIntervals', () => {
     expect(s.heart_rate!.every((v) => v === null || v === 140)).toBe(true);
   });
 
+  it('starts the kept clock at the first reading, as the live chart does', () => {
+    // intervals.icu's first sample two minutes in.
+    const time = range(600, 120);
+    const streams = {
+      time,
+      distance: time.map((t) => (t - 120) * 10),
+      altitude: null,
+      heartrate: time.map(() => 135),
+      watts: time.map((t) => (t < 420 ? 100 : 300)),
+      cadence: null,
+      lat: null,
+      lon: null,
+    };
+    const { heartRate, power } = rideSeriesFromIntervals(streams, null);
+    expect(decodeHeartRate(heartRate!)[0]!.t).toBe(0);
+    const kept = buildActivityStreams(trackFromPowerSeries(power!), decodeHeartRate(heartRate!), {
+      heartRateClock: 'moving', power: decodeValues(power!.power), powerClock: 'moving',
+    })!;
+    const fresh = samplesFromProvider(streams);
+    const live = buildActivityStreams(fresh.track, fresh.heartRate, { power: fresh.power })!;
+    expect(live.power).toMatchObject({ avg_w: 200 });
+    expect(kept).toEqual(live);
+  });
+
   it('drops the ground a pause counted, as the live chart does', () => {
     // 100 seconds, a stop over which the distance stream still advanced,
     // 100 more seconds.
@@ -226,6 +250,19 @@ describe('an intervals.icu ride keeps its streams when it syncs', () => {
     // Deleted on intervals.icu: the next sync tombstones it and forgets them.
     await sync(provider(activities.slice(1), {}).fetcher);
     expect(await keptRows(rideId)).toEqual({ heart: null, power: null });
+  });
+
+  it('keeps a ride whose streams intervals.icu lists only on a later sync', async () => {
+    const me = await rider();
+    const sync = (activities: unknown[], streams: Record<string, Reply>) => {
+      const p = provider(activities, streams);
+      return syncExternalActivities(env.DB, env as unknown as Env, { userId: me.id, today: TODAY, fetcher: p.fetcher })
+        .then(() => p.calls);
+    };
+    expect(await sync([listed('late', '2026-11-18', { stream_types: [] })], {})).toEqual([]);
+    // Nothing else about the ride changed.
+    expect(await sync([listed('late', '2026-11-18')], { late: { status: 200, body: ZWIFT_STREAMS } })).toEqual(['late']);
+    expect(await keptRows(`intervals:activity:${me.id}:late`)).toEqual({ heart: 600, power: 600 });
   });
 
   it(`keeps at most ${INTERVALS_RIDE_SERIES_PER_SYNC} a sync, the newest first, and a ride that never yields can't hold the rest back`, async () => {
