@@ -11622,11 +11622,12 @@ export async function getActivityStreams(
   } : {};
   // A ride kept from intervals.icu (P8) has no route but its own distance
   // and altitude: they draw speed and elevation, on the series' clock.
-  const seriesTrack = !stored?.route && power ? trackFromPowerSeries(power.series) : [];
+  const hrShift = heart?.series.start_ms != null && power?.series.start_ms != null
+    ? (power.series.start_ms - heart.series.start_ms) / 1000 : 0;
+  const hr = heart ? decodeHeartRate(heart.series).map((r) => ({ t: r.t - hrShift, v: r.v })) : [];
+  const seriesTrack = !stored?.route && power
+    ? trackFromPowerSeries(power.series, hr.reduce((m, r) => Math.max(m, r.t), 0)) : [];
   if (power && seriesTrack.length > 0) {
-    const hrShift = heart?.series.start_ms != null && power.series.start_ms != null
-      ? (power.series.start_ms - heart.series.start_ms) / 1000 : 0;
-    const hr = heart ? decodeHeartRate(heart.series).map((r) => ({ t: r.t - hrShift, v: r.v })) : [];
     const streams = buildActivityStreams(seriesTrack, hr, { heartRateClock: 'moving', ...powerOptions(0) });
     if (streams) return { ok: true, activity_id: power.activity_id, source: power.source, streams };
   }

@@ -123,6 +123,29 @@ describe('rideSeriesFromIntervals', () => {
     expect(kept).toEqual(live);
   });
 
+  it('keeps the moving timeline through a sensor drop-out', () => {
+    // Heart rate throughout; distance and altitude missing for 400 seconds.
+    const time = range(600);
+    const gap = (t: number) => t >= 100 && t < 500;
+    const streams = {
+      time,
+      distance: time.map((t) => (gap(t) ? null : t * 8)),
+      altitude: time.map((t) => (gap(t) ? null : 50)),
+      heartrate: time.map(() => 128),
+      watts: null,
+      cadence: null,
+      lat: null,
+      lon: null,
+    };
+    const { heartRate, power } = rideSeriesFromIntervals(streams, null);
+    const hr = decodeHeartRate(heartRate!);
+    const kept = buildActivityStreams(trackFromPowerSeries(power!, hr.at(-1)!.t), hr, { heartRateClock: 'moving' })!;
+    const fresh = samplesFromProvider(streams);
+    const live = buildActivityStreams(fresh.track, fresh.heartRate)!;
+    expect(live).toMatchObject({ moving_s: 599, total_distance_m: 4792 });
+    expect(kept).toEqual(live);
+  });
+
   it('drops the ground a pause counted, as the live chart does', () => {
     // 100 seconds, a stop over which the distance stream still advanced,
     // 100 more seconds.

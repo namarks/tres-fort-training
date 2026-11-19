@@ -186,7 +186,8 @@ private to the member, like routes: never in group views or coach tools.
     when it can't answer, the kept series draw the same charts (speed,
     elevation, heart rate, power, cadence, best efforts and zones), the
     timeline built from the kept distance and altitude
-    (`trackFromPowerSeries`). A `.fit` or Garmin copy's series is still
+    (`trackFromPowerSeries`, a sample every moving second, so a sensor
+    drop-out is not taken for a pause). A `.fit` or Garmin copy's series is still
     preferred to the ride's own.
   - Private like the others: never in group views or coach tools; in the
     account export; removed with the account, and when a ride in the sync
