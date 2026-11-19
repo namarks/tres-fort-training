@@ -221,7 +221,9 @@ final class MixedWeekSetupJourneyTests: XCTestCase {
         // its shared sets and rest; a circuit and its timers open in their
         // own sheet.
         XCTAssertEqual(app.buttons["composer.save"].label, alsoThursday ? "Add to Tue, Thu" : "Add to Tuesdays")
-        XCTAssertTrue(app.buttons["composer.home.add"].exists || app.scroll(toReveal: app.buttons["composer.home.add"]))
+        // The days, time and alongside rows above scrolled the list down, so
+        // the exercise list sits above; a lazy list drops it from the tree.
+        XCTAssertTrue(app.scroll(toReveal: app.buttons["composer.home.add"], searchingUp: true))
         revealAndTap(app.buttons["composer.home.timing"], in: app)
         XCTAssertTrue(app.navigationBars[timingSheet].waitForExistence(timeout: UITestWait.screen))
         enable("composer.home.circuit", in: app)
