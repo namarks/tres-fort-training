@@ -153,7 +153,7 @@ private to the member, like routes: never in group views or coach tools.
     with the workout, on Garmin disconnect and on account deletion; in the
     account export. The privacy policy and the Apple Health settings text
     say so.
-- [ ] **P8 — Keep intervals.icu rides' streams**
+- [x] **P8 — Keep intervals.icu rides' streams**
   - The owner asked on 2026-11-19 (thread "Get full Zwift ride data into
     Tres Fort"), before a Zwift ride, whether its full data reaches Tres
     Fort, then to keep it, elevation and the other stats included. Zwift
@@ -215,10 +215,12 @@ private to the member, like routes: never in group views or coach tools.
     Worker, web and website. The release check failed three Add
     to your week UI journeys (fixed under app-design-pass P24); run then passed in full, and TestFlight 1.2
     (79) was uploaded on the owner's written go-ahead.
-  - P8 goes out on the owner's written go-ahead: the API Worker and the
-    website (privacy policy); no migration and no app build. Then a new
-    Zwift ride shows rows in `activity_heart_rates` and
-    `activity_power_series` (diagnostics `/activities/:id` and `/sync`).
+  - P8 released 2026-11-19 on the owner's written go-ahead: the API Worker
+    and the website (privacy policy) from main 60baa1a; no migration and
+    no app build. The diagnostics lookups don't show an intervals.icu
+    ride's kept series, so the check is a ride's charts on device after
+    the next hourly sync (rides synced in the last 90 days fill in three a
+    sync).
   - P5 shipped with the 2026-11-08 release (API, web and TestFlight 69, no
     migration; 2026-11-08). On device: dragging a chart moves the dot on a
     recorded run's, an intervals.icu run's and an Apple Health run's map,
@@ -226,7 +228,6 @@ private to the member, like routes: never in group views or coach tools.
 
 ## Execution frontier
 
-- P8
 - P4
 
 ## Dependencies
@@ -243,17 +244,13 @@ series, so it can follow P1 or run beside it.
 
 ## Next step
 
-**Now (@agent):** P8 in review (keep intervals.icu rides' streams). Once
-merged, the owner's written go-ahead deploys the API Worker and the website
-(privacy policy); then check a new Zwift ride kept its series.
-
-**Then (@owner):** The P4 device checks, on TestFlight 1.2 (83) or later,
+**Now (@owner):** The P4 device checks, on TestFlight 1.2 (83) or later,
 which carries P0 to P7 (the owner already saw charts on build 68): drag a
 chart and watch the dot move on a recorded run's, an intervals.icu run's and
 an Apple Health run's map, open the map full screen (P5); then a Zwift ride
 from intervals.icu and a `.fit` ride with power show power and cadence
 charts, best efforts and time in zones (P6, P7). Everything is released on
-the server and web (P6 and P7 since 2026-11-11). Archive this plan once
+the server and web (P6 and P7 since 2026-11-11, P8 since 2026-11-19). Archive this plan once
 those look right.
 
 ## Notes / open questions
