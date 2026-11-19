@@ -90,6 +90,13 @@ export interface ActivitySyncDeps extends ActivityFetchDeps {
   expectedCredentialGeneration?: number;
 }
 
+/** The streams intervals.icu says an activity has, as JSON text: a change
+ * reaches the stored JSON, so the ride series keeper (run-detail-charts P8)
+ * sees streams added after the first sync. */
+function streamTypesSQL(raw: string): string {
+  return `(CASE WHEN json_valid(${raw}) THEN json_extract(${raw}, '$.stream_types') END)`;
+}
+
 export interface IntervalsImportResult {
   status: 'synced' | 'retry' | 'reconnect' | 'disconnected' | 'superseded';
   connection: IntervalsConnectionStatus | null;
@@ -166,6 +173,10 @@ interface IntervalsSyncDependencies {
     expectedIntervalsFence?: { generation: number; attempt: number }): Promise<number>;
   /** Recompute effective training load after provider rows changed. */
   refreshActivityLoads(db: D1Database, userId: string, window?: { fromDate?: string; toDate?: string }): Promise<number>;
+  /** Keep synced rides' heart rate, power, cadence, distance and altitude
+   * (run-detail-charts P8); best effort, never fails the sync. */
+  keepIntervalsRideSeries(db: D1Database, env: Env, userId: string,
+    window: { fromDate: string; toDate: string }, deps?: { fetcher?: Fetcher }): Promise<number>;
 }
 
 /** Identity selection and cross-source matching stay with their existing
@@ -174,6 +185,7 @@ export function createIntervalsSyncService({
   getUserIntervalsCreds, findOwnerRow, userHasTouchedIntervalsCreds,
   seedOwnerIntervalsCredsFromEnv, ensureOwnerUser, getIntervalsConnectionStatus,
   getUserTimezone, todayInTz, dedupeHealthKitAgainstIntervals, refreshActivityLoads,
+  keepIntervalsRideSeries,
 }: IntervalsSyncDependencies) {
   function intervalsSyncAttemptColumn(cache: IntervalsCache): string {
     return cache === 'events'
@@ -1482,7 +1494,8 @@ export function createIntervalsSyncService({
                  external_activities.calories IS NOT excluded.calories OR
                  external_activities.elevation_gain_m IS NOT excluded.elevation_gain_m OR
                  ${deviceNameSQL('external_activities.raw')} IS NOT ${deviceNameSQL('excluded.raw')} OR
-                 ${thresholdSettingsSQL('external_activities.raw')} IS NOT ${thresholdSettingsSQL('excluded.raw')}
+                 ${thresholdSettingsSQL('external_activities.raw')} IS NOT ${thresholdSettingsSQL('excluded.raw')} OR
+                 ${streamTypesSQL('external_activities.raw')} IS NOT ${streamTypesSQL('excluded.raw')}
                THEN excluded.raw ELSE external_activities.raw END,
                synced_at=CASE
                  WHEN excluded.synced_at > external_activities.synced_at THEN excluded.synced_at
@@ -1514,7 +1527,8 @@ export function createIntervalsSyncService({
                  external_activities.calories IS NOT excluded.calories OR
                  external_activities.elevation_gain_m IS NOT excluded.elevation_gain_m OR
                  ${deviceNameSQL('external_activities.raw')} IS NOT ${deviceNameSQL('excluded.raw')} OR
-                 ${thresholdSettingsSQL('external_activities.raw')} IS NOT ${thresholdSettingsSQL('excluded.raw')}
+                 ${thresholdSettingsSQL('external_activities.raw')} IS NOT ${thresholdSettingsSQL('excluded.raw')} OR
+                 ${streamTypesSQL('external_activities.raw')} IS NOT ${streamTypesSQL('excluded.raw')}
                )`,
           )
           .bind(
@@ -1645,6 +1659,13 @@ export function createIntervalsSyncService({
       attempts,
     );
     if (!stamped) return { status: 'superseded', synced: 0, detail: 'superseded' };
+    // The synced rides' streams, kept so their charts don't depend on
+    // intervals.icu (run-detail-charts P8). The sync has already succeeded.
+    try {
+      await keepIntervalsRideSeries(db, env, userId, { fromDate: oldest, toDate: today }, { fetcher: deps.fetcher });
+    } catch (error) {
+      console.warn({ event: 'intervals_ride_series_failed', error_type: diagnosticErrorType(error) });
+    }
     return { status: 'ok', synced: cnt?.c ?? 0 };
   }
 

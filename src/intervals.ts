@@ -758,8 +758,8 @@ export async function fetchActivityRouteStreams(
  * One activity's chart streams as intervals.icu sends them, index for index
  * (docs/plans/run-detail-charts P0): seconds from the start, cumulative
  * meters, heart rate, altitude, GPS positions, and power and cadence (P6).
- * A stream intervals.icu didn't send is null. Read only: nothing here is
- * stored.
+ * A stream intervals.icu didn't send is null. Read only: the activity sync
+ * keeps a ride's series from it (run-detail-charts P8), nothing here does.
  */
 export interface IntervalsChartStreams {
   time: (number | null)[] | null;

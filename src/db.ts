@@ -13,12 +13,13 @@ import { heartRateStreamSummary, powerStreamSummary, type Sample } from './train
 import type { FitActivity } from './fitFile';
 import type { TcxRun } from './tcxFile';
 import { decodeRoute, encodeRoute, parseStoredRoute, routePointCount, type EncodedRoute } from './activityRoute';
-import { buildActivityStreams, trackFromRoute, type ActivityStreams } from './activityStreams';
+import { buildActivityStreams, trackFromPowerSeries, trackFromRoute, type ActivityStreams } from './activityStreams';
 import { decodeHeartRate, encodeHeartRate, parseStoredHeartRate, type EncodedHeartRate } from './heartRateSeries';
 import {
   decodeValues, encodePowerSeries, fitPowerSeries, parseStoredPowerSeries, powerSeriesPoints, type EncodedPowerSeries,
 } from './powerSeries';
-import type { Fetcher } from './intervals';
+import { fetchActivityChartStreams, type Fetcher } from './intervals';
+import { rideSeriesFromIntervals } from './intervalsRideSeries';
 import {
   addAthleteThreshold, deleteAthleteThreshold, listAthleteThresholds, thresholdOn, type ThresholdInput,
 } from './services/athleteThresholds';
@@ -10435,6 +10436,7 @@ export const { syncExternalEvents, getUpcomingRides, reconcileIntervalsConnectio
   getUserIntervalsCreds: getStoredUserIntervalsCreds, findOwnerRow, userHasTouchedIntervalsCreds,
   seedOwnerIntervalsCredsFromEnv, ensureOwnerUser, getIntervalsConnectionStatus,
   getUserTimezone, todayInTz, dedupeHealthKitAgainstIntervals, refreshActivityLoads,
+  keepIntervalsRideSeries,
 });
 export type {
   EnduranceActivityInput, EnduranceLogResult, IntervalsDeleteResult, RecordedRunCopyDeleteResult, RecordedRunInput,
@@ -11425,6 +11427,92 @@ export type ActivityStreamsResult =
   | { ok: true; activity_id: string; source: 'intervals' | 'recording' | 'healthkit' | 'fit' | 'garmin'; streams: ActivityStreams }
   | { ok: false; reason: 'not_found' | 'unavailable' };
 
+/** Sources whose workouts can have a heart-rate or power series kept. */
+type KeptSeriesSource = 'recording' | 'healthkit' | 'fit' | 'garmin' | 'intervals';
+
+/** intervals.icu rides whose series one sync keeps: each costs one request. */
+export const INTERVALS_RIDE_SERIES_PER_SYNC = 3;
+
+/** The first of `items`, then `count - 1` of the rest taken in turn from
+ * position `turn`, wrapping: every item is reached within a few turns. */
+export function takeInTurn<T>(items: readonly T[], count: number, turn: number): T[] {
+  if (items.length <= count) return [...items];
+  const rest = items.slice(1);
+  const start = ((Math.trunc(turn) % rest.length) + rest.length) % rest.length;
+  const picked = [items[0]!];
+  for (let i = 0; i < count - 1; i++) picked.push(rest[(start + i) % rest.length]!);
+  return picked;
+}
+
+/**
+ * Keep the series of the member's intervals.icu rides that have none yet
+ * (run-detail-charts P8): heart rate in activity_heart_rates; power,
+ * cadence, distance and altitude in activity_power_series. Runs after each
+ * successful activity sync, for rides in the window that sync covered whose
+ * stream list names one of those streams, at most
+ * INTERVALS_RIDE_SERIES_PER_SYNC of them: the newest, so a new ride is kept
+ * on the sync that brings it, then the rest in turn, starting where the
+ * member's sync attempt counter points, so a ride that never yields a
+ * series can't hold the others back. The first series kept stays. A ride
+ * intervals.icu refuses is skipped this time; a busy or unreachable
+ * intervals.icu ends the run, and the next sync tries again. Series of rides
+ * the member deleted, or that left intervals.icu, are forgotten first.
+ * Returns how many rides it kept.
+ */
+async function keepIntervalsRideSeries(
+  db: D1Database,
+  env: Env,
+  userId: string,
+  window: { fromDate: string; toDate: string },
+  deps: { fetcher?: Fetcher } = {},
+): Promise<number> {
+  await db.batch([forgetHeartRatesStatement(db, userId), forgetPowerSeriesStatement(db, userId)]);
+  const { results: candidates } = await db
+    .prepare(
+      `SELECT a.id, a.external_id, a.start_date_utc_ms
+         FROM external_activities a
+        WHERE a.user_id = ?1 AND a.source = 'intervals' AND a.kind = 'ride' AND a.deleted_at IS NULL
+          AND a.date >= ?2 AND a.date <= ?3
+          AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(a.raw) THEN a.raw ELSE '{}' END, '$.stream_types') st
+                       WHERE st.value IN ('heartrate','watts','cadence','distance','altitude'))
+          AND NOT EXISTS (SELECT 1 FROM activity_heart_rates h WHERE h.activity_id = a.id)
+          AND NOT EXISTS (SELECT 1 FROM activity_power_series p WHERE p.activity_id = a.id)
+        ORDER BY a.date DESC, a.start_date_local_ms DESC, a.id
+        LIMIT 500`,
+    )
+    .bind(userId, window.fromDate, window.toDate)
+    .all<{ id: string; external_id: string; start_date_utc_ms: number | null }>();
+  if (candidates.length === 0) return 0;
+  const counter = await db.prepare('SELECT intervals_activities_sync_attempt AS n FROM users WHERE id = ?1')
+    .bind(userId).first<{ n: number | null }>();
+  const rides = takeInTurn(candidates, INTERVALS_RIDE_SERIES_PER_SYNC, counter?.n ?? 0);
+  const cred = await resolveIntervalsCredential(db, env, userId);
+  if (!cred) return 0;
+  let kept = 0;
+  for (const ride of rides) {
+    const fetched = await fetchActivityChartStreams(cred.apiKey, ride.external_id, {
+      fetcher: deps.fetcher,
+      accessToken: cred.accessToken,
+      timeoutMs: 10_000,
+    });
+    if (!fetched.ok) {
+      const refused = fetched.reason === 'disabled'
+        || (fetched.reason === 'http' && fetched.status !== undefined && fetched.status < 500 && fetched.status !== 429);
+      if (refused) continue;
+      break;
+    }
+    if (!fetched.value) continue;
+    const series = rideSeriesFromIntervals(fetched.value, ride.start_date_utc_ms);
+    const statements: D1PreparedStatement[] = [];
+    if (series.heartRate) statements.push(keepHeartRateStatement(db, userId, ride.id, series.heartRate, { replace: false }));
+    if (series.power) statements.push(keepPowerSeriesStatement(db, userId, ride.id, series.power, { replace: false }));
+    if (statements.length === 0) continue;
+    await db.batch(statements);
+    kept += 1;
+  }
+  return kept;
+}
+
 /**
  * The heart-rate series Tres Fort keeps for one of the member's workouts
  * (run-detail-charts P3): the activity's own, or one dedup hid behind it.
@@ -11436,7 +11524,7 @@ async function getStoredHeartRate(
   userId: string,
   activityId: string,
   preferred: string | null,
-): Promise<{ activity_id: string; source: 'recording' | 'healthkit' | 'fit' | 'garmin'; series: EncodedHeartRate } | null> {
+): Promise<{ activity_id: string; source: KeptSeriesSource; series: EncodedHeartRate } | null> {
   const row = await db
     .prepare(
       `SELECT a.id AS activity_id, a.source, h.series
@@ -11445,27 +11533,28 @@ async function getStoredHeartRate(
         WHERE a.user_id = ?1
           AND (a.id = ?2 OR a.duplicate_of = ?2)
           AND (a.deleted_at IS NULL OR a.duplicate_of IS NOT NULL)
-          AND a.source IN ('recording','fit','garmin','healthkit')
+          AND a.source IN ('recording','fit','garmin','healthkit','intervals')
         ORDER BY a.id IS ?3 DESC, a.source = 'recording' DESC, a.source IN ('fit','garmin') DESC, a.id = ?2 DESC, a.id
         LIMIT 1`,
     )
     .bind(userId, activityId, preferred)
-    .first<{ activity_id: string; source: 'recording' | 'healthkit' | 'fit' | 'garmin'; series: string }>();
+    .first<{ activity_id: string; source: KeptSeriesSource; series: string }>();
   const series = row ? parseStoredHeartRate(row.series) : null;
   return row && series ? { activity_id: row.activity_id, source: row.source, series } : null;
 }
 
 /**
  * The power and cadence series Tres Fort keeps for one of the member's
- * rides (run-detail-charts P7): the activity's own, or one dedup hid behind
- * it, `preferred` first. Null when none is kept.
+ * rides (run-detail-charts P7), with an intervals.icu ride's distance and
+ * altitude (P8): the activity's own, or one dedup hid behind it,
+ * `preferred` first, then a .fit or Garmin file's. Null when none is kept.
  */
 async function getStoredPowerSeries(
   db: D1Database,
   userId: string,
   activityId: string,
   preferred: string | null,
-): Promise<{ activity_id: string; source: 'healthkit' | 'fit' | 'garmin'; series: EncodedPowerSeries } | null> {
+): Promise<{ activity_id: string; source: Exclude<KeptSeriesSource, 'recording'>; series: EncodedPowerSeries } | null> {
   const row = await db
     .prepare(
       `SELECT a.id AS activity_id, a.source, p.series
@@ -11474,12 +11563,12 @@ async function getStoredPowerSeries(
         WHERE a.user_id = ?1
           AND (a.id = ?2 OR a.duplicate_of = ?2)
           AND (a.deleted_at IS NULL OR a.duplicate_of IS NOT NULL)
-          AND a.source IN ('fit','garmin','healthkit')
+          AND a.source IN ('fit','garmin','healthkit','intervals')
         ORDER BY a.id IS ?3 DESC, a.source IN ('fit','garmin') DESC, a.id = ?2 DESC, a.id
         LIMIT 1`,
     )
     .bind(userId, activityId, preferred)
-    .first<{ activity_id: string; source: 'healthkit' | 'fit' | 'garmin'; series: string }>();
+    .first<{ activity_id: string; source: Exclude<KeptSeriesSource, 'recording'>; series: string }>();
   const series = row ? parseStoredPowerSeries(row.series) : null;
   return row && series ? { activity_id: row.activity_id, source: row.source, series } : null;
 }
@@ -11491,8 +11580,10 @@ async function getStoredPowerSeries(
  * from intervals.icu, which has the watch's heart rate; when intervals.icu
  * can't give one, or for a run recorded in the app or an Apple Health run,
  * the route Tres Fort keeps gives pace and elevation and the heart-rate
- * series it keeps gives heart rate. Only the member's own activities are
- * ever read, and nothing is stored.
+ * series it keeps gives heart rate. An intervals.icu ride whose series the
+ * sync kept (P8) is drawn from them, its timeline from the kept distance and
+ * altitude. Only the member's own activities are ever read, and reading
+ * stores nothing.
  */
 export async function getActivityStreams(
   db: D1Database,
@@ -11529,6 +11620,17 @@ export async function getActivityStreams(
     powerClock: 'moving' as const,
     ftpW,
   } : {};
+  // A ride kept from intervals.icu (P8) has no route but its own distance
+  // and altitude: they draw speed and elevation, on the series' clock.
+  const hrShift = heart?.series.start_ms != null && power?.series.start_ms != null
+    ? (power.series.start_ms - heart.series.start_ms) / 1000 : 0;
+  const hr = heart ? decodeHeartRate(heart.series).map((r) => ({ t: r.t - hrShift, v: r.v })) : [];
+  const seriesTrack = !stored?.route && power
+    ? trackFromPowerSeries(power.series, hr.reduce((m, r) => Math.max(m, r.t), 0)) : [];
+  if (power && seriesTrack.length > 0) {
+    const streams = buildActivityStreams(seriesTrack, hr, { heartRateClock: 'moving', ...powerOptions(0) });
+    if (streams) return { ok: true, activity_id: power.activity_id, source: power.source, streams };
+  }
   const withRoute = track.length > 0 || heart || power
     ? buildActivityStreams(track, readings, { heartRateClock: 'moving', ...powerOptions(powerShift) })
     : null;
