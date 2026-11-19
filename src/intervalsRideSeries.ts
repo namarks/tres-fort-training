@@ -25,13 +25,25 @@ export interface IntervalsRideSeries {
  */
 export function rideSeriesFromIntervals(streams: ProviderStreams, startMs: number | null): IntervalsRideSeries {
   const { track, heartRate, power, cadence } = samplesFromProvider(streams);
-  const moving = movingClock([...track.map((s) => s.t), ...heartRate.map((s) => s.t)]);
-  const onMoving = (samples: readonly Sample[]) => samples.map(({ t, v }) => ({ t: moving(t), v }));
+  const clock = movingClock(track.map((s) => s.t));
+  const onMoving = (samples: readonly Sample[]) => samples.map(({ t, v }) => ({ t: clock.moving(t), v }));
   const distance: Sample[] = [];
   const altitude: Sample[] = [];
+  // Ground a provider's distance counted across a pause is dropped, as the
+  // clock drops the time and the live charts do: the first reading after a
+  // pause continues from the last one before it.
+  let last: { d: number; stretch: number } | null = null;
+  let offset = 0;
   for (const s of track) {
-    if (s.d !== null) distance.push({ t: moving(s.t), v: s.d });
-    if (s.alt !== null) altitude.push({ t: moving(s.t), v: s.alt });
+    const t = clock.moving(s.t);
+    if (s.d !== null) {
+      const stretch = clock.stretch(s.t);
+      if (last && stretch !== last.stretch) offset = s.d - last.d;
+      const d = s.d - offset;
+      distance.push({ t, v: d });
+      last = { d, stretch };
+    }
+    if (s.alt !== null) altitude.push({ t, v: s.alt });
   }
   return {
     heartRate: encodeHeartRate(onMoving(heartRate), startMs),
@@ -39,20 +51,27 @@ export function rideSeriesFromIntervals(streams: ProviderStreams, startMs: numbe
   };
 }
 
-/** Elapsed seconds to moving seconds over every time any stream has a
- * reading: a gap longer than a pause is taken out. */
-function movingClock(times: readonly number[]): (t: number) => number {
+/** Elapsed seconds to moving seconds over the timeline's samples (every
+ * reading of every stream is at one): a gap longer than a pause is taken
+ * out and starts a new stretch. Unknown times map to -1, which no encoder
+ * keeps. */
+function movingClock(times: readonly number[]): { moving(t: number): number; stretch(t: number): number } {
   const sorted = [...new Set(times.filter((t) => Number.isFinite(t) && t >= 0))].sort((a, b) => a - b);
-  const at = new Map<number, number>();
+  const at = new Map<number, { m: number; stretch: number }>();
   let movingT = 0;
+  let stretch = 0;
   for (let i = 0; i < sorted.length; i++) {
     if (i > 0) {
       const gap = sorted[i]! - sorted[i - 1]!;
       if (gap <= PAUSE_GAP_S) movingT += gap;
+      else stretch += 1;
     } else {
       movingT = sorted[0]!;
     }
-    at.set(sorted[i]!, movingT);
+    at.set(sorted[i]!, { m: movingT, stretch });
   }
-  return (t) => at.get(t) ?? -1;
+  return {
+    moving: (t) => at.get(t)?.m ?? -1,
+    stretch: (t) => at.get(t)?.stretch ?? -1,
+  };
 }

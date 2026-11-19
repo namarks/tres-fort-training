@@ -50,7 +50,8 @@ describe('rideSeriesFromIntervals', () => {
     expect(decodeValues(power!.cadence!)[0]).toEqual({ t: 0, v: 85 });
     const distance = decodeValues(power!.distance!);
     expect(distance[0]).toEqual({ t: 0, v: 0 });
-    expect(distance.at(-1)).toEqual({ t: 18, v: 1520 });
+    // 19 readings 8 m apart, less the 8 m counted across the stop.
+    expect(distance.at(-1)).toEqual({ t: 18, v: 1440 });
     expect(decodeValues(power!.altitude!)[0]).toEqual({ t: 0, v: -30 });
     expect(parseStoredPowerSeries(JSON.stringify(power))).toEqual(power);
   });
@@ -96,6 +97,32 @@ describe('rideSeriesFromIntervals', () => {
     expect(s.elevation_gain_m).toBeGreaterThan(50);
     expect(s.power).toMatchObject({ avg_w: 200, max_w: 250 });
     expect(s.heart_rate!.every((v) => v === null || v === 140)).toBe(true);
+  });
+
+  it('drops the ground a pause counted, as the live chart does', () => {
+    // 100 seconds, a stop over which the distance stream still advanced,
+    // 100 more seconds.
+    const time = [...range(100), ...range(100, 200)];
+    const streams = {
+      time,
+      distance: time.map((t) => t * 8),
+      altitude: null,
+      heartrate: time.map(() => 130),
+      watts: time.map(() => 200),
+      cadence: null,
+      lat: null,
+      lon: null,
+    };
+    const { heartRate, power } = rideSeriesFromIntervals(streams, null);
+    const kept = buildActivityStreams(trackFromPowerSeries(power!), decodeHeartRate(heartRate!), {
+      heartRateClock: 'moving', power: decodeValues(power!.power), powerClock: 'moving',
+    })!;
+    const fresh = samplesFromProvider(streams);
+    const live = buildActivityStreams(fresh.track, fresh.heartRate, { power: fresh.power })!;
+    expect(live.total_distance_m).toBe(1584);
+    expect(kept.total_distance_m).toBe(live.total_distance_m);
+    expect(kept.moving_s).toBe(live.moving_s);
+    expect(decodeValues(power!.distance!).at(-1)).toEqual({ t: 198, v: 15840 });
   });
 });
 
@@ -201,9 +228,9 @@ describe('an intervals.icu ride keeps its streams when it syncs', () => {
     expect(await keptRows(rideId)).toEqual({ heart: null, power: null });
   });
 
-  it(`keeps at most ${INTERVALS_RIDE_SERIES_PER_SYNC} a sync, newest first, skips a refusal and stops when intervals.icu is busy`, async () => {
+  it(`keeps at most ${INTERVALS_RIDE_SERIES_PER_SYNC} a sync, the newest first, and a ride that never yields can't hold the rest back`, async () => {
     const me = await rider();
-    const activities = ['2026-11-14', '2026-11-15', '2026-11-16', '2026-11-17', '2026-11-18']
+    const activities = ['2026-11-12', '2026-11-13', '2026-11-14', '2026-11-15', '2026-11-16', '2026-11-17', '2026-11-18']
       .map((date, i) => listed(`r${i + 1}`, date));
     const ok: Reply = { status: 200, body: ZWIFT_STREAMS };
     const sync = (streams: Record<string, Reply | Reply[]>) => {
@@ -213,25 +240,28 @@ describe('an intervals.icu ride keeps its streams when it syncs', () => {
     };
     const keptIds = async () => {
       const out: string[] = [];
-      for (let i = 1; i <= 5; i++) {
+      for (let i = 1; i <= 7; i++) {
         if ((await keptRows(`intervals:activity:${me.id}:r${i}`)).power !== null) out.push(`r${i}`);
       }
       return out;
     };
 
     // Rate limited on the newest: nothing more is asked, and the sync stands.
-    const busy = await sync({ r5: { status: 429, body: {} } });
+    const busy = await sync({ r7: { status: 429, body: {} } });
     expect(busy.result.status).toBe('ok');
-    expect(busy.calls).toEqual(['r5']);
+    expect(busy.calls).toEqual(['r7']);
     expect(await keptIds()).toEqual([]);
 
-    // r5 is refused for good this time: skipped, the next two are kept.
-    const second = await sync({ r5: { status: 404, body: {} }, r4: ok, r3: ok });
-    expect(second.calls).toEqual(['r5', 'r4', 'r3']);
-    expect(await keptIds()).toEqual(['r3', 'r4']);
-
-    const third = await sync({ r5: { status: 404, body: {} }, r2: ok, r1: ok });
-    expect(third.calls).toEqual(['r5', 'r2', 'r1']);
+    // r7 (newest) and r6 are refused every time and r5 never has a usable
+    // reading; each sync still asks for three, the newest first, and the
+    // others are reached in turn.
+    const all = { r1: ok, r2: ok, r3: ok, r4: ok, r6: { status: 404, body: {} }, r7: { status: 403, body: {} } };
+    const empty: Reply = { status: 200, body: [{ type: 'time', data: [0, 1] }, { type: 'heartrate', data: [0, 0] }] };
+    for (let i = 0; i < 4; i++) {
+      const run = await sync({ ...all, r5: empty });
+      expect(run.calls.length).toBe(INTERVALS_RIDE_SERIES_PER_SYNC);
+      expect(run.calls[0]).toBe('r7');
+    }
     expect(await keptIds()).toEqual(['r1', 'r2', 'r3', 'r4']);
   });
 });

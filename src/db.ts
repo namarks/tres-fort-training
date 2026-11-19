@@ -11433,17 +11433,31 @@ type KeptSeriesSource = 'recording' | 'healthkit' | 'fit' | 'garmin' | 'interval
 /** intervals.icu rides whose series one sync keeps: each costs one request. */
 export const INTERVALS_RIDE_SERIES_PER_SYNC = 3;
 
+/** The first of `items`, then `count - 1` of the rest taken in turn from
+ * position `turn`, wrapping: every item is reached within a few turns. */
+export function takeInTurn<T>(items: readonly T[], count: number, turn: number): T[] {
+  if (items.length <= count) return [...items];
+  const rest = items.slice(1);
+  const start = ((Math.trunc(turn) % rest.length) + rest.length) % rest.length;
+  const picked = [items[0]!];
+  for (let i = 0; i < count - 1; i++) picked.push(rest[(start + i) % rest.length]!);
+  return picked;
+}
+
 /**
  * Keep the series of the member's intervals.icu rides that have none yet
  * (run-detail-charts P8): heart rate in activity_heart_rates; power,
  * cadence, distance and altitude in activity_power_series. Runs after each
  * successful activity sync, for rides in the window that sync covered whose
- * stream list names one of those streams, newest first, at most
- * INTERVALS_RIDE_SERIES_PER_SYNC of them, so the backlog is worked off over
- * a few syncs. The first series kept stays. A ride intervals.icu refuses is
- * skipped this time; a busy or unreachable intervals.icu ends the run, and
- * the next sync tries again. Series of rides the member deleted, or that
- * left intervals.icu, are forgotten first. Returns how many rides it kept.
+ * stream list names one of those streams, at most
+ * INTERVALS_RIDE_SERIES_PER_SYNC of them: the newest, so a new ride is kept
+ * on the sync that brings it, then the rest in turn, starting where the
+ * member's sync attempt counter points, so a ride that never yields a
+ * series can't hold the others back. The first series kept stays. A ride
+ * intervals.icu refuses is skipped this time; a busy or unreachable
+ * intervals.icu ends the run, and the next sync tries again. Series of rides
+ * the member deleted, or that left intervals.icu, are forgotten first.
+ * Returns how many rides it kept.
  */
 async function keepIntervalsRideSeries(
   db: D1Database,
@@ -11453,7 +11467,7 @@ async function keepIntervalsRideSeries(
   deps: { fetcher?: Fetcher } = {},
 ): Promise<number> {
   await db.batch([forgetHeartRatesStatement(db, userId), forgetPowerSeriesStatement(db, userId)]);
-  const { results: rides } = await db
+  const { results: candidates } = await db
     .prepare(
       `SELECT a.id, a.external_id, a.start_date_utc_ms
          FROM external_activities a
@@ -11464,11 +11478,14 @@ async function keepIntervalsRideSeries(
           AND NOT EXISTS (SELECT 1 FROM activity_heart_rates h WHERE h.activity_id = a.id)
           AND NOT EXISTS (SELECT 1 FROM activity_power_series p WHERE p.activity_id = a.id)
         ORDER BY a.date DESC, a.start_date_local_ms DESC, a.id
-        LIMIT ?4`,
+        LIMIT 500`,
     )
-    .bind(userId, window.fromDate, window.toDate, INTERVALS_RIDE_SERIES_PER_SYNC)
+    .bind(userId, window.fromDate, window.toDate)
     .all<{ id: string; external_id: string; start_date_utc_ms: number | null }>();
-  if (rides.length === 0) return 0;
+  if (candidates.length === 0) return 0;
+  const counter = await db.prepare('SELECT intervals_activities_sync_attempt AS n FROM users WHERE id = ?1')
+    .bind(userId).first<{ n: number | null }>();
+  const rides = takeInTurn(candidates, INTERVALS_RIDE_SERIES_PER_SYNC, counter?.n ?? 0);
   const cred = await resolveIntervalsCredential(db, env, userId);
   if (!cred) return 0;
   let kept = 0;
