@@ -235,6 +235,15 @@ struct TodayView: View {
     /// "Build a workout" in the + menu: the same picker as the card's Add
     /// another workout, for a day whose card doesn't carry that line.
     @State private var showAddWorkout = false
+    /// Record a run or log an activity chosen in Add to today, opened once
+    /// that sheet is gone.
+    @State private var afterAddToToday: (() -> Void)?
+    /// A row of today's list whose choices are open (P30), and the choice
+    /// made there, carried out once that sheet is gone.
+    @State private var itemChoices: DailyWorkoutAgenda.Item?
+    @State private var pendingChoice: (choice: TodayItemChoice, item: DailyWorkoutAgenda.Item)?
+    /// A suggested routine done today in place of an activity (P30).
+    @State private var routineInstead: TodayRoutineInstead?
     @State private var showStation = false
     @State private var showStationConnection = false
     @StateObject private var partner = PartnerPhoneModel()
@@ -458,8 +467,29 @@ struct TodayView: View {
             }
             .sheet(isPresented: $showPartner) { PartnerPhoneSetup(model: partner, sync: sync) }
             .sheet(isPresented: $showFreestyle) { FreestyleExercisePicker(sync: sync, starting: true) }
-            .sheet(isPresented: $showAddWorkout) {
-                AdditionalWorkoutPicker(sync: sync, title: todayHoldsNothing ? "Add a workout" : "Add another workout")
+            .sheet(isPresented: $showAddWorkout, onDismiss: {
+                let next = afterAddToToday
+                afterAddToToday = nil
+                next?()
+            }) {
+                AdditionalWorkoutPicker(
+                    sync: sync, title: usesDayList ? "Add to today" : todayHoldsNothing ? "Add a workout" : "Add another workout",
+                    onRecordRun: usesDayList && canOfferRecordRun ? afterAddingToToday(onRecordRun) : nil,
+                    onLogActivity: usesDayList && canOfferLogActivity ? afterAddingToToday(onLogActivity) : nil)
+            }
+            .sheet(item: $itemChoices, onDismiss: {
+                guard let pending = pendingChoice else { return }
+                pendingChoice = nil
+                perform(pending.choice, on: pending.item)
+            }) { item in
+                TodayItemChoicesSheet(item: item, choices: choices(for: item)) { choice in
+                    pendingChoice = (choice, item)
+                    itemChoices = nil
+                }
+                .presentationDetents([.medium, .large])
+            }
+            .sheet(item: $routineInstead) { target in
+                TodayRoutineInsteadSheet(sync: sync, target: target)
             }
             .sheet(isPresented: $showRoutine) {
                 CreateWorkoutView(sync: sync, onStart: sync.todayIsCompleted ? nil : startChosenWorkout)
@@ -712,6 +742,33 @@ struct TodayView: View {
                 .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 24)
             }
             .refreshable { await sync.load() }
+        } else if usesDayList {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    // The recovery card adds its own top gap, so nothing
+                    // moves when WHOOP isn't connected.
+                    VStack(alignment: .leading, spacing: 0) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            TodayDayHeading(sync: sync, dateString: sync.todayString)
+                            TodayDayListView(rows: dayListRows, actions: rowActions,
+                                             canAdd: canOfferBuildWorkout && sync.canAddAnotherWorkout,
+                                             onAdd: { showAddWorkout = true })
+                                .modifier(TodayDaySwipe(state: daySwipe, canMove: canMoveDay, apply: applyDayMove, move: moveDay))
+                            // A workout whose add request is still out.
+                            AddAnotherWorkoutLine(sync: sync, retryOnly: true, ruled: false)
+                                .padding(.horizontal, 4)
+                        }
+                        RecoveryCard(auth: auth)
+                    }
+                    weekSection
+                    if let error = sync.loadError {
+                        Text(error).font(.footnote).foregroundStyle(Theme.danger)
+                    }
+                }
+                .readableColumn()
+                .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 24)
+            }
+            .refreshable { await sync.load() }
         } else if sync.todayIsCompleted {
             // Today's session is already COMPLETED. Show a done/recap
             // state with NO start and NO override: one session per
@@ -890,6 +947,153 @@ struct TodayView: View {
     }
 
     private var showsDailyAgenda: Bool { DailyWorkoutAgenda.showsCombinedAgenda(sync.dailyWorkoutAgenda) }
+
+    // MARK: today's day as one list (app-design-pass P30)
+
+    private var dayListRows: [DailyWorkoutAgenda.Item] { TodayDayList.rows(sync.dailyWorkoutAgenda) }
+
+    /// Today shows the day as one list whenever it holds something: the
+    /// main workout, add-ons or workouts added for later. A freestyle
+    /// session, a workout whose details can't be read and a day with nothing
+    /// planned keep their own cards, and a finished day keeps its recap once
+    /// nothing is left to do.
+    private var usesDayList: Bool {
+        guard sync.plan != nil, !sync.isFreestyle else { return false }
+        let rows = dayListRows
+        guard !rows.isEmpty else { return false }
+        if sync.todayPreviewWorkout == nil, let session = sync.todaySession,
+           ["planned", "in_progress"].contains(session.status) { return false }
+        if sync.todayIsCompleted { return TodayDayList.hasOpenRow(rows) }
+        return true
+    }
+
+    /// Closes Add to today, then records a run or logs an activity.
+    private func afterAddingToToday(_ action: (() -> Void)?) -> (() -> Void)? {
+        guard let action else { return nil }
+        return {
+            afterAddToToday = action
+            showAddWorkout = false
+        }
+    }
+
+    /// A row's own button and its other choices.
+    private func rowActions(_ item: DailyWorkoutAgenda.Item) -> TodayRowActions {
+        let more = { itemChoices = item }
+        guard !item.isDone, item.status != "skipped" else {
+            return TodayRowActions(primary: nil, primaryIdentifier: "", more: more)
+        }
+        if item.isActivity, let workout = item.workout {
+            // A routine-type activity with no exercises yet starts from its
+            // choices: give it exercises, or do a routine today.
+            if TodayDayList.homeStart(for: workout) != nil {
+                return TodayRowActions(primary: more, primaryIdentifier: "today.startActivity.\(workout.id)",
+                                       primaryDisabled: sync.partnerReserved, more: more)
+            }
+            let log: (() -> Void)? = onLogPlannedActivity.map { handler in { handler(workout.name) } }
+            return TodayRowActions(primary: log,
+                                   primaryIdentifier: item.source == .primary ? "today.logPlannedActivity" : "today.extra.log.\(workout.id)",
+                                   primaryDisabled: sync.partnerReserved, more: more)
+        }
+        if let session = item.session, (session.slot ?? 0) > 0 {
+            return TodayRowActions(primary: { startListed(session) },
+                                   primaryIdentifier: "today.session.\(session.slot ?? 0)",
+                                   primaryDisabled: !sync.canSwitchWorkout || isPreparingWorkoutStart, more: more)
+        }
+        if item.source == .primary, let workout = item.workout {
+            let startsRun = soloPlannedRun(workout) != nil && onStartRun != nil && !sync.hasResumableWorkout
+            let blocked = sync.currentWorkoutScope.slot == 0 && sync.blocksNewWorkoutStart && !sync.hasResumableWorkout
+            return TodayRowActions(primary: { startPrimary(workout) },
+                                   primaryIdentifier: startsRun ? "today.startRun" : "today.startWorkout",
+                                   primaryDisabled: !startsRun && (workout.exercises.isEmpty || isPreparingWorkoutStart || blocked),
+                                   more: more)
+        }
+        if let workout = item.workout {
+            return TodayRowActions(primary: {
+                Task {
+                    await RestCue.requestNotificationPermissionIfNeeded()
+                    _ = await sync.addAnotherWorkout(workout.id)
+                }
+            }, primaryIdentifier: "today.scheduledAdditional.\(workout.id)",
+               primaryDisabled: !sync.canAddAnotherWorkout, more: more)
+        }
+        return TodayRowActions(primary: nil, primaryIdentifier: "", more: more)
+    }
+
+    /// What a row's choices offer.
+    private func choices(for item: DailyWorkoutAgenda.Item) -> [TodayItemChoice] {
+        var out: [TodayItemChoice] = []
+        let open = !item.isDone && item.status != "skipped"
+        if let workout = item.workout, item.isActivity {
+            if open, TodayDayList.homeStart(for: workout) != nil { out += [.addExercises, .routineToday] }
+            if open, onLogPlannedActivity != nil { out.append(.log) }
+        } else if open, rowActions(item).primary != nil {
+            out.append(.start)
+        }
+        if let workout = item.workout, !PlannedActivity.isActivity(workout) { out.append(.details) }
+        if item.source == .primary {
+            if item.status == "planned", !sync.hasResumableWorkout, !sync.blocksNewWorkoutStart {
+                out += [.change, .notToday]
+            }
+        } else if item.status == "planned" {
+            out.append(.notToday)
+        }
+        if item.session != nil, item.isDone { out.append(.viewRecord) }
+        return out
+    }
+
+    private func perform(_ choice: TodayItemChoice, on item: DailyWorkoutAgenda.Item) {
+        switch choice {
+        case .start:
+            rowActions(item).primary?()
+        case .log:
+            if let workout = item.workout { onLogPlannedActivity?(workout.name) }
+        case .details, .addExercises:
+            if let workout = item.workout { previewTarget = IdentifiedString(id: workout.id) }
+        case .change:
+            showTodayPicker = IdentifiedString(id: sync.todayString)
+        case .notToday:
+            if item.source == .primary { confirmSkipToday = true }
+            else { Task { await sync.setAsideToday(item) } }
+        case .routineToday:
+            if let workout = item.workout, let start = TodayDayList.homeStart(for: workout) {
+                routineInstead = TodayRoutineInstead(start: start, replacing: item)
+            }
+        case .viewRecord:
+            unresolvedDate = IdentifiedString(id: sync.todayString)
+        }
+    }
+
+    /// The day's own workout from its row: a run opens the recorder, a lift
+    /// the set runner, as Today's card did.
+    private func startPrimary(_ workout: Workout) {
+        if sync.currentWorkoutScope.slot != 0 { guard sync.selectPrimaryWorkout() else { return } }
+        if let run = soloPlannedRun(workout), let onStartRun, !sync.hasResumableWorkout {
+            onStartRun(run.plannedRun(in: workout.name))
+            return
+        }
+        guard !workout.exercises.isEmpty, !(sync.blocksNewWorkoutStart && !sync.hasResumableWorkout) else { return }
+        #if DEBUG && targetEnvironment(simulator)
+        UIFixtureStartTrace.record(.todayStartAction)
+        #endif
+        prepareNewWorkout {
+            if sync.hasResumableWorkout {
+                #if DEBUG && targetEnvironment(simulator)
+                UIFixtureStartTrace.record(.todayResumeSelected)
+                #endif
+                sync.resumeWorkout()
+            } else {
+                #if DEBUG && targetEnvironment(simulator)
+                UIFixtureStartTrace.record(.todayStartSelected)
+                #endif
+                sync.startToday()
+            }
+        }
+    }
+
+    /// A workout added to today, or one beside the day's own already begun.
+    private func startListed(_ session: SessionRow) {
+        prepareNewWorkout { _ = sync.startListedSession(session) }
+    }
 
     @ViewBuilder private func dayWorkouts(underCard: Bool) -> some View {
         if sync.plan != nil, showsDailyAgenda {

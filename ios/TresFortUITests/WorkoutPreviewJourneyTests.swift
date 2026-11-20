@@ -30,8 +30,7 @@ final class WorkoutPreviewJourneyTests: XCTestCase {
             data: try JSONSerialization.data(withJSONObject: fixture), encoding: .utf8)
         app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US", "-restAudioCuesEnabled", "NO"]
         app.launch()
-        let preview = app.buttons["today.viewWorkout"]
-        XCTAssertTrue(preview.waitForExistence(timeout: UITestWait.screen)); preview.tap()
+        app.todayChoice("today.viewWorkout").tap()
         XCTAssertTrue(app.navigationBars["Strength A"].waitForExistence(timeout: UITestWait.screen))
         return app
     }

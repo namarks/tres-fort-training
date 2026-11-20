@@ -311,6 +311,16 @@ struct APIClient {
         try await patch("api/sessions/\(sessionId)", body: ["status": "completed"], jwt: jwt)
     }
 
+    /// Sets a workout that hasn't started aside for its date
+    /// (app-design-pass P30). The Worker refuses a started or finished one.
+    func skipSession(sessionId: String, expectedAttempt: Int?, jwt: String) async throws -> SessionRow {
+        try await patch(
+            attemptScopedPath("api/sessions/\(sessionId)", expectedAttempt: expectedAttempt),
+            body: ["status": "skipped"],
+            jwt: jwt,
+            headers: Self.attemptProtocolHeaders(expectedAttempt: expectedAttempt))
+    }
+
     /// Explicitly reopen a skipped/rest override. The Worker advances the
     /// reused date row's attempt, so delayed writes from the prior skipped
     /// generation cannot join this newly started workout.
@@ -1226,12 +1236,17 @@ protocol RoutineEditingAPI {
     func setRace(_ race: [String: Any], expectedVersion: Int, jwt: String) async throws
         -> APIClient.RaceWriteResult
     func clearRace(expectedVersion: Int, jwt: String) async throws -> APIClient.RaceWriteResult
+    func skipSession(sessionId: String, expectedAttempt: Int?, jwt: String) async throws -> SessionRow
 
 }
 
 extension APIClient: RoutineEditingAPI {}
 
 extension RoutineEditingAPI {
+    func skipSession(sessionId: String, expectedAttempt: Int?, jwt: String) async throws -> SessionRow {
+        throw APIError.http(501, "skip_session_unavailable")
+    }
+
     func setRace(_ race: [String: Any], expectedVersion: Int, jwt: String) async throws
         -> APIClient.RaceWriteResult
     {

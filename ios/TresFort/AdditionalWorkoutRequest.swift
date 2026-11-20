@@ -6,7 +6,11 @@ struct AdditionalWorkoutRequest: Codable, Equatable {
     let date: String
     let workoutID: String?
     let firstExerciseID: String?
+    /// Added to today's list for later instead of started now
+    /// (app-design-pass P30). Absent in requests saved before it existed.
+    var later: Bool? = nil
     var isFreestyle: Bool { workoutID == nil }
+    var startsNow: Bool { later != true }
 }
 
 enum AdditionalWorkoutRequestStore {

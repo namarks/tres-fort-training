@@ -4113,16 +4113,19 @@ final class SyncModel: ObservableObject {
     }
 
     @discardableResult
-    func addAnotherWorkout(_ workoutID: String? = nil, firstExercise: ExerciseCatalog? = nil) async -> Bool {
-        guard canAddAnotherWorkout else { return false }
+    func addAnotherWorkout(_ workoutID: String? = nil, firstExercise: ExerciseCatalog? = nil,
+                           later: Bool = false) async -> Bool {
+        guard canAddAnotherWorkout, !(later && workoutID == nil) else { return false }
         let saved = AdditionalWorkoutRequestStore.load(userID: accountID, defaults: defaults)
-        if let saved, saved.workoutID != workoutID || saved.firstExerciseID != firstExercise?.id {
+        if let saved, saved.workoutID != workoutID || saved.firstExerciseID != firstExercise?.id
+            || saved.startsNow == later {
             pendingAdditionalWorkout = saved
             loadError = "Retry adding the pending workout before adding a different one."
             return false
         }
         let request = saved ?? AdditionalWorkoutRequest(id: uuidFactory().uuidString,
-            date: todayString, workoutID: workoutID, firstExerciseID: firstExercise?.id)
+            date: todayString, workoutID: workoutID, firstExerciseID: firstExercise?.id,
+            later: later ? true : nil)
         guard AdditionalWorkoutRequestStore.save(request, userID: accountID, defaults: defaults) else {
             loadError = "Couldn't save this workout request on your iPhone. Retry saved data, then try again."
             return false
@@ -4135,6 +4138,56 @@ final class SyncModel: ObservableObject {
     func retryAddingWorkout() async -> Bool {
         guard canAddAnotherWorkout, let request = AdditionalWorkoutRequestStore.load(userID: accountID, defaults: defaults) else { return false }
         return await sendAdditionalWorkout(request)
+    }
+
+    /// Starts or continues a workout already on today's list
+    /// (app-design-pass P30): the same steps the agenda's Open and the
+    /// runner's Start took one after the other.
+    @discardableResult
+    func startListedSession(_ session: SessionRow) -> Bool {
+        guard !running, selectWorkout(session) else { return false }
+        if hasResumableWorkout { resumeWorkout(); return true }
+        let hasCurrentWorkout = session.isFreestyle
+            || plan?.availableWorkouts.contains(where: { $0.id == session.workout_id }) == true
+        guard ["planned", "in_progress"].contains(session.status), hasCurrentWorkout,
+              !(selectedDay?.exercises.isEmpty ?? true) else { return false }
+        startWorkout()
+        return true
+    }
+
+    /// Retry ids for Not today on a workout or activity beside today's own,
+    /// by date and workout, so a retry after a lost reply reuses the row the
+    /// first try made.
+    private var pendingNotTodayIDs: [String: String] = [:]
+
+    /// "Not today" for something on today's list beside the day's own
+    /// workout (app-design-pass P30). A workout added for later is skipped;
+    /// a weekday's add-on (Friday's core) gets a row of its own for today,
+    /// skipped, so the add-on stays on every other Friday. The day's own
+    /// workout is set aside through the calendar, as before.
+    @discardableResult
+    func setAsideToday(_ item: DailyWorkoutAgenda.Item) async -> Bool {
+        let today = todayString
+        if let session = item.session {
+            guard (session.slot ?? 0) > 0, session.status == "planned", session.date == today else { return false }
+            let result = await performRoutineMutation { api, jwt in
+                try await api.skipSession(sessionId: session.id, expectedAttempt: session.attempt, jwt: jwt)
+            }
+            return result != nil
+        }
+        guard item.source == .additional, let workout = item.workout else { return false }
+        let key = today + "|" + workout.id
+        let id = pendingNotTodayIDs[key] ?? uuidFactory().uuidString
+        pendingNotTodayIDs[key] = id
+        let writer = setWriteAPI
+        let result = await performRoutineMutation { (api, jwt) -> SessionRow in
+            let created = try await writer.createAdditionalSession(
+                id: id, date: today, workoutID: workout.id, freestyle: false, jwt: jwt)
+            if created.status == "skipped" { return created }
+            return try await api.skipSession(sessionId: created.id, expectedAttempt: created.attempt, jwt: jwt)
+        }
+        if result != nil { pendingNotTodayIDs[key] = nil }
+        return result != nil
     }
 
     private func sendAdditionalWorkout(_ request: AdditionalWorkoutRequest) async -> Bool {
@@ -4155,6 +4208,8 @@ final class SyncModel: ObservableObject {
             }
             pendingAdditionalWorkout = nil
             isAddingWorkout = false
+            // Added for later: it waits on today's list (P30).
+            guard request.startsNow else { return true }
             guard accepted.date == todayString, selectWorkout(accepted) else { return true }
             if accepted.isFreestyle, let id = request.firstExerciseID, let exercise = catalogRow(id) {
                 freestyleExercises = freestyleDay?.exercises ?? []
