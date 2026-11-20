@@ -435,9 +435,13 @@ struct TodayView: View {
                 // A list row with nothing to start reads its details only:
                 // with no date, Details offers no "Schedule for today" that
                 // would put it in the day's own place.
-                let readOnly = start == nil && previewItem?.workout?.id == target.id
+                let fromRow = previewItem?.workout?.id == target.id
+                let readOnly = start == nil && fromRow
+                // A workout beside the day's own can't be changed for today
+                // here: that change would replace the day's own workout.
                 WorkoutDetailsView(sync: sync, workoutID: target.id,
-                                   date: readOnly ? nil : sync.todayString, onStart: start)
+                                   date: readOnly ? nil : sync.todayString, onStart: start,
+                                   changesForDate: !(fromRow && previewItem?.source != .primary))
             }
             .sheet(item: $unresolvedDate) { target in
                 NavigationStack {

@@ -10,6 +10,10 @@ struct WorkoutDetailsView: View {
     let workoutID: String
     var date: String? = nil
     var onStart: ((String) -> Void)? = nil
+    /// False keeps "Change for today only" and step edits off: Today's list
+    /// opens a workout beside the day's own here, and a change for the
+    /// day would land in the day's own place (app-design-pass P30).
+    var changesForDate = true
     var isPushed = false
     @Environment(\.dismiss) private var dismiss
     @State private var editing = false
@@ -65,7 +69,7 @@ struct WorkoutDetailsView: View {
     /// workout-library P3): the date it was opened for, when it is that
     /// date's workout and the date can still change.
     private func changeDate(for workout: Workout) -> String? {
-        guard !workout.isOneTime, !workout.isArchived, let date,
+        guard changesForDate, !workout.isOneTime, !workout.isArchived, let date,
               sync.previewWorkout(forDateString: date)?.id == workout.id,
               sync.calendarAssignmentUnavailableReason(date: date) == nil else { return nil }
         return date

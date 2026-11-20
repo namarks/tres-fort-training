@@ -4175,8 +4175,9 @@ final class SyncModel: ObservableObject {
         }
         guard item.source == .additional, let workout = item.workout else { return false }
         // The session's id is saved before the create goes out, so a retry
-        // after a lost reply, even after a relaunch, reuses it. Receipts for
-        // past dates can no longer be retried.
+        // after a lost reply, even after a relaunch, reuses it; the server
+        // answers a repeat with the row already made. Receipts for past
+        // dates can no longer be retried and are dropped.
         let key = today + "|" + workout.id
         var receipts = NotTodayReceiptStore.load(userID: accountID, defaults: defaults)
             .filter { String($0.key.prefix(today.count)) >= today }
@@ -4193,10 +4194,8 @@ final class SyncModel: ObservableObject {
             if created.status == "skipped" { return created }
             return try await api.skipSession(sessionId: created.id, expectedAttempt: created.attempt, jwt: jwt)
         }
-        if result != nil {
-            receipts[key] = nil
-            _ = NotTodayReceiptStore.save(receipts, userID: accountID, defaults: defaults)
-        }
+        // The receipt stays until the day passes: a refresh after the write
+        // can fail, and a retry with the same id returns the same row.
         return result != nil
     }
 
