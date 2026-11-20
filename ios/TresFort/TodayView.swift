@@ -1081,6 +1081,18 @@ struct TodayView: View {
         guard let item = previewItem, item.workout?.id == workoutID else { return startChosenWorkout }
         let actions = rowActions(item)
         guard !item.isActivity, let start = actions.primary, !actions.primaryDisabled else { return nil }
+        if item.source == .primary {
+            // Details can change the day's own workout for today only; start
+            // the workout it hands back (the day's copy), not the one the
+            // row held when Details opened.
+            return { id in
+                previewTarget = nil
+                let today = sync.todayString
+                guard let workout = sync.workout(id: id, on: today) ?? sync.previewWorkout(forDateString: today)
+                else { return }
+                startPrimary(workout)
+            }
+        }
         return { _ in
             previewTarget = nil
             start()
