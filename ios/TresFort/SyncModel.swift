@@ -4164,10 +4164,13 @@ final class SyncModel: ObservableObject {
     /// workout (app-design-pass P30). A workout added for later is skipped;
     /// a weekday's add-on (Friday's core) gets a row of its own for today,
     /// skipped, so the add-on stays on every other Friday. The day's own
-    /// workout is set aside through the calendar, as before.
+    /// workout is set aside through the calendar, as Skip does.
     @discardableResult
     func setAsideToday(_ item: DailyWorkoutAgenda.Item) async -> Bool {
         let today = todayString
+        if item.source == .primary || item.session.map({ ($0.slot ?? 0) == 0 }) == true {
+            return await setCalendarOverride(date: today, dayID: nil)
+        }
         if let session = item.session {
             guard (session.slot ?? 0) > 0, session.status == "planned", session.date == today else { return false }
             let result = await performRoutineMutation { api, jwt in

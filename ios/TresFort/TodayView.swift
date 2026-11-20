@@ -244,6 +244,9 @@ struct TodayView: View {
     @State private var pendingChoice: (choice: TodayItemChoice, item: DailyWorkoutAgenda.Item)?
     /// A suggested routine done today in place of an activity (P30).
     @State private var routineInstead: TodayRoutineInstead?
+    /// The list row whose Details are open, so Start there starts that
+    /// row's own session, never the day's main one (P30).
+    @State private var previewItem: DailyWorkoutAgenda.Item?
     @State private var showStation = false
     @State private var showStationConnection = false
     @StateObject private var partner = PartnerPhoneModel()
@@ -427,9 +430,9 @@ struct TodayView: View {
                     })
                     .environment(\.dynamicTypeSize, dynamicTypeSize)
             }
-            .sheet(item: $previewTarget) { target in
+            .sheet(item: $previewTarget, onDismiss: { previewItem = nil }) { target in
                 WorkoutDetailsView(sync: sync, workoutID: target.id,
-                                   date: sync.todayString, onStart: startChosenWorkout)
+                                   date: sync.todayString, onStart: previewStart(for: target.id))
             }
             .sheet(item: $unresolvedDate) { target in
                 NavigationStack {
@@ -1048,7 +1051,10 @@ struct TodayView: View {
         case .log:
             if let workout = item.workout { onLogPlannedActivity?(workout.name) }
         case .details, .addExercises:
-            if let workout = item.workout { previewTarget = IdentifiedString(id: workout.id) }
+            if let workout = item.workout {
+                previewItem = item
+                previewTarget = IdentifiedString(id: workout.id)
+            }
         case .change:
             showTodayPicker = IdentifiedString(id: sync.todayString)
         case .notToday:
@@ -1060,6 +1066,19 @@ struct TodayView: View {
             }
         case .viewRecord:
             unresolvedDate = IdentifiedString(id: sync.todayString)
+        }
+    }
+
+    /// Start in Details. Opened from a list row, it starts that row the way
+    /// its own button does (its own session, or the add-on as a new one),
+    /// and a row with nothing to start offers no Start.
+    private func previewStart(for workoutID: String) -> ((String) -> Void)? {
+        guard let item = previewItem, item.workout?.id == workoutID else { return startChosenWorkout }
+        let actions = rowActions(item)
+        guard !item.isActivity, let start = actions.primary, !actions.primaryDisabled else { return nil }
+        return { _ in
+            previewTarget = nil
+            start()
         }
     }
 

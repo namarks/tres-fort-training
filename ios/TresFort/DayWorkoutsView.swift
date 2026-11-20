@@ -311,12 +311,21 @@ struct TodayRoutineInsteadSheet: View {
     let target: TodayRoutineInstead
     @Environment(\.dismiss) private var dismiss
     @State private var busy = false
+    /// The activity was set aside, so a retry of Start doesn't do it again.
+    @State private var setAside = false
 
     var body: some View {
         NavigationStack {
-            TodayRoutineBuilderView(sync: sync, start: target.start, isBusy: $busy) {
-                let replacing = target.replacing
-                Task { await sync.setAsideToday(replacing) }
+            TodayRoutineBuilderView(sync: sync, start: target.start, isBusy: $busy, beforeStart: {
+                // Set aside before the routine starts: the day's own
+                // workout can't change while another workout runs.
+                if setAside { return true }
+                setAside = await sync.setAsideToday(target.replacing)
+                if !setAside, sync.loadError == nil {
+                    sync.loadError = "Couldn't set \(target.replacing.title) aside for today. Try again."
+                }
+                return setAside
+            }) {
                 dismiss()
             }
             .toolbar {
@@ -335,6 +344,10 @@ struct TodayRoutineBuilderView: View {
     /// Tells the sheet a save or start is in flight, so it can't be swiped
     /// away while the request is still out.
     @Binding var isBusy: Bool
+    /// Runs once the routine is saved, just before it starts or is added
+    /// for later; false stops there with its error shown (P30: Friday's
+    /// core is set aside first, since a running workout locks the date).
+    var beforeStart: (@MainActor () async -> Bool)?
     var onStarted: () -> Void
     @State private var home: HomeRoutineBuilder
     @State private var typedName = ""
@@ -349,10 +362,11 @@ struct TodayRoutineBuilderView: View {
     @FocusState private var nameFocused: Bool
 
     init(sync: SyncModel, start: PlanComposer.HomeStart, isBusy: Binding<Bool>,
-         onStarted: @escaping () -> Void) {
+         beforeStart: (@MainActor () async -> Bool)? = nil, onStarted: @escaping () -> Void) {
         _sync = ObservedObject(wrappedValue: sync)
         _isBusy = isBusy
         _home = State(initialValue: HomeRoutineBuilder(start: start, catalog: sync.catalog))
+        self.beforeStart = beforeStart
         self.onStarted = onStarted
     }
 
@@ -472,6 +486,7 @@ struct TodayRoutineBuilderView: View {
             sync.loadError = "Your workout is saved, but couldn't be loaded to start it. Try again."
             return
         }
+        if let beforeStart, !(await beforeStart()) { return }
         if !later { await RestCue.requestNotificationPermissionIfNeeded() }
         if await sync.addAnotherWorkout(id, later: later) { onStarted() }
     }
