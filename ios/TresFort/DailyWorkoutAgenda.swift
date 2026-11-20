@@ -99,10 +99,13 @@ extension SyncModel {
         let primary = activeScope?.date == today && activeScope?.slot == 0
             ? startedRunnerWorkout(on: today) ?? previewWorkout(forDateString: today, today: today)
             : previewWorkout(forDateString: today, today: today)
-        let extras = plannedExtras(on: today, today: today)
+        // Every row reads as it does today, with a block week's targets,
+        // so Today's list and the runner agree (progressive-plans P1).
+        let onToday: (Workout) -> Workout = { [plan] workout in plan?.workout(workout, on: today) ?? workout }
+        let extras = plannedExtras(on: today, today: today).map(onToday)
         // Archiving removes future choices, not the identity of a real session.
         // plannedExtras already filters the recurring agenda to live workouts.
-        let workouts = plan?.workouts ?? []
+        let workouts = (plan?.workouts ?? []).map(onToday)
         let minutes = Dictionary(uniqueKeysWithValues: workouts.compactMap { workout -> (String, Int)? in
             ScheduleTimes.minutes(workout.id, onDate: today, plan: plan).map { (workout.id, $0) }
         })

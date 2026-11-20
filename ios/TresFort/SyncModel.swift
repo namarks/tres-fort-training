@@ -4155,11 +4155,6 @@ final class SyncModel: ObservableObject {
         return true
     }
 
-    /// Retry ids for Not today on a workout or activity beside today's own,
-    /// by date and workout, so a retry after a lost reply reuses the row the
-    /// first try made.
-    private var pendingNotTodayIDs: [String: String] = [:]
-
     /// "Not today" for something on today's list beside the day's own
     /// workout (app-design-pass P30). A workout added for later is skipped;
     /// a weekday's add-on (Friday's core) gets a row of its own for today,
@@ -4179,9 +4174,18 @@ final class SyncModel: ObservableObject {
             return result != nil
         }
         guard item.source == .additional, let workout = item.workout else { return false }
+        // The session's id is saved before the create goes out, so a retry
+        // after a lost reply, even after a relaunch, reuses it. Receipts for
+        // past dates can no longer be retried.
         let key = today + "|" + workout.id
-        let id = pendingNotTodayIDs[key] ?? uuidFactory().uuidString
-        pendingNotTodayIDs[key] = id
+        var receipts = NotTodayReceiptStore.load(userID: accountID, defaults: defaults)
+            .filter { String($0.key.prefix(today.count)) >= today }
+        let id = receipts[key] ?? uuidFactory().uuidString
+        receipts[key] = id
+        guard NotTodayReceiptStore.save(receipts, userID: accountID, defaults: defaults) else {
+            loadError = "Couldn't save this change on your iPhone. Retry saved data, then try again."
+            return false
+        }
         let writer = setWriteAPI
         let result = await performRoutineMutation { (api, jwt) -> SessionRow in
             let created = try await writer.createAdditionalSession(
@@ -4189,7 +4193,10 @@ final class SyncModel: ObservableObject {
             if created.status == "skipped" { return created }
             return try await api.skipSession(sessionId: created.id, expectedAttempt: created.attempt, jwt: jwt)
         }
-        if result != nil { pendingNotTodayIDs[key] = nil }
+        if result != nil {
+            receipts[key] = nil
+            _ = NotTodayReceiptStore.save(receipts, userID: accountID, defaults: defaults)
+        }
         return result != nil
     }
 
