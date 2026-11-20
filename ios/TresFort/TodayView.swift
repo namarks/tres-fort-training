@@ -431,8 +431,13 @@ struct TodayView: View {
                     .environment(\.dynamicTypeSize, dynamicTypeSize)
             }
             .sheet(item: $previewTarget, onDismiss: { previewItem = nil }) { target in
+                let start = previewStart(for: target.id)
+                // A list row with nothing to start reads its details only:
+                // with no date, Details offers no "Schedule for today" that
+                // would put it in the day's own place.
+                let readOnly = start == nil && previewItem?.workout?.id == target.id
                 WorkoutDetailsView(sync: sync, workoutID: target.id,
-                                   date: sync.todayString, onStart: previewStart(for: target.id))
+                                   date: readOnly ? nil : sync.todayString, onStart: start)
             }
             .sheet(item: $unresolvedDate) { target in
                 NavigationStack {
