@@ -17,10 +17,11 @@ final class FreestyleJourneyTests: XCTestCase {
         app.launch()
         // Freestyle starts from Today itself on a day with nothing planned,
         // or from its "+" menu.
-        let quick = app.buttons["today.quick.freestyle"]
+        let quick = app.buttons["today.activity.lift"]
         if large, quick.waitForExistence(timeout: UITestWait.screen) {
-            let start = quick
-            XCTAssertEqual(start.label, "Freestyle lift")
+            reveal(quick, app: app); quick.tap()
+            let start = app.buttons["todayActivity.start"]
+            XCTAssertTrue(start.waitForExistence(timeout: UITestWait.screen))
             reveal(start, app: app); start.tap()
         } else {
             let more = app.buttons["today.moreWaysToTrain"]

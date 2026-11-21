@@ -103,7 +103,7 @@ final class TodayNavigationJourneyTests: XCTestCase {
         // display until one is turned on. Details, Change for today and Not
         // today are the up-next row's choices (app-design-pass P30).
         XCTAssertTrue(app.buttons["today.addAnotherWorkout"].exists)
-        XCTAssertFalse(app.buttons["today.quick.logActivity"].exists)
+        XCTAssertFalse(app.buttons["today.activity.run"].exists)
         XCTAssertFalse(app.navigationBars["Today"].buttons["today.ipadDisplay"].exists)
         capture("today-navigation")
         let details = app.todayChoice("today.viewWorkout")
@@ -147,6 +147,102 @@ final class TodayNavigationJourneyTests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Log activity"].waitForExistence(timeout: UITestWait.screen))
         capture("activity-destination")
         tap(app.navigationBars["Log activity"].buttons["Cancel"], in: app)
+    }
+
+    private func launchRestDay(largeText: Bool = false) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchEnvironment["TRESFORT_UI_FIXTURE"] = "app-store"
+        app.launchEnvironment["TRESFORT_UI_REST_DAY"] = "1"
+        if largeText { app.launchEnvironment["TRESFORT_UI_LARGE_TEXT"] = "1" }
+        app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["Rest day"].waitForExistence(timeout: UITestWait.screen))
+        return app
+    }
+
+    func testRestDayRunCanBePlannedWithoutStarting() {
+        let app = launchRestDay()
+        XCTAssertTrue(app.buttons["today.activity.swim"].isHittable, "Swimming is visible on Today")
+        capture("rest-day-activity-choices")
+        tap(app.buttons["today.activity.run"], in: app)
+        XCTAssertTrue(app.buttons["todayActivity.plan"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertTrue(app.buttons["todayActivity.start"].exists)
+        XCTAssertTrue(app.buttons["todayActivity.log"].exists)
+        XCTAssertFalse(app.buttons["runRecorder.close"].exists, "Choosing Run does not open a recorder")
+        capture("run-intent-choices")
+        tap(app.buttons["Cancel"], in: app)
+        XCTAssertTrue(app.staticTexts["Rest day"].waitForExistence(timeout: UITestWait.screen))
+        tap(app.buttons["today.activity.run"], in: app)
+        tap(app.buttons["todayActivity.plan"], in: app)
+        XCTAssertTrue(app.buttons["dayRun.save"].waitForExistence(timeout: UITestWait.screen))
+        capture("plan-run-for-today")
+        tap(app.buttons["dayRun.save"], in: app)
+        XCTAssertTrue(app.buttons["today.startRun"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertTrue(app.staticTexts["Easy run"].exists)
+        XCTAssertFalse(app.buttons["runRecorder.close"].exists, "Saving the plan does not start the run")
+        capture("planned-run-awaits-start")
+    }
+
+    func testRestDayRunCanOpenRecorderWithoutPlanning() {
+        let app = launchRestDay()
+        tap(app.buttons["today.activity.run"], in: app)
+        tap(app.buttons["todayActivity.start"], in: app)
+        XCTAssertTrue(app.buttons["runRecorder.close"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertFalse(app.buttons["dayRun.save"].exists)
+        capture("run-start-now")
+    }
+
+    func testRestDaySwimCanBePlannedWithoutLogging() {
+        let app = launchRestDay()
+        tap(app.buttons["today.activity.swim"], in: app)
+        XCTAssertTrue(app.buttons["todayActivity.plan"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertTrue(app.buttons["todayActivity.log"].exists)
+        XCTAssertFalse(app.buttons["todayActivity.start"].exists, "The app does not record live swims")
+        tap(app.buttons["todayActivity.plan"], in: app)
+        XCTAssertTrue(app.buttons["dayEndurance.save"].waitForExistence(timeout: UITestWait.screen))
+        capture("plan-swim-for-today")
+        tap(app.buttons["dayEndurance.save"], in: app)
+        XCTAssertTrue(app.buttons["today.logPlannedActivity"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertTrue(app.staticTexts["1000 yd swim"].exists)
+        XCTAssertFalse(app.navigationBars["Log activity"].exists, "Saving the swim only plans it")
+        capture("planned-swim-awaits-log")
+        tap(app.buttons["today.logPlannedActivity"], in: app)
+        XCTAssertTrue(app.navigationBars["Log activity"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertEqual(app.textFields["activity.title"].value as? String, "1000 yd swim")
+    }
+
+    func testRestDaySwimCanBeLoggedWithoutAConnection() {
+        let app = launchRestDay()
+        tap(app.buttons["today.activity.swim"], in: app)
+        tap(app.buttons["todayActivity.log"], in: app)
+        XCTAssertTrue(app.navigationBars["Log activity"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertEqual(app.textFields["activity.title"].value as? String, "Swim")
+        XCTAssertTrue(app.buttons["activity.save"].isEnabled)
+        capture("log-completed-swim")
+        tap(app.buttons["activity.save"], in: app)
+        XCTAssertTrue(app.navigationBars["Today"].waitForExistence(timeout: UITestWait.screen))
+        tap(app.tabBars.buttons["Activity"], in: app)
+        let swimEntry = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier BEGINSWITH 'activity.recent.' AND label CONTAINS %@", "Swim")).firstMatch
+        XCTAssertTrue(swimEntry.waitForExistence(timeout: UITestWait.screen), "The swim reaches activity history")
+    }
+
+    func testMoreActivitiesCanBeSearchedAndPlannedAtLargeText() {
+        let app = launchRestDay(largeText: true)
+        let more = app.buttons["today.activity.all"]
+        UITestScrolling.reveal(more, in: app, maxAttempts: 8, surface: app.scrollViews.firstMatch)
+        more.tap()
+        XCTAssertTrue(app.navigationBars["Choose activity"].waitForExistence(timeout: UITestWait.screen))
+        let search = app.searchFields.firstMatch
+        tap(search, in: app)
+        search.typeText("Tennis")
+        tap(app.buttons["todayActivity.sport.tennis"], in: app)
+        tap(app.buttons["todayActivity.plan"], in: app)
+        XCTAssertEqual(app.textFields["dayPick.name"].value as? String, "Tennis")
+        tap(app.buttons["workoutPicker.schedule"], in: app)
+        XCTAssertTrue(app.buttons["today.logPlannedActivity"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertTrue(app.staticTexts["Tennis"].exists)
+        capture("planned-tennis-large-text")
     }
 
     func testCalendarMovesAndRemovesOneDateWithoutChangingWeeklySchedule() {

@@ -232,6 +232,8 @@ struct TodayView: View {
     /// one-time notification permission prompt before a new workout.
     @State private var isPreparingWorkoutStart = false
     @State private var showFreestyle = false
+    @State private var activityChoice: IdentifiedString?
+    @State private var pendingActivityAction: TodayActivitySheet.Action?
     /// "Build a workout" in the + menu: the same picker as the card's Add
     /// another workout, for a day whose card doesn't carry that line.
     @State private var showAddWorkout = false
@@ -457,6 +459,14 @@ struct TodayView: View {
             .sheet(isPresented: $showOverridePicker) {
                 WorkoutsView(sync: sync, onStart: sync.todayIsCompleted ? nil : startChosenWorkout)
             }
+            .sheet(item: $activityChoice, onDismiss: performActivityAction) { choice in
+                TodayActivitySheet(sync: sync, date: sync.todayString,
+                                   initialKind: choice.id == "all" ? nil : choice.id,
+                                   canStartLift: canOfferFreestyle, canRecordRun: canOfferRecordRun,
+                                   canLog: canOfferLogActivity && onLogPlannedActivity != nil) {
+                    pendingActivityAction = $0
+                }
+            }
             .sheet(item: $showTodayPicker) { target in
                 WorkoutDatePickerView(sync: sync, date: target.id)
             }
@@ -599,14 +609,22 @@ struct TodayView: View {
         !sync.isFreestyle && sync.todayPreviewWorkout == nil && sync.todaySession == nil
             && todayArrangement(main: nil).lead == nil
     }
-    /// Record a run is a quick start for a member who runs, or whose plan
-    /// says nothing yet. A plan of workouts with no run keeps it in the +
-    /// menu only, so a lifter's Today isn't asking them to run.
-    private var quickStartsRun: Bool {
-        (sync.plan?.libraryWorkouts.isEmpty ?? true) || FirstRunSetup.plansRuns(sync.plan)
+    /// A sport is a choice of activity, not an instruction to start it.
+    private var hasQuickStarts: Bool {
+        canOfferFreestyle || canOfferLogActivity || canOfferRecordRun
     }
-    /// Something else to do today, shown on the Today screen itself.
-    private var hasQuickStarts: Bool { canOfferFreestyle || canOfferLogActivity || (canOfferRecordRun && quickStartsRun) }
+
+    /// Present a recorder or log only after the activity sheet has closed.
+    private func performActivityAction() {
+        let action = pendingActivityAction
+        pendingActivityAction = nil
+        switch action {
+        case .lift where canOfferFreestyle: showFreestyle = true
+        case .run where canOfferRecordRun: onRecordRun?()
+        case .log(let name) where canOfferLogActivity: onLogPlannedActivity?(name)
+        default: break
+        }
+    }
 
     /// Occasional ways to train and the saved workouts, kept off the main
     /// screen so today's workout and the week stay in front.
@@ -1267,9 +1285,7 @@ struct TodayView: View {
             .todayFootRow()
     }
 
-    /// Unplanned training among the plain rows of today's card: a freestyle
-    /// lift, a run to record or an activity that's already done. The + menu
-    /// keeps the same choices plus the occasional ones.
+    /// Choose a sport first, then explicitly plan, start or log it.
     @ViewBuilder private var somethingElse: some View {
         if hasQuickStarts {
             VStack(alignment: .leading, spacing: 8) {
@@ -1281,24 +1297,28 @@ struct TodayView: View {
         }
     }
 
-    @ViewBuilder private var quickStartButtons: some View {
-        let layout = dynamicTypeSize.isAccessibilitySize
-            ? AnyLayout(VStackLayout(spacing: 8))
-            : AnyLayout(HStackLayout(alignment: .top, spacing: 8))
-        layout {
-            if canOfferFreestyle {
-                quickStart("Lift", spokenLabel: sync.isFreestyle ? "Continue freestyle" : "Freestyle lift",
-                           systemImage: "figure.strengthtraining.traditional",
-                           identifier: "today.quick.freestyle") { showFreestyle = true }
+    private var quickStartButtons: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Plan for today, start now, or log completed.")
+                .font(.subheadline).foregroundStyle(Theme.muted)
+            let row = dynamicTypeSize.isAccessibilitySize
+                ? AnyLayout(VStackLayout(spacing: 8)) : AnyLayout(HStackLayout(spacing: 8))
+            row {
+                activityButton("Lift", kind: "lift", glyph: "figure.strengthtraining.traditional")
+                activityButton("Run", kind: "run", glyph: "figure.run")
             }
-            if canOfferRecordRun && quickStartsRun, let onRecordRun {
-                quickStart("Run", spokenLabel: "Record a run", systemImage: "figure.run",
-                           identifier: "today.quick.recordRun", action: onRecordRun)
+            row {
+                activityButton("Swim", kind: "swim", glyph: "figure.pool.swim")
+                activityButton("More activities", kind: "all", glyph: "sportscourt")
             }
-            if canOfferLogActivity, let onLogActivity {
-                quickStart("Log", spokenLabel: "Log an activity", systemImage: "square.and.pencil",
-                           identifier: "today.quick.logActivity", action: onLogActivity)
-            }
+        }
+    }
+
+    private func activityButton(_ title: String, kind: String, glyph: String) -> some View {
+        quickStart(title, spokenLabel: "\(title), choose how to add it",
+                   systemImage: glyph, identifier: "today.activity.\(kind)") {
+            pendingActivityAction = nil
+            activityChoice = IdentifiedString(id: kind)
         }
     }
 
@@ -1311,7 +1331,9 @@ struct TodayView: View {
                     .accessibilityHidden(true)
                 Text(title)
                     .font(.subheadline.weight(.semibold)).foregroundStyle(Theme.text)
-                    .lineLimit(1)
+                    .fixedSize(horizontal: false, vertical: true)
+                Image(systemName: "chevron.right").font(.caption.weight(.semibold))
+                    .foregroundStyle(Theme.accent).accessibilityHidden(true)
             }
             .padding(.horizontal, 8)
             .frame(maxWidth: .infinity, minHeight: 44)

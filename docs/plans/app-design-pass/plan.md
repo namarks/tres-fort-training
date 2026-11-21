@@ -1,6 +1,6 @@
 # App design pass
 
-Slug: app-design-pass · Status: active · Updated: 2026-11-20 · Theme: member-experience
+Slug: app-design-pass · Status: active · Updated: 2026-11-21 · Theme: member-experience
 
 ## Goal
 
@@ -774,6 +774,26 @@ line of their own. P30 builds that.
     `today-list` screen and the design system show the list. Needs a
     simulator capture and the owner's look on a TestFlight build like P5.
 
+- [ ] **P31 — Choose whether to plan, start or log an activity**
+  - A rest day's activity choices show Lift, Run, Swim and More activities.
+    Choosing a sport opens explicit Plan for today, Start now where supported,
+    and Log completed actions. More activities is searchable, and all choices
+    remain reachable at accessibility text sizes.
+  - Planning reuses the date-only editors and returns to Today with a pending
+    item in P30's day list. It does not start a session or create a completed
+    activity. Cancel leaves the day unchanged. Recording and logging open
+    only after the activity sheet closes.
+  - The selected sport seeds both its planner and its completed-activity log.
+    The log's presentation and initial name share one sheet identity so the
+    first opening cannot fall back to a different activity.
+  - Synthetic journeys cover planning a run or swim, starting a run, logging
+    a swim into history, canceling, searching another sport, and large text.
+    The public-repository implementation passes 33 focused unit tests and nine
+    UI journeys on an iPhone 17 simulator. Synthetic captures show the
+    [rest-day choices](today-activity-choices.png) and
+    [Run actions](today-run-intent.png). Device acceptance follows a separately
+    authorized client build.
+
 ## Execution frontier
 
 - P5
@@ -802,6 +822,7 @@ line of their own. P30 builds that.
 - P28
 - P29
 - P30
+- P31
 
 ## Dependencies
 
@@ -811,7 +832,12 @@ line of their own. P30 builds that.
 
 ## Next step
 
-**Now (@agent):** Run the release check on P30's branch for the Today
+**Now (@agent):** Complete the exact-head review and CI gate for P31's focused
+PR; the owner merges once Codex is clean and all four checks are green.
+The local build, 33 unit tests and nine UI journeys passed on the same iOS
+source, including P30's day list and the existing run-log and navigation flows.
+
+**Then (@agent):** Run the release check on P30's branch for the Today
 journeys (Details, Change for today and Not today now open from the
 up-next row's •••), and capture Today as one list from a simulator build
 (Nick's Friday core alone, a run day with a finished lift and core later,

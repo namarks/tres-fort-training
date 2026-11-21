@@ -97,7 +97,8 @@ struct ManualActivitySheet: View {
                     enduranceFields
                 } else {
                     Section("Title") {
-                        TextField("e.g. Pilates class", text: $title)
+                        TextField("Activity name", text: $title)
+                            .accessibilityIdentifier("activity.title")
                             .textInputAutocapitalization(.sentences)
                     }
                     Section("Duration") {
