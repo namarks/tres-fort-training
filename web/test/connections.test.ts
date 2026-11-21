@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { ConnectionRows } from '../src/SettingsPage';
 import { MCP_URL as WEBSITE_MCP_URL } from '../../website/connect.mjs';
 import { hashFor, viewFromHash } from '../src/App';
 import {
@@ -162,5 +165,30 @@ describe('addresses', () => {
     expect(hashFor({ kind: 'block', start: true })).toBe('#block/start');
     expect(hashFor({ kind: 'block' })).toBe('#block');
     expect(hashFor({ kind: 'setup' })).toBe('#setup');
+  });
+});
+
+describe('connection rows', () => {
+  const status = (intervals: object, whoop: object) => ({
+    accountId: 'member-1', reload: () => undefined,
+    me: { kind: 'ready' as const, value: { id: 'member-1', intervals } as never },
+    whoop: { kind: 'ready' as const, value: whoop as never },
+  });
+  const render = (detailed: boolean) => renderToStaticMarkup(createElement(ConnectionRows, {
+    status: status({ connected: false, needs_reauth: true }, { configured: true, connected: true, needs_reauth: true }),
+    onSignedOut: () => undefined, detailed,
+  }));
+
+  it('lets Settings disconnect a connection that needs reconnecting', () => {
+    const html = render(true);
+    expect(html).toContain('aria-label="Reconnect WHOOP"');
+    expect(html).toContain('aria-label="Disconnect WHOOP"');
+    expect(html).toContain('aria-label="Disconnect intervals.icu"');
+  });
+
+  it('offers only Reconnect in setup', () => {
+    const html = render(false);
+    expect(html).toContain('aria-label="Reconnect WHOOP"');
+    expect(html).not.toContain('Disconnect');
   });
 });

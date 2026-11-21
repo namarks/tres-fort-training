@@ -192,12 +192,13 @@ function ProviderActions({ line, name, provider, detailed, working, onConnect, o
   const busy = working !== null;
   if (line.state === 'unavailable') return null;
   if (line.state === 'unknown') return null;
-  if (line.state === 'disconnected' || line.state === 'reconnect') {
-    return <button type="button" className="ghost connect" disabled={busy} onClick={onConnect}
-      aria-label={`${line.state === 'reconnect' ? 'Reconnect' : 'Connect'} ${name}`}>
-      {working === `${provider}-connect` ? 'Opening…' : line.state === 'reconnect' ? 'Reconnect' : 'Connect'}
-    </button>;
-  }
+  const connectButton = <button type="button" className="ghost connect" disabled={busy} onClick={onConnect}
+    aria-label={`${line.state === 'reconnect' ? 'Reconnect' : 'Connect'} ${name}`}>
+    {working === `${provider}-connect` ? 'Opening…' : line.state === 'reconnect' ? 'Reconnect' : 'Connect'}
+  </button>;
+  if (line.state === 'disconnected') return connectButton;
+  // A connection that needs reconnecting can still be removed without it.
+  if (line.state === 'reconnect' && !detailed) return connectButton;
   if (!detailed) return <span className="connection-done">✓ Connected</span>;
   if (confirming) {
     return <span className="connection-confirm">
@@ -205,6 +206,12 @@ function ProviderActions({ line, name, provider, detailed, working, onConnect, o
       <button type="button" className="ghost small danger" disabled={busy} onClick={() => { setConfirming(false); onDisconnect(); }}>Disconnect</button>
       <button type="button" className="ghost small" onClick={() => setConfirming(false)}>Keep</button>
     </span>;
+  }
+  if (line.state === 'reconnect') {
+    return <>
+      {connectButton}
+      <button type="button" className="ghost small danger" disabled={busy} onClick={() => setConfirming(true)} aria-label={`Disconnect ${name}`}>Disconnect</button>
+    </>;
   }
   return <>
     {onSync && <button type="button" className="ghost small" disabled={busy} onClick={onSync} aria-label={`Sync ${name} now`}>
