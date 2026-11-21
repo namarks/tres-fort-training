@@ -188,6 +188,16 @@ describe('connecting intervals.icu from the web app', () => {
     const unknown = await SELF.fetch(`${BASE}/auth/intervals/callback?code=abc&state=web.${'0'.repeat(64)}`, { redirect: 'manual' });
     expect(unknown.headers.get('location')).toBe('https://web.example/#settings/connections?provider=intervals&error=bad_state');
   });
+
+  it('refuses to start for a tab that shows another account', async () => {
+    const r = await SELF.fetch(`${BASE}/auth/dev`, { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ secret: 'test-dev', client: 'web' }) });
+    const { jwt } = await r.json<{ jwt: string }>();
+    const start = await SELF.fetch(`${BASE}/auth/intervals/start`, { method: 'POST',
+      headers: { Authorization: `Bearer ${jwt}`, 'X-TresFort-Account': 'someone-else' } });
+    expect(start.status).toBe(409);
+    expect(await start.json()).toEqual({ error: 'account_changed' });
+  });
 });
 
 describe('GET /auth/intervals/callback (pre-exchange branches)', () => {

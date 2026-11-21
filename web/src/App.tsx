@@ -284,7 +284,7 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
     if (!arrival || !('completion' in arrival) || finishing.has(arrival.completion)) return;
     finishing.add(arrival.completion);
     const name = PROVIDER_NAMES[arrival.provider];
-    connectionWrites.finish(arrival.provider, arrival.completion)
+    connectionWrites.finish(arrival.provider, arrival.completion, me.id)
       .then(() => setNotice({ kind: 'done', text: `${name} is connected. Your workouts from it will show up shortly.` }))
       .catch((error: unknown) => {
         if (error instanceof SignedOutError) { onSignedOut(error); return; }
@@ -292,7 +292,7 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
         setNotice({ kind: 'error', text: connectErrorText(arrival.provider, typeof code === 'string' ? code : 'failed') });
       })
       .finally(() => setConnections((value) => value + 1));
-  }, [arrival, onSignedOut]);
+  }, [arrival, me.id, onSignedOut]);
 
   // The exercise list names exercises for editing, for adding a lift to a
   // day and on the Activity page, so it loads with any of those views.
@@ -400,7 +400,7 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
         <SetupFlow accountId={me.id} state={state} write={write} busy={busy} catalog={catalog ?? { kind: 'loading' }}
           miles={prefersMiles()} refresh={connections} onSignedOut={onSignedOut} onExit={leaveSetup} />
       ) : view.kind === 'settings' ? (
-        <SettingsPage section={view.section} refresh={connections} onSignedOut={onSignedOut} />
+        <SettingsPage accountId={me.id} section={view.section} refresh={connections} onSignedOut={onSignedOut} />
       ) : view.kind === 'diagnostics' && isOwner ? (
         <DiagnosticsPage onSignedOut={onSignedOut} />
       ) : view.kind === 'members' && isOwner ? (

@@ -397,11 +397,14 @@ describe('API forwarding', () => {
       ['/connect/whoop/start', '/auth/whoop/start'],
       ['/connect/whoop/finish', '/auth/whoop/finish'],
     ] as const) {
-      const response = await handle(new Request(`${ORIGIN}${path}?ignored=1`, { method: 'POST', headers: writeHeaders, body: '{"completion":"c"}' }), env);
+      const response = await handle(new Request(`${ORIGIN}${path}?ignored=1`, { method: 'POST',
+        headers: { ...writeHeaders, 'x-tresfort-account': 'member-1' }, body: '{"completion":"c"}' }), env);
       expect(response.status, path).toBe(200);
       const sent = apiFetch.mock.calls.at(-1)![0] as Request;
       expect(new URL(sent.url).pathname + new URL(sent.url).search).toBe(upstream);
       expect(sent.headers.get('authorization')).toBe(`Bearer ${WEB_JWT}`);
+      // The tab's account goes along, so the API refuses a switched session.
+      expect(sent.headers.get('x-tresfort-account')).toBe('member-1');
       expect(await sent.text()).toBe('{"completion":"c"}');
     }
     const calls = apiFetch.mock.calls.length;

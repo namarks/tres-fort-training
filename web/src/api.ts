@@ -128,10 +128,11 @@ async function request<T>(method: string, path: string, body?: unknown, expected
   return payload as T;
 }
 
-const getJson = <T>(path: string) => request<T>('GET', path);
+const getJson = <T>(path: string, expectedAccountId?: string) => request<T>('GET', path, undefined, expectedAccountId);
 
-export async function fetchMe(): Promise<Me> {
-  const me = await getJson<Me>('/api/me');
+/** With an account, the read is refused if another tab has signed in as someone else. */
+export async function fetchMe(expectedAccountId?: string): Promise<Me> {
+  const me = await getJson<Me>('/api/me', expectedAccountId);
   if (!me || typeof me.id !== 'string' || !me.id) throw new Error('missing_account_identity');
   return me;
 }
@@ -414,8 +415,8 @@ export async function decideCoachRequest(id: string, allow: boolean, account: st
 
 // ---- Settings: connections and AI coach --------------------------------------
 
-export const fetchWhoopStatus = () => getJson<WhoopStatus>('/api/me/whoop');
-export const fetchCoachGrants = async () => (await getJson<{ grants: CoachGrant[] }>('/api/me/coach-grants')).grants;
+export const fetchWhoopStatus = (accountId: string) => getJson<WhoopStatus>('/api/me/whoop', accountId);
+export const fetchCoachGrants = async (accountId: string) => (await getJson<{ grants: CoachGrant[] }>('/api/me/coach-grants', accountId)).grants;
 
 /**
  * Connecting a provider leaves the page for the provider's sign-in. The
@@ -423,16 +424,21 @@ export const fetchCoachGrants = async () => (await getJson<{ grants: CoachGrant[
  * the provider sends the browser back to Settings → Connections with a
  * completion only this session can finish.
  */
+/** Each write names the account the tab shows, so a sign-in as someone else
+ * in another tab stops it (409 account_changed) instead of retargeting it. */
 export const connectionWrites = {
-  start: (provider: ConnectProvider) => request<{ authorize_url: string }>('POST', `/connect/${provider}/start`, {}),
-  finish: (provider: ConnectProvider, completion: string) =>
-    request<{ connected: true }>('POST', `/connect/${provider}/finish`, { completion }),
-  syncIntervals: (expectedGeneration: number) =>
-    request('POST', '/api/me/integrations/intervals/sync', { expected_generation: expectedGeneration }),
-  disconnectIntervals: () => request('PATCH', '/api/me/integrations/intervals', { api_key: null, athlete_id: null }),
-  syncWhoop: () => request('POST', '/api/me/whoop/sync', {}),
-  disconnectWhoop: () => request('DELETE', '/api/me/whoop'),
-  setHealthSharing: (enabled: boolean) => request('PATCH', '/api/me/health-sharing', { enabled }),
-  removeCoachGrant: (grantId: string) => request('DELETE', `/api/me/coach-grants/${encodeURIComponent(grantId)}`),
-  removeAllCoachGrants: () => request('DELETE', '/api/me/coach-grants'),
+  start: (provider: ConnectProvider, accountId: string) =>
+    request<{ authorize_url: string }>('POST', `/connect/${provider}/start`, {}, accountId),
+  finish: (provider: ConnectProvider, completion: string, accountId: string) =>
+    request<{ connected: true }>('POST', `/connect/${provider}/finish`, { completion }, accountId),
+  syncIntervals: (expectedGeneration: number, accountId: string) =>
+    request('POST', '/api/me/integrations/intervals/sync', { expected_generation: expectedGeneration }, accountId),
+  disconnectIntervals: (accountId: string) =>
+    request('PATCH', '/api/me/integrations/intervals', { api_key: null, athlete_id: null }, accountId),
+  syncWhoop: (accountId: string) => request('POST', '/api/me/whoop/sync', {}, accountId),
+  disconnectWhoop: (accountId: string) => request('DELETE', '/api/me/whoop', undefined, accountId),
+  setHealthSharing: (enabled: boolean, accountId: string) => request('PATCH', '/api/me/health-sharing', { enabled }, accountId),
+  removeCoachGrant: (grantId: string, accountId: string) =>
+    request('DELETE', `/api/me/coach-grants/${encodeURIComponent(grantId)}`, undefined, accountId),
+  removeAllCoachGrants: (accountId: string) => request('DELETE', '/api/me/coach-grants', undefined, accountId),
 };

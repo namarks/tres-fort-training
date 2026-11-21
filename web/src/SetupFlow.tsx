@@ -65,7 +65,7 @@ export function SetupFlow({ accountId, state, write, busy, catalog, miles, refre
         onNext={() => setStep(2)} />}
       {step === 2 && <GoalStep state={state} write={write} busy={busy} miles={miles} buildBlock={buildBlock}
         onBuildBlock={setBuildBlock} onBack={() => setStep(1)} onNext={() => setStep(3)} />}
-      {step === 3 && <ConnectStep refresh={refresh} onSignedOut={onSignedOut} onBack={() => setStep(2)}
+      {step === 3 && <ConnectStep accountId={accountId} refresh={refresh} onSignedOut={onSignedOut} onBack={() => setStep(2)}
         onLeaving={() => rememberSetupStep(session, accountId, 3)}
         onCoach={() => leave('#settings/coach', true)}
         onFinish={() => leave(buildBlock && state.plan?.race ? '#block/start' : '#plan', true)} />}
@@ -202,11 +202,11 @@ function GoalStep({ state, write, busy, miles, buildBlock, onBuildBlock, onBack,
 
 // ---- Step 3: connect apps -----------------------------------------------------
 
-function ConnectStep({ refresh, onSignedOut, onBack, onLeaving, onCoach, onFinish }: {
-  refresh: number; onSignedOut: (error?: unknown) => void; onBack: () => void;
+function ConnectStep({ accountId, refresh, onSignedOut, onBack, onLeaving, onCoach, onFinish }: {
+  accountId: string; refresh: number; onSignedOut: (error?: unknown) => void; onBack: () => void;
   onLeaving: () => void; onCoach: () => void; onFinish: () => void;
 }) {
-  const status = useConnectionStatus(refresh, onSignedOut);
+  const status = useConnectionStatus(accountId, refresh, onSignedOut);
   return (
     <section className="first-run-step" aria-labelledby="setup-title">
       <h1 id="setup-title">Bring in your workouts</h1>

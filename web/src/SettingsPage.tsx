@@ -36,7 +36,9 @@ export type SettingsSection = 'connections' | 'coach';
  * same connect flow as the iPhone. Garmin stays hidden here until it opens
  * to members.
  */
-export function SettingsPage({ section, refresh, onSignedOut }: {
+export function SettingsPage({ accountId, section, refresh, onSignedOut }: {
+  /** The account this tab shows; every read and write is bound to it. */
+  accountId: string;
   section: SettingsSection;
   /** Bumped after a connection finishes, so statuses are read again. */
   refresh: number;
@@ -51,8 +53,8 @@ export function SettingsPage({ section, refresh, onSignedOut }: {
       </nav>
       <div className="settings-body">
         {section === 'connections'
-          ? <ConnectionsSettings refresh={refresh} onSignedOut={onSignedOut} />
-          : <CoachSettings onSignedOut={onSignedOut} />}
+          ? <ConnectionsSettings accountId={accountId} refresh={refresh} onSignedOut={onSignedOut} />
+          : <CoachSettings accountId={accountId} onSignedOut={onSignedOut} />}
       </div>
     </main>
   );
@@ -61,23 +63,23 @@ export function SettingsPage({ section, refresh, onSignedOut }: {
 type Loaded<T> = { kind: 'loading' } | { kind: 'error' } | { kind: 'ready'; value: T };
 
 /** The member's connection statuses, read fresh (GET /api/me and /api/me/whoop). */
-export function useConnectionStatus(refresh: number, onSignedOut: (error?: unknown) => void) {
+export function useConnectionStatus(accountId: string, refresh: number, onSignedOut: (error?: unknown) => void) {
   const [me, setMe] = useState<Loaded<Me>>({ kind: 'loading' });
   const [whoop, setWhoop] = useState<Loaded<WhoopStatus>>({ kind: 'loading' });
   const [tick, setTick] = useState(0);
   useEffect(() => {
     let live = true;
-    fetchMe().then((value) => live && setMe({ kind: 'ready', value }))
+    fetchMe(accountId).then((value) => live && setMe({ kind: 'ready', value }))
       .catch((error: unknown) => { if (!live) return; if (error instanceof SignedOutError) onSignedOut(error); else setMe({ kind: 'error' }); });
-    fetchWhoopStatus().then((value) => live && setWhoop({ kind: 'ready', value }))
+    fetchWhoopStatus(accountId).then((value) => live && setWhoop({ kind: 'ready', value }))
       .catch((error: unknown) => { if (!live) return; if (error instanceof SignedOutError) onSignedOut(error); else setWhoop({ kind: 'error' }); });
     return () => { live = false; };
-  }, [refresh, tick, onSignedOut]);
-  return { me, whoop, reload: useCallback(() => setTick((value) => value + 1), []) };
+  }, [accountId, refresh, tick, onSignedOut]);
+  return { accountId, me, whoop, reload: useCallback(() => setTick((value) => value + 1), []) };
 }
 
-function ConnectionsSettings({ refresh, onSignedOut }: { refresh: number; onSignedOut: (error?: unknown) => void }) {
-  const status = useConnectionStatus(refresh, onSignedOut);
+function ConnectionsSettings({ accountId, refresh, onSignedOut }: { accountId: string; refresh: number; onSignedOut: (error?: unknown) => void }) {
+  const status = useConnectionStatus(accountId, refresh, onSignedOut);
   return (
     <section aria-labelledby="connections-title">
       <h1 id="connections-title">Connections</h1>
@@ -107,7 +109,7 @@ export function ConnectionRows({ status, onSignedOut, detailed = false, onLeavin
 }) {
   const [working, setWorking] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
-  const { me, whoop, reload } = status;
+  const { accountId, me, whoop, reload } = status;
   const intervals = me.kind === 'ready' ? me.value.intervals : me.kind === 'error' ? null : undefined;
   const whoopStatus = whoop.kind === 'ready' ? whoop.value : whoop.kind === 'error' ? null : undefined;
 
@@ -122,7 +124,7 @@ export function ConnectionRows({ status, onSignedOut, detailed = false, onLeavin
   const connect = async (provider: ConnectProvider) => {
     setWorking(`${provider}-connect`); setProblem(null);
     try {
-      const { authorize_url: target } = await connectionWrites.start(provider);
+      const { authorize_url: target } = await connectionWrites.start(provider, accountId);
       const url = new URL(target);
       if (url.protocol !== 'https:') throw new Error('unexpected_authorize_url');
       onLeaving?.();
@@ -142,14 +144,14 @@ export function ConnectionRows({ status, onSignedOut, detailed = false, onLeavin
       <ConnectionRow logo="i.i" tone="intervals" name="intervals.icu" line={intervalsState}>
         {intervalsState && <ProviderActions line={intervalsState} name="intervals.icu" detailed={detailed} working={working} provider="intervals"
           onConnect={() => connect('intervals')}
-          onSync={intervals ? () => run('intervals-sync', () => connectionWrites.syncIntervals(intervals.credential_generation), 'intervals.icu couldn’t sync just now. Try again in a minute.') : undefined}
-          onDisconnect={() => run('intervals-disconnect', connectionWrites.disconnectIntervals, 'intervals.icu couldn’t be disconnected. Try again.')} />}
+          onSync={intervals ? () => run('intervals-sync', () => connectionWrites.syncIntervals(intervals.credential_generation, accountId), 'intervals.icu couldn’t sync just now. Try again in a minute.') : undefined}
+          onDisconnect={() => run('intervals-disconnect', () => connectionWrites.disconnectIntervals(accountId), 'intervals.icu couldn’t be disconnected. Try again.')} />}
       </ConnectionRow>
       <ConnectionRow logo="W" tone="whoop" name="WHOOP" line={whoopState}>
         {whoopState && <ProviderActions line={whoopState} name="WHOOP" detailed={detailed} working={working} provider="whoop"
           onConnect={() => connect('whoop')}
-          onSync={() => run('whoop-sync', connectionWrites.syncWhoop, 'WHOOP couldn’t sync just now. Try again in a minute.')}
-          onDisconnect={() => run('whoop-disconnect', connectionWrites.disconnectWhoop, 'WHOOP couldn’t be disconnected. Try again.')} />}
+          onSync={() => run('whoop-sync', () => connectionWrites.syncWhoop(accountId), 'WHOOP couldn’t sync just now. Try again in a minute.')}
+          onDisconnect={() => run('whoop-disconnect', () => connectionWrites.disconnectWhoop(accountId), 'WHOOP couldn’t be disconnected. Try again.')} />}
       </ConnectionRow>
       <ConnectionRow logo="♥" tone="health" name="Apple Health" phone
         line={{ state: 'unavailable', text: 'Connects on iPhone only, because a browser can’t read Apple Health. Open Très Fort on your iPhone, then Profile → Connections → Apple Health.' }}>
@@ -158,7 +160,7 @@ export function ConnectionRows({ status, onSignedOut, detailed = false, onLeavin
       {detailed && me.kind === 'ready' && (
         <label className="check settings-switch">
           <input type="checkbox" checked={!!me.value.health?.sharing_in_group} disabled={working !== null}
-            onChange={(event) => run('health', () => connectionWrites.setHealthSharing(event.target.checked), 'That setting didn’t save. Try again.')} />
+            onChange={(event) => run('health', () => connectionWrites.setHealthSharing(event.target.checked, accountId), 'That setting didn’t save. Try again.')} />
           Show my Apple Health workouts to my group
         </label>
       )}
@@ -213,7 +215,7 @@ function ProviderActions({ line, name, provider, detailed, working, onConnect, o
 
 // ---- AI coach -----------------------------------------------------------------
 
-function CoachSettings({ onSignedOut }: { onSignedOut: (error?: unknown) => void }) {
+function CoachSettings({ accountId, onSignedOut }: { accountId: string; onSignedOut: (error?: unknown) => void }) {
   const [grants, setGrants] = useState<Loaded<CoachGrant[]>>({ kind: 'loading' });
   const [tick, setTick] = useState(0);
   const [working, setWorking] = useState<string | null>(null);
@@ -222,15 +224,15 @@ function CoachSettings({ onSignedOut }: { onSignedOut: (error?: unknown) => void
   const [copied, setCopied] = useState(false);
   useEffect(() => {
     let live = true;
-    fetchCoachGrants().then((value) => live && setGrants({ kind: 'ready', value }))
+    fetchCoachGrants(accountId).then((value) => live && setGrants({ kind: 'ready', value }))
       .catch((error: unknown) => { if (!live) return; if (error instanceof SignedOutError) onSignedOut(error); else setGrants({ kind: 'error' }); });
     return () => { live = false; };
-  }, [tick, onSignedOut]);
+  }, [accountId, tick, onSignedOut]);
   const remove = async (grantId: string | null) => {
     setWorking(grantId ?? 'all'); setProblem(null); setConfirming(null);
     try {
-      if (grantId) await connectionWrites.removeCoachGrant(grantId);
-      else await connectionWrites.removeAllCoachGrants();
+      if (grantId) await connectionWrites.removeCoachGrant(grantId, accountId);
+      else await connectionWrites.removeAllCoachGrants(accountId);
       setTick((value) => value + 1);
     } catch (error) {
       if (error instanceof SignedOutError) onSignedOut(error);
