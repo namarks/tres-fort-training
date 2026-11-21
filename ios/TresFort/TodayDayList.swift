@@ -42,7 +42,7 @@ enum TodayDayList {
         let line: String
         switch item.status {
         case "completed":
-            line = "Done" + (item.workout.map { exerciseCount($0) }.map { " · \($0)" } ?? "")
+            line = "Done" + (item.workout.flatMap(exerciseCount).map { " · \($0)" } ?? "")
         case "logged": line = "Logged"
         case "skipped": line = skippedLabel
         case "in_progress": line = "In progress · \(base)"
