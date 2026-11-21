@@ -441,7 +441,8 @@ struct TodayView: View {
                 // here: that change would replace the day's own workout.
                 WorkoutDetailsView(sync: sync, workoutID: target.id,
                                    date: readOnly ? nil : sync.todayString, onStart: start,
-                                   changesForDate: !(fromRow && previewItem?.source != .primary))
+                                   changesForDate: !(fromRow && previewItem?.source != .primary),
+                                   startScopedByCaller: fromRow && start != nil)
             }
             .sheet(item: $unresolvedDate) { target in
                 NavigationStack {

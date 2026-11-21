@@ -14,6 +14,10 @@ struct WorkoutDetailsView: View {
     /// opens a workout beside the day's own here, and a change for the
     /// day would land in the day's own place (app-design-pass P30).
     var changesForDate = true
+    /// True when `onStart` belongs to one of Today's list rows, which
+    /// already decided whether its own session can start; the day's main
+    /// session being finished or blocked doesn't stop a sibling (P30).
+    var startScopedByCaller = false
     var isPushed = false
     @Environment(\.dismiss) private var dismiss
     @State private var editing = false
@@ -316,9 +320,9 @@ struct WorkoutDetailsView: View {
             if let onStart {
                 Button(canResume ? "Continue workout" : "Start this workout") { onStart(workout.id) }
                     .buttonStyle(WorkoutPrimaryButtonStyle())
-                    .disabled(workout.exercises.isEmpty || anotherIsRunning
-                        || (sync.blocksNewWorkoutStart && !canResume)
-                        || sync.todayIsCompleted || sync.isRoutineMutationInFlight)
+                    .disabled(workout.exercises.isEmpty || anotherIsRunning || sync.isRoutineMutationInFlight
+                        || (!startScopedByCaller
+                            && ((sync.blocksNewWorkoutStart && !canResume) || sync.todayIsCompleted)))
                     .accessibilityIdentifier("workoutDetails.start")
                 Text(anotherIsRunning ? "Finish the workout in progress before starting another."
                      : "Today only. Weekly schedule unchanged.")
