@@ -18,7 +18,7 @@ final class TodayNavigationJourneyTests: XCTestCase {
         if let creationFailure { app.launchEnvironment["TRESFORT_UI_CREATE_FAILURE"] = creationFailure }
         app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US", "-restAudioCuesEnabled", restCues ? "YES" : "NO"]
         app.launch()
-        XCTAssertTrue(app.buttons["today.viewWorkout"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertTrue(app.todayUpNext.waitForExistence(timeout: UITestWait.screen))
         return app
     }
     private func tap(_ element: XCUIElement, in app: XCUIApplication) {
@@ -60,25 +60,27 @@ final class TodayNavigationJourneyTests: XCTestCase {
             .press(forDuration: 0.05, thenDragTo: origin.withOffset(CGVector(dx: to, dy: y)))
     }
 
-    /// A sideways swipe on Today's card shows the days around it, and one
-    /// tap comes back (app-design-pass P20).
+    /// A sideways swipe on Today's up-next row shows the days around it, and
+    /// one tap comes back (app-design-pass P20, P30).
     func testSwipingTodaysCardShowsOtherDaysAndComesBack() {
         let app = launch()
-        swipeDay(at: app.buttons["today.viewWorkout"], later: true, in: app)
+        swipeDay(at: app.todayUpNext, later: true, in: app)
         let relative = app.staticTexts["today.otherDay.relative"]
         XCTAssertTrue(relative.waitForExistence(timeout: UITestWait.screen))
         XCTAssertEqual(relative.label, "Tomorrow")
         XCTAssertFalse(app.buttons["dayChange.cancel"].exists,
                        "Swiping across Swap must not also activate that button")
         swipeDay(at: relative, later: false, in: app)
-        XCTAssertTrue(app.buttons["today.viewWorkout"].waitForExistence(timeout: UITestWait.screen))
-        swipeDay(at: app.buttons["today.viewWorkout"], later: false, in: app)
+        XCTAssertTrue(app.todayUpNext.waitForExistence(timeout: UITestWait.screen))
+        swipeDay(at: app.todayUpNext, later: false, in: app)
         XCTAssertTrue(relative.waitForExistence(timeout: UITestWait.screen))
         XCTAssertEqual(relative.label, "Yesterday")
         XCTAssertFalse(app.navigationBars["Strength A"].exists,
-                       "Swiping across View details must not also open the workout")
+                       "Swiping across the up-next row must not also open the workout")
+        XCTAssertFalse(app.buttons["today.viewWorkout"].exists,
+                       "Swiping across the up-next row must not also open its choices")
         tap(app.buttons["today.backToToday"], in: app)
-        XCTAssertTrue(app.buttons["today.viewWorkout"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertTrue(app.todayUpNext.waitForExistence(timeout: UITestWait.screen))
         XCTAssertFalse(relative.exists)
     }
 
@@ -97,14 +99,17 @@ final class TodayNavigationJourneyTests: XCTestCase {
         let app = launch()
         XCTAssertFalse(app.buttons["Workout options"].exists)
         XCTAssertFalse(app.buttons["today.createWorkout"].exists)
-        // A planned day changes through Swap, so unplanned training waits in
-        // the + menu, as does the iPad display until one is turned on.
-        XCTAssertTrue(app.buttons["today.viewWorkout"].waitForExistence(timeout: UITestWait.screen))
-        XCTAssertTrue(app.buttons["today.skipWorkout"].exists)
+        // Unplanned training waits in Add to today, as does the iPad
+        // display until one is turned on. Details, Change for today and Not
+        // today are the up-next row's choices (app-design-pass P30).
+        XCTAssertTrue(app.buttons["today.addAnotherWorkout"].exists)
         XCTAssertFalse(app.buttons["today.quick.logActivity"].exists)
         XCTAssertFalse(app.navigationBars["Today"].buttons["today.ipadDisplay"].exists)
         capture("today-navigation")
-        tap(app.buttons["today.viewWorkout"], in: app)
+        let details = app.todayChoice("today.viewWorkout")
+        XCTAssertTrue(app.buttons["today.changeWorkout"].exists)
+        XCTAssertTrue(app.buttons["today.skipWorkout"].exists)
+        tap(details, in: app)
         XCTAssertTrue(app.navigationBars["Strength A"].waitForExistence(timeout: UITestWait.screen))
         // Edit on a date's workout asks: this day only, or the saved one.
         tap(app.buttons["workoutDetails.edit"], in: app)
@@ -214,7 +219,7 @@ final class TodayNavigationJourneyTests: XCTestCase {
         app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US",
                                "-com.nmarkspdx.tresfort.weight-entry-unit", "lb"]
         app.launch()
-        XCTAssertTrue(app.buttons["today.viewWorkout"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertTrue(app.todayUpNext.waitForExistence(timeout: UITestWait.screen))
         return app
     }
 
@@ -327,7 +332,7 @@ final class TodayNavigationJourneyTests: XCTestCase {
 
     func testChangeTodayUsesDatePickerAndPreservesLibraryManagementRoute() {
         let app = launch()
-        tap(app.buttons["today.changeWorkout"], in: app)
+        tap(app.todayChoice("today.changeWorkout"), in: app)
         XCTAssertTrue(app.navigationBars["Swap Tuesday's lift"].waitForExistence(timeout: UITestWait.screen))
         XCTAssertTrue(app.buttons["dayChange.rest"].exists, "Swap also offers a rest day")
         XCTAssertFalse(app.buttons["Actions for Strength A"].exists)

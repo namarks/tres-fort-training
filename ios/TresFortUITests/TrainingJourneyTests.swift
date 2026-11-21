@@ -410,6 +410,10 @@ final class TrainingJourneyTests: XCTestCase {
         XCTAssertTrue(add.waitForExistence(timeout: UITestWait.screen)); add.tap()
         let saved = app.buttons["additional.workout.synthetic-day"]
         XCTAssertTrue(saved.waitForExistence(timeout: UITestWait.screen)); saved.tap()
+        // Choosing a workout offers Start now or Add for later
+        // (app-design-pass P30).
+        let startNow = app.buttons["additional.startNow"]
+        XCTAssertTrue(startNow.waitForExistence(timeout: UITestWait.screen)); startNow.tap()
         // The initial fixture starts its runner directly. This explicit start
         // is therefore the first notification-permission request on a fresh
         // simulator. A passive existence wait does not run XCTest's default

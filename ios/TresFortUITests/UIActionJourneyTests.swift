@@ -115,7 +115,7 @@ final class UIActionJourneyTests: XCTestCase {
 
     func testEditorUsesExplicitReorderingAndConfirmedRemoval() {
         let app = launch()
-        tap(app.buttons["today.viewWorkout"], in: app)
+        tap(app.todayChoice("today.viewWorkout"), in: app)
         tap(app.buttons["workoutDetails.edit"], in: app)
         // Edit on today's workout asks: today only, or the saved workout.
         tap(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Edit your saved'")).firstMatch, in: app)

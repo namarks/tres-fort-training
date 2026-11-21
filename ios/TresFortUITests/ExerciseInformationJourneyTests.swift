@@ -37,8 +37,7 @@ final class ExerciseInformationJourneyTests: XCTestCase {
 
     func testWorkoutPreviewShowsTechniqueComparableSessionAndFullHistory() {
         let app = launch("app-store")
-        let preview = app.buttons["today.viewWorkout"]
-        XCTAssertTrue(preview.waitForExistence(timeout: UITestWait.screen)); preview.tap()
+        app.todayChoice("today.viewWorkout").tap()
         openInfo("Barbell Squat", in: app)
         XCTAssertTrue(app.staticTexts["MUSCLES"].exists)
         capture("exercise-information-technique")

@@ -19,8 +19,13 @@ final class TodayAgendaJourneyTests: XCTestCase {
         if largeText { app.launchEnvironment["TRESFORT_UI_LARGE_TEXT"] = "1" }
         app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US", "-restAudioCuesEnabled", "NO"]
         app.launch()
-        XCTAssertTrue(app.staticTexts["TODAY'S AGENDA"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertTrue(dayList(app).waitForExistence(timeout: UITestWait.screen))
         return app
+    }
+
+    /// Today's day as one list (app-design-pass P30).
+    private func dayList(_ app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any)["today.dayList"]
     }
 
     private func tap(_ element: XCUIElement, in app: XCUIApplication) {
@@ -34,7 +39,9 @@ final class TodayAgendaJourneyTests: XCTestCase {
         let run = app.staticTexts["today.agenda.status.primary"]
         let core = app.staticTexts["today.agenda.status.scheduled:agenda-core"]
         let walk = app.staticTexts["today.agenda.status.scheduled:agenda-walk"]
-        XCTAssertTrue(run.label.contains("7:00"))
+        // The run leads on navy, its time in its Up next line.
+        XCTAssertTrue(app.todayUpNext.staticTexts["today.agenda.status.primary"].exists)
+        XCTAssertGreaterThan(app.todayUpNext.staticTexts.matching(NSPredicate(format: "label CONTAINS '7:00'")).count, 0)
         XCTAssertTrue(core.label.contains("6:00"))
         XCTAssertTrue(walk.label.contains("8:00"))
         XCTAssertLessThan(run.frame.minY, core.frame.minY)
@@ -48,8 +55,9 @@ final class TodayAgendaJourneyTests: XCTestCase {
     func testCoreStartsAndCompletesIndependentlyAfterRun() {
         let app = launch(completedRun: true)
         let runStatus = app.staticTexts["today.agenda.status.session:agenda-run-session"]
-        XCTAssertTrue(runStatus.label.contains("Complete"))
-        XCTAssertTrue(app.staticTexts["today.agenda.status.scheduled:agenda-core"].label.contains("Planned"))
+        XCTAssertTrue(runStatus.label.hasPrefix("Done"))
+        // With the run done, core leads.
+        XCTAssertTrue(app.todayUpNext.staticTexts["today.agenda.status.scheduled:agenda-core"].exists)
         tap(app.buttons["today.scheduledAdditional.agenda-core"], in: app)
         let allow = XCUIApplication(bundleIdentifier: "com.apple.springboard").alerts.buttons["Allow"]
         if allow.waitForExistence(timeout: 5) { allow.tap() }
@@ -57,14 +65,14 @@ final class TodayAgendaJourneyTests: XCTestCase {
         XCTAssertTrue(start.waitForExistence(timeout: UITestWait.screen)); start.tap()
         let finish = app.buttons["FINISH"]
         XCTAssertTrue(finish.waitForExistence(timeout: UITestWait.screen)); finish.tap()
-        XCTAssertTrue(app.staticTexts["TODAY'S AGENDA"].waitForExistence(timeout: UITestWait.screen))
-        XCTAssertTrue(runStatus.label.contains("Complete"))
+        XCTAssertTrue(dayList(app).waitForExistence(timeout: UITestWait.screen))
+        XCTAssertTrue(runStatus.label.hasPrefix("Done"))
         XCTAssertFalse(app.buttons["today.scheduledAdditional.agenda-core"].exists)
-        XCTAssertTrue(app.buttons["today.session.1"].label.contains("Complete"))
-        tap(app.buttons["today.session.0"], in: app)
-        XCTAssertTrue(app.buttons["today.session.0"].isSelected)
-        tap(app.buttons["today.session.1"], in: app)
-        XCTAssertTrue(app.buttons["today.session.1"].isSelected)
+        let coreDone = app.staticTexts.matching(NSPredicate(
+            format: "identifier BEGINSWITH 'today.agenda.status.session:' AND label == 'Done · 1 exercise'"))
+        XCTAssertEqual(coreDone.count, 1, "Core shrinks to a check and what was done")
+        // The walk is all that's left, so it leads.
+        XCTAssertTrue(app.todayUpNext.buttons["today.extra.log.agenda-walk"].exists)
     }
 
     func testAgendaActionsRemainReachableAtLargestTextSize() {

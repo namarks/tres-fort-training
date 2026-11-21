@@ -331,9 +331,7 @@ final class WeeklyScheduleJourneyTests: XCTestCase {
 
     func testWorkoutStartStaysVisibleWhilePreviewScrolls() {
         let app = launch(fixture: "app-store")
-        let details = app.buttons["today.viewWorkout"]
-        XCTAssertTrue(details.waitForExistence(timeout: UITestWait.screen))
-        details.tap()
+        app.todayChoice("today.viewWorkout").tap()
         assertPinnedAction("workoutDetails.start", in: app)
     }
 

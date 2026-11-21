@@ -112,17 +112,23 @@ Rules:
   use `RaisedFill()`, which turns `surface2` into `heroRaised` inside the
   card. At most one per screen.
 - **Card**: `surface` background, radius 14, optional 1 pt `surface2` edge.
-- **Today's card**: two tones. `todayActionBand()` puts what to do now and
+- **Today's list**: a day that holds anything to do is one list card,
+  `TodayDayListView`, in time order. The next item is the one navy row (the
+  hero recipe): Up next and its time, the name, one line on how much it is
+  (a run's time, kind and target; a lift's exercises) and the orange Start,
+  with ••• beside the kicker. Other rows are plain with a one-word action
+  (Start, Log, Continue) and •••; finished rows shrink to a check and what
+  was done; Add to today is the last row. A row or its ••• opens its
+  choices (Details, Change for today, Not today, Log it).
+- **Today's card**: on the days the list doesn't cover (freestyle, a day
+  with nothing planned, a finished day), two tones. `todayActionBand()` puts what to do now and
   its one orange action on navy (the hero recipe, so ordinary `Theme`
   tokens inside it); everything else about the day sits on the plain card
   as `todayFootRow()` rows under thin rules, inside `todayCardShell()`. A
   day with nothing to start or log is a `todayPlainCard()` with no navy, so
   navy on Today always means "do this".
-- **Today's agenda**: on a day with more than one workout, `DayWorkoutsView`
-  lists the day in time order under the card, never over it, so the card's
-  action stays at the top. One list card, each row a badge, the name, its
-  status and time, and a one-word action (Start, Log, Open); the row the
-  card is showing is tinted and says "Shown above".
+- **Today's agenda**: on a finished day, `DayWorkoutsView` lists the day's
+  workouts under the recap card.
 - **Section heading**: `TodaySectionLabel` with its link beside it, 28 pt
   tall; the link reaches 44 pt through a taller hit shape. Today's sections
   (the day, Today's agenda, This week, Coming up) all use it, 24 pt apart.

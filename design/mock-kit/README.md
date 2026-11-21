@@ -9,6 +9,7 @@ current screens:
 |---|---|
 | `screens/today.html` | Today with a workout planned: the date and goal event over the two-tone card, the light week chart and Coming up (`TodayView.lineupCard`, `TodayDayHeading`, `TodayWeekSection`, `WeekFortView`) |
 | `screens/today-run.html` | Today with a planned run: one line of figures and Start on navy, then Details, Swap and Skip as links (`PlannedRunGlance`, `DayActionsRow`) |
+| `screens/today-list.html` | Today as one list (app-design-pass P30): the next item on navy with Up next, its time, figures, Start and •••, finished rows shrunk, Add to today last (`TodayDayListView`, `TodayDayList`) |
 | `screens/today-agenda.html` | Today with several workouts: the card leads, then the day's agenda as one list with one-word actions (`TodayView.daySection`, `DayWorkoutsView`) |
 | `screens/today-rest.html` | Today on a rest day: a plain card with no navy (`TodayView.selectedWorkoutCard`, `todayPlainCard`) |
 | `screens/day-details.html` | Details for a planned run, with Edit (`WorkoutDetailsView`) |

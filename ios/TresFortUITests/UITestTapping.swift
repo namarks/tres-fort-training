@@ -148,6 +148,25 @@ extension XCUIApplication {
 }
 
 extension XCUIApplication {
+    /// Today's up-next row: the one navy row of the day's list
+    /// (app-design-pass P30).
+    var todayUpNext: XCUIElement { descendants(matching: .any)["today.upNext"] }
+
+    /// One of the choices of Today's up-next row, such as Details
+    /// (`today.viewWorkout`), Change for today (`today.changeWorkout`) or
+    /// Not today (`today.skipWorkout`). They open from the row's •••
+    /// (app-design-pass P30); the choice is returned once it is on screen.
+    @discardableResult
+    func todayChoice(_ identifier: String, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+        let choice = buttons[identifier]
+        if choice.exists && choice.isHittable { return choice }
+        let more = buttons["today.upNext.more"]
+        XCTAssertTrue(more.waitForExistence(timeout: UITestWait.screen),
+                      "Today has no up-next row", file: file, line: line)
+        more.tap(until: choice, file: file, line: line)
+        return choice
+    }
+
     /// Opens the saved workouts from Today's + menu. The library's home is
     /// the Plan tab; on Today it waits in the menu so the screen stays calm.
     func openSavedWorkoutsFromToday(file: StaticString = #filePath, line: UInt = #line) {

@@ -234,15 +234,16 @@ final class RunnerStreamlineJourneyTests: XCTestCase {
         capture("runner-explicit-load-and-assessed-effort")
     }
 
-    func testLargestTextSeparatesTodayActionsAndExerciseDemoFromTitle() {
+    func testLargestTextStacksTodaysStartAndExerciseDemoUnderTitles() {
         let app = launch(largeText: true, startWorkout: false)
-        let view = app.buttons["today.viewWorkout"]
-        let change = app.buttons["today.changeWorkout"]
-        XCTAssertTrue(view.exists); XCTAssertTrue(change.exists)
-        XCTAssertGreaterThanOrEqual(change.frame.minY, view.frame.maxY)
-        capture("today-accessibility-actions-stacked")
+        // At accessibility sizes the up-next row's Start drops under the
+        // workout's name instead of squeezing beside it (app-design-pass P30).
         let start = app.buttons["today.startWorkout"]
         reveal(start, in: app)
+        let name = app.todayUpNext.staticTexts["Strength A"]
+        XCTAssertTrue(name.exists)
+        XCTAssertGreaterThanOrEqual(start.frame.minY, name.frame.maxY)
+        capture("today-accessibility-actions-stacked")
         XCTAssertTrue(start.isEnabled)
         start.tap()
         let title = app.staticTexts["runner.exerciseTitle"]

@@ -1,6 +1,6 @@
 # App design pass
 
-Slug: app-design-pass · Status: active · Updated: 2026-11-18 · Theme: member-experience
+Slug: app-design-pass · Status: active · Updated: 2026-11-20 · Theme: member-experience
 
 ## Goal
 
@@ -75,6 +75,14 @@ better, except that on a day with several workouts the agenda's cards sat
 over the card and pushed its action halfway down the screen. From two mocks
 (project files today-space, round 3) the card now leads on every day and
 the agenda is one list under it.
+On 2026-11-20, on TestFlight 83, the owner found Today's agenda, "Add
+another workout" and "Something else" read as three separate things;
+adding a workout such as Core could only start it, never keep it for
+later; and a planned Core with no exercises could only be logged, not
+started, changed or set aside from Today. From mocks (project files
+today-together) the owner picked the day as one list, with the next item
+on navy, a little taller, its time in an Up next line and its figures on a
+line of their own. P30 builds that.
 
 ## Phases
 
@@ -729,6 +737,43 @@ the agenda is one list under it.
     are unchanged. Needs the owner's look on a TestFlight build like P5,
     and real simulator screenshots before that.
 
+- [ ] **P30 — Today is one list for the day**
+  - Whenever the day holds something to do, Today is one list card in time
+    order: the day's own workout, the workouts and activities beside it,
+    and workouts added for later (`TodayDayListView`, `TodayDayList`). The
+    first one under way, else the first still to do, is the one navy row:
+    "Up next" or "In progress" with its time, the name, one line on how
+    much it is (a run's time, kind and target from `DayChange.glance`; a
+    lift's exercise names) and the orange Start, with ••• by the kicker.
+    Other rows are plain with a one-word action (Start, Continue, Log) and
+    •••; finished rows shrink to a check and what was done ("Done · 6
+    exercises", "Logged", "Not today"). Add to today is the last row, and
+    Something else's Lift, Run and Log move into it.
+  - A row, or its •••, opens its choices: Start or Log it, Details, Change
+    for today and Not today for the day's own workout (Swap and Skip, as
+    before), Not today for one beside it, and the record once it's done.
+    Not today on a weekday's add-on writes a session for that date with
+    its workout and marks it skipped (`POST /api/sessions` additional, then
+    `PATCH` skipped), so the add-on stays on every other week; one added
+    for later is skipped the same way. No backend change.
+  - An activity that is a routine you do yourself (core, stretching, a
+    bodyweight circuit, by name) with no exercises yet can be started:
+    Start offers "Add exercises to Core", saved to the workout so every
+    Core after starts right away, or "Suggested routine just for today",
+    which builds and starts a routine and sets Core aside for the day.
+    Other activities, such as soccer, are logged as before.
+  - Add to today offers Start now or Add for later for a saved workout or
+    a built routine. Later reuses the additional-session create and keeps
+    the request's `later` flag in its retry receipt, so a retry never
+    starts it; a receipt saved before the flag existed still starts now.
+  - Freestyle, a workout whose details can't be read, a day with nothing
+    planned and a finished day with nothing left keep their own cards.
+  - Unit tests cover the rows, the lead, each line and the old receipt;
+    the Today journeys open Details, Change for today and Not today from
+    the up-next row's ••• and Add to today needs Start now. The mock kit's
+    `today-list` screen and the design system show the list. Needs a
+    simulator capture and the owner's look on a TestFlight build like P5.
+
 ## Execution frontier
 
 - P5
@@ -756,6 +801,7 @@ the agenda is one list under it.
 - P27
 - P28
 - P29
+- P30
 
 ## Dependencies
 
@@ -765,16 +811,19 @@ the agenda is one list under it.
 
 ## Next step
 
-**Now (@agent):** Watch the first nightly release check on `main` after
-P29 for the Today journeys (the agenda's identifiers are unchanged, but it
-now sits under the card), and capture a day with several workouts from a
-simulator build once the agenda change is merged. The before and after of
+**Now (@agent):** Run the release check on P30's branch for the Today
+journeys (Details, Change for today and Not today now open from the
+up-next row's •••), and capture Today as one list from a simulator build
+(Nick's Friday core alone, a run day with a finished lift and core later,
+light and dark) once P30 is merged. The before and after of
 P29 itself was captured on 2026-11-18 (a planned lift, a planned run with
 add-ons, a finished run and a rest day, light and dark) and shown to the
 owner. The real weekday sheet (P28), Add to your week (P27) and P25's
 Details and Swap are still to capture.
 
-**Then (@owner):** On the next TestFlight build (after 83, on the owner's
+**Then (@owner):** On the first TestFlight build with P30, look at Today
+as one list: the navy Up next row, Start on Friday's core, Add for later,
+and Not today on an add-on. On the next TestFlight build (after 83, on the owner's
 go-ahead), look at Today (P29): the date and event over the card, navy only
 around what to do now, the light week chart, Coming up, and on a day with
 several workouts the agenda under the card. On the same

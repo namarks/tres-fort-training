@@ -9,7 +9,7 @@ final class PrescriptionReviewJourneyTests: XCTestCase {
         app.launchEnvironment["TRESFORT_UI_PRESCRIPTION_REVIEW"] = mode
         app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         app.launch()
-        tap(app.buttons["today.viewWorkout"], in: app)
+        tap(app.todayChoice("today.viewWorkout"), in: app)
         tap(app.buttons["workoutDetails.edit"], in: app)
         tap(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Edit your saved'")).firstMatch, in: app)
         XCTAssertTrue(app.buttons["editor.slot.a-squat"].waitForExistence(timeout: UITestWait.screen))
