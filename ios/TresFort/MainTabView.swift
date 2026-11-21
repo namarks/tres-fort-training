@@ -90,9 +90,13 @@ struct MainTabView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var showHealthSettings = false
-    @State private var showActivitySheet = false
-    /// The planned activity Today asked to log, so the sheet starts on it.
-    @State private var plannedActivityName: String?
+    /// Keep presentation and its seed together so the first sheet open
+    /// cannot capture a stale activity name.
+    private struct ActivityLogRequest: Identifiable {
+        let id = UUID()
+        var name: String?
+    }
+    @State private var activityLogRequest: ActivityLogRequest?
     @State private var showRunRecorder = false
     @State private var selectedTab: Tab = .today
     /// Bumped when Today's week opens Activity, so it shows its top page.
@@ -124,12 +128,10 @@ struct MainTabView: View {
                       auth: auth,
                       stationLink: models.stationLink,
                       onLogActivity: {
-                          plannedActivityName = nil
-                          showActivitySheet = true
+                          activityLogRequest = ActivityLogRequest(name: nil)
                       },
                       onLogPlannedActivity: { name in
-                          plannedActivityName = name
-                          showActivitySheet = true
+                          activityLogRequest = ActivityLogRequest(name: name)
                       },
                       onRecordRun: RunRecorderModel.isSupported ? {
                           models.runs.plannedRun = nil
@@ -298,14 +300,14 @@ struct MainTabView: View {
                     }
             }
         }
-        .sheet(isPresented: $showActivitySheet) {
+        .sheet(item: $activityLogRequest) { request in
             // Shared sheet — the Today tab toolbar dispatches the same
             // GroupModel-backed handler the Group tab's FAB does. Logging
             // from Today drops into the user's currently-selected group's
             // feed; if they have no group yet, the optimistic insert
             // silently no-ops on the visible feed (groupModel.selected ==
             // nil) but the POST still hits the server.
-            LogActivitySheet(groupModel: groupModel, now: models.now, plannedName: plannedActivityName)
+            LogActivitySheet(groupModel: groupModel, now: models.now, plannedName: request.name)
         }
         .fullScreenCover(isPresented: $showRunRecorder) {
             RunRecorderView(model: models.runs) { showRunRecorder = false }

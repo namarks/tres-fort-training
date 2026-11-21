@@ -518,11 +518,14 @@ private struct UIFixtureServer {
             ["id": "synthetic-core", "name": "Plank", "modality": "timed", "unit": "lb", "primary_muscle": "core"],
             ["id": RunPlan.exerciseID, "name": "Outdoor Run", "modality": "cardio", "unit": "lb", "primary_muscle": "legs"]]
     }
-    /// An activity logged by hand, for History on the Activity tab.
+    /// Rows accepted by the synthetic manual-activity endpoint.
+    private var enteredActivities: [[String: Any]] = []
+
+    /// Activities logged by hand, including this fixture session's writes.
     var loggedActivities: [[String: Any]] {
         guard scenario == .progress,
-              ProcessInfo.processInfo.environment["TRESFORT_UI_PROGRESS_EMPTY"] != "1" else { return [] }
-        return [["id": "synthetic-soccer", "user_id": syntheticUserID, "date": "2026-09-07", "type": "other",
+              ProcessInfo.processInfo.environment["TRESFORT_UI_PROGRESS_EMPTY"] != "1" else { return enteredActivities }
+        return enteredActivities + [["id": "synthetic-soccer", "user_id": syntheticUserID, "date": "2026-09-07", "type": "other",
                  "title": "Soccer", "duration_minutes": 90, "notes": NSNull(), "logged_at": revision,
                  "source": "ios", "deleted_at": NSNull(), "updated_at": revision],
                 // Shares its date with a finished workout, so History has two
@@ -646,6 +649,11 @@ private struct UIFixtureServer {
                 sessions.append(["id": "unassigned-date", "date": "2026-09-09",
                     "status": "planned", "workout_id": NSNull(), "attempt": 1,
                     "updated_at": revision, "write_protocol": "attempt-v1"])
+            }
+            if ProcessInfo.processInfo.environment["TRESFORT_UI_REST_DAY"] == "1" {
+                // Keep the rest of the week, as on an ordinary rest day.
+                plan?["meta"] = #"{"schedule":{"version":1,"week":{"thu":"strength-b","sat":"synthetic-day"}}}"#
+                sessions.removeAll { $0["date"] as? String == "2026-09-08" }
             }
             if ProcessInfo.processInfo.environment["TRESFORT_UI_EMPTY_WORKOUT_LIBRARY"] == "1" {
                 plan?["days"] = []; plan?["meta"] = "{}"
@@ -879,6 +887,24 @@ private struct UIFixtureServer {
             intervalsPending = false
             importIntervalsActivity()
             response = ["status": "synced", "connection": intervalsStatus]
+        case ("POST", "/api/activities"):
+            guard let id = body["id"] as? String, UUID(uuidString: id) != nil,
+                  let date = body["date"] as? String, let type = body["type"] as? String,
+                  let loggedAt = body["logged_at"] as? Int else { throw URLError(.badServerResponse) }
+            // Like the Worker, a retry returns the original row. State pulls
+            // expose the accepted activity so the real history refresh runs.
+            if let existing = enteredActivities.first(where: { $0["id"] as? String == id }) {
+                response = existing
+            } else {
+                let row: [String: Any] = ["id": id, "user_id": syntheticUserID, "date": date,
+                    "type": type, "title": body["title"] ?? NSNull(),
+                    "duration_minutes": body["duration_minutes"] ?? NSNull(),
+                    "notes": body["notes"] ?? NSNull(), "logged_at": loggedAt,
+                    "source": "ios", "deleted_at": NSNull(), "updated_at": revision]
+                enteredActivities.append(row)
+                response = row
+            }
+            status = 201
         case ("POST", "/api/activities/endurance") where scenario.isIntervals && intervalsConnected:
             // Like the Worker: the run lands on intervals.icu and comes back
             // through the activity sync; a retry with the same id is a no-op.

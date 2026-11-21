@@ -620,6 +620,15 @@ struct DayPickView: View {
     @State private var createdID: String?
     @FocusState private var nameFocused: Bool
 
+    init(sync: SyncModel, date: String, kind: PlanComposer.Kind, initialName: String? = nil,
+         onFinished: @escaping () -> Void) {
+        self.sync = sync
+        self.date = date
+        self.kind = kind
+        self.onFinished = onFinished
+        _typedName = State(initialValue: initialName ?? "")
+    }
+
     private var weekday: String { DayChange.weekday(date) }
     private var workouts: [Workout] { DayChange.saved(kind, in: sync.plan, on: date) }
     private var selected: Workout? { workouts.first { $0.id == selectedID } }
