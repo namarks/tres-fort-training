@@ -126,7 +126,9 @@ remains a separately authorized release follow-up.
   shortens phone setup: one screen and one tap to open Claude, and approval
   returns to Claude itself (device check on TestFlight 83).
   P9 (done) found why Claude asked before every read: a connector added before
-  the read-only labels; re-adding it fixes that.
+  the read-only labels; re-adding it fixes that. P10 connects Claude with one
+  approval: Allow in the app hands Claude a one-time connect link, so Claude
+  comes back connected with no Très Fort page (Worker release and iPhone check left).
 
 ### Gym floor (`gym-floor`)
 

@@ -106,10 +106,13 @@ struct CoachConnectionHeader: View {
     let tileName: String
     /// The app's name in "Connect Très Fort to …".
     let appName: String
+    /// Replaces "Connect Très Fort to …", e.g. once the app is connected.
+    var title: String?
 
-    init(app: CoachApp) {
+    init(app: CoachApp, title: String? = nil) {
         tileName = app.tileName
         appName = app.shortName
+        self.title = title
     }
 
     init(tileName: String, appName: String) {
@@ -141,7 +144,7 @@ struct CoachConnectionHeader: View {
                         .strokeBorder(Theme.text.opacity(0.14)))
             }
             .accessibilityHidden(true)
-            Text("Connect Très Fort to \(appName)")
+            Text(title ?? "Connect Très Fort to \(appName)")
                 .font(.title3.weight(.semibold))
                 .multilineTextAlignment(.center)
                 .accessibilityAddTraits(.isHeader)
@@ -159,15 +162,30 @@ struct CoachConnectionHeader: View {
 enum CoachSetup {
     static func serverURL(baseURL: URL) -> URL { baseURL.appendingPathComponent("mcp") }
 
-    static func claudeInstallURL(baseURL: URL) -> URL {
+    /// A connect link: the MCP URL carrying a one-time connect code made after
+    /// the member allowed sharing. Claude signs in with it as its resource and
+    /// the server finishes without another Très Fort page (src/oauth.ts). The
+    /// code works once, for ten minutes; a spent one signs in the usual way.
+    static func serverURL(baseURL: URL, link: String?) -> URL {
+        guard let link, link.range(of: "^[A-Za-z0-9_-]{43}$", options: .regularExpression) != nil else {
+            return serverURL(baseURL: baseURL)
+        }
+        return serverURL(baseURL: baseURL).appendingPathComponent("c").appendingPathComponent(link)
+    }
+
+    static func claudeInstallURL(baseURL: URL, link: String? = nil) -> URL {
         var url = URLComponents(string: "https://claude.ai/customize/connectors")!
         url.queryItems = [
             URLQueryItem(name: "modal", value: "add-custom-connector"),
             URLQueryItem(name: "connectorName", value: "Très Fort"),
-            URLQueryItem(name: "connectorUrl", value: serverURL(baseURL: baseURL).absoluteString)
+            URLQueryItem(name: "connectorUrl", value: serverURL(baseURL: baseURL, link: link).absoluteString)
         ]
         return url.url!
     }
+
+    /// Opens Claude for a first question once connected.
+    static let claudeChatURL = URL(string: "https://claude.ai/new")!
+    static let firstQuestion = "Use Très Fort to load my coaching brief."
 
     static func codexSetupPrompt(baseURL: URL) -> String {
         """
@@ -189,6 +207,19 @@ struct CoachConnectView: View {
     @State private var code: String?
     @State private var generating = false
     @State private var error: String?
+    @Environment(\.scenePhase) private var scenePhase
+    /// Making a connect link before Claude opens.
+    @State private var opening = false
+    /// The link Claude was handed; setup stays open and watches for the
+    /// connection it makes.
+    @State private var pendingLink: GroupModel.CoachConnectLink?
+    /// Set once that connection arrives.
+    @State private var connectedApp: CoachApp?
+
+    private struct ConnectionWatch: Equatable {
+        let link: String?
+        let active: Bool
+    }
 
     private static let setupTopID = "coach.setup-top"
     private var connectorURL: String { CoachSetup.serverURL(baseURL: Config.apiBaseURL).absoluteString }
@@ -204,16 +235,26 @@ struct CoachConnectView: View {
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                 }
-                Section {
-                    CoachConnectionHeader(app: selectedApp)
-                    appChoices
-                }
-                .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
-                if consentedApp == selectedApp {
-                    setupSections
+                if let connectedApp {
+                    Section {
+                        CoachConnectionHeader(app: connectedApp, title: "\(connectedApp.name) is connected")
+                    }
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                    connectedSection(connectedApp)
                 } else {
-                    consentSection
+                    Section {
+                        CoachConnectionHeader(app: selectedApp)
+                        appChoices
+                    }
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                    if consentedApp == selectedApp {
+                        setupSections
+                    } else {
+                        consentSection
+                        if selectedApp == .claude { nextSteps }
+                    }
                 }
             }
             // The consent button sits below the disclosure; bring the member back
@@ -225,11 +266,57 @@ struct CoachConnectView: View {
         }
         // The decision stays on screen while the member reads, at any text size.
         .safeAreaInset(edge: .bottom) {
-            if consentedApp != selectedApp { consentActions }
+            if consentedApp != selectedApp && connectedApp == nil { consentActions }
         }
         .navigationTitle("Connect your coach")
         .navigationBarTitleDisplayMode(.inline)
         .task { await groupModel.refreshMe() }
+        // Watch for the connection Claude makes with the link while this
+        // screen is in front; iOS pauses it while Claude is open.
+        .task(id: ConnectionWatch(link: pendingLink?.code, active: scenePhase == .active)) {
+            await watchForConnection()
+        }
+    }
+
+    @MainActor
+    private func watchForConnection() async {
+        guard let link = pendingLink, scenePhase == .active, connectedApp == nil else { return }
+        let deadline = Date().addingTimeInterval(15 * 60)
+        while !Task.isCancelled, Date() < deadline {
+            if await groupModel.coachConnected(since: link.issuedAt) {
+                guard pendingLink == link else { return }
+                pendingLink = nil
+                connectedApp = .claude
+                return
+            }
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+        }
+    }
+
+    /// What the member does in Claude, shown before they allow sharing.
+    private var nextSteps: some View {
+        Section {
+            CoachStep(number: 1, text: "In Claude, tap Add, then Connect.")
+            CoachStep(number: 2, text: "Claude finishes on its own and comes back connected.")
+        } header: {
+            Text("What happens next")
+        }
+    }
+
+    @ViewBuilder
+    private func connectedSection(_ app: CoachApp) -> some View {
+        Section {
+            Label("\(app.name) can now coach you with your Très Fort training.", systemImage: "checkmark.circle.fill")
+                .font(.headline)
+                .accessibilityIdentifier("coach.connected-success")
+            CopyRow(label: "Try asking \(app.name)", value: CoachSetup.firstQuestion, mono: false)
+            Text("\(app.name) asks before it changes your plan. Disconnect anytime in Profile.")
+                .font(.footnote).foregroundStyle(.secondary)
+            Link(destination: CoachSetup.claudeChatURL) {
+                Label("Open \(app.name)", systemImage: "arrow.up.right.square").font(.headline).frame(minHeight: 44)
+            }
+            .accessibilityIdentifier("coach.open-connected-app")
+        }
     }
 
     /// The AI apps as named tiles. Names only: Anthropic and OpenAI allow
@@ -269,10 +356,10 @@ struct CoachConnectView: View {
                 .font(.footnote).foregroundStyle(.secondary)
             DisclosureGroup("Full details") {
                 CoachSharingDetails()
-                Text("Nothing is sent to a new app until you allow it here and then approve its connection. Apps you already connected keep access until you disconnect them in Profile → Disconnect all AI apps. Information already sent stays subject to the recipient’s policies.")
+                Text("Nothing is sent to a new app until you allow it here. For Claude, allowing here also approves the connection Claude makes with the one-time link; other apps ask you to approve their connection too. Apps you already connected keep access until you disconnect them in Profile → Disconnect all AI apps. Information already sent stays subject to the recipient’s policies.")
                     .font(.footnote).foregroundStyle(.secondary)
                 if selectedApp == .claude {
-                    Text("Claude opens to add Très Fort. Confirm it there, then choose Open Très Fort to review access. If Claude opens without the setup form, press and hold Allow and connect Claude to copy the setup link instead, then paste it into Safari.")
+                    Text("Claude opens with Très Fort filled in. Allowing here makes a one-time link, valid once for 10 minutes, so Claude can finish connecting without asking you again. If Claude opens without the setup form, press and hold Allow and connect Claude to copy the setup link instead, then paste it into Safari.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Text("Très Fort isn’t affiliated with or endorsed by Anthropic or OpenAI. Claude and ChatGPT are their trademarks.")
@@ -290,12 +377,13 @@ struct CoachConnectView: View {
                 Text(selectedApp == .claude ? "Allow and connect Claude" : "Allow sharing with \(selectedApp.shortName)")
             }
             .buttonStyle(WorkoutPrimaryButtonStyle())
+            .disabled(opening)
             .accessibilityIdentifier("coach.consent-allow")
             .contextMenu {
                 if selectedApp == .claude {
                     Button("Allow and copy setup link", systemImage: "link") {
                         consentedApp = selectedApp
-                        UIPasteboard.general.url = CoachSetup.claudeInstallURL(baseURL: Config.apiBaseURL)
+                        Task { await copyClaudeLink() }
                     }
                 }
             }
@@ -312,16 +400,37 @@ struct CoachConnectView: View {
     /// gave permission on this screen, and Claude's own form is the next step.
     private func allowSharing() {
         consentedApp = selectedApp
-        if selectedApp == .claude { openClaude() }
+        if selectedApp == .claude { Task { await connectClaude() } }
     }
 
-    private func openClaude() {
-        openURL(CoachSetup.claudeInstallURL(baseURL: Config.apiBaseURL)) { accepted in
+    /// Opens Claude with a fresh connect link. Without one (offline, or an
+    /// older server) Claude still opens with the plain address and the
+    /// member approves on Très Fort's page, as before.
+    @MainActor
+    private func connectClaude() async {
+        guard !opening else { return }
+        opening = true
+        let link = try? await groupModel.generateCoachConnectLink()
+        opening = false
+        openURL(CoachSetup.claudeInstallURL(baseURL: Config.apiBaseURL, link: link?.code)) { accepted in
             guard accepted else { return }
-            // Free the setup presentation before the browser returns
-            // with a separate, explicit access-approval intent.
-            onHandoff()
+            if let link {
+                // Stay open: Claude comes back connected, not through an
+                // approval. A returning approval still replaces this screen.
+                pendingLink = link
+            } else {
+                // Free the setup presentation before the browser returns
+                // with a separate, explicit access-approval intent.
+                onHandoff()
+            }
         }
+    }
+
+    @MainActor
+    private func copyClaudeLink() async {
+        let link = try? await groupModel.generateCoachConnectLink()
+        UIPasteboard.general.url = CoachSetup.claudeInstallURL(baseURL: Config.apiBaseURL, link: link?.code)
+        if let link { pendingLink = link }
     }
 
     /// Both policies on one compact row; borderless so each link keeps its own tap.
@@ -384,17 +493,27 @@ struct CoachConnectView: View {
                 .id(Self.setupTopID)
             switch selectedApp {
             case .claude:
-                Button(action: openClaude) {
-                    Label("Connect with Claude", systemImage: "arrow.up.right.square")
+                if pendingLink != nil {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Finish in Claude: tap Add, then Connect. This screen updates when Claude is connected.")
+                            .font(.footnote)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("coach.waiting-for-claude")
+                }
+                Button { Task { await connectClaude() } } label: {
+                    Label(pendingLink == nil ? "Connect with Claude" : "Open Claude again", systemImage: "arrow.up.right.square")
                         .font(.headline).frame(minHeight: 44)
                 }
+                .disabled(opening)
                 .accessibilityIdentifier("coach.connect-claude")
                 .contextMenu {
                     Button("Copy setup link", systemImage: "link") {
-                        UIPasteboard.general.url = CoachSetup.claudeInstallURL(baseURL: Config.apiBaseURL)
+                        Task { await copyClaudeLink() }
                     }
                 }
-                Text("Confirm Très Fort in Claude, then choose Open Très Fort to review access. If Claude opens without the setup form, press and hold Connect with Claude to copy the link and paste it into Safari.")
+                Text("In Claude, tap Add, then Connect. If Claude shows a Très Fort page instead, choose Open Très Fort to review access. If Claude opens without the setup form, press and hold this button to copy the link and paste it into Safari.")
                     .font(.footnote).foregroundStyle(.secondary)
                 DisclosureGroup("Manual setup") {
                     Text("On claude.ai, open Customize → Connectors → + → Add custom connector.")
@@ -496,6 +615,27 @@ struct CoachConnectView: View {
         } catch {
             self.error = "Couldn’t generate a code. Check your connection and try again."
         }
+    }
+}
+
+/// A numbered step in What happens next.
+private struct CoachStep: View {
+    let number: Int
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text("\(number)")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(number == 1 ? Theme.onAccent : Theme.text)
+                .frame(width: 22, height: 22)
+                .background(number == 1 ? Theme.accent : Theme.surface2, in: Circle())
+                .accessibilityHidden(true)
+            Text(text).font(.footnote)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Step \(number). \(text)")
+        .accessibilityIdentifier("coach.next-step-\(number)")
     }
 }
 
