@@ -1159,6 +1159,47 @@ final class GroupModel: ObservableObject {
         return code
     }
 
+    /// A connect link for Claude: a one-time connect code the app puts in the
+    /// MCP URL it hands Claude after the member allows sharing, so Claude's
+    /// sign-in finishes without another Très Fort page (src/oauth.ts).
+    struct CoachConnectLink: Equatable {
+        let code: String
+        /// Server time (epoch ms) the code was made; a connection made at or
+        /// after it is the one this link started.
+        let issuedAt: Double
+    }
+
+    func generateCoachConnectLink() async throws -> CoachConnectLink {
+        guard let jwt = currentJWT else {
+            throw APIError.http(401, "not_signed_in")
+        }
+        let epoch = auth.featureSessionEpoch
+        let link: CoachConnectLink
+        if let coachCodeIssuer {
+            link = CoachConnectLink(code: try await coachCodeIssuer(jwt), issuedAt: Date().timeIntervalSince1970 * 1000 - 60_000)
+        } else {
+            let issued = try await api.issueMcpConnectCode(jwt: jwt)
+            link = CoachConnectLink(code: issued.code,
+                                    issuedAt: issued.expires_at.map { $0 - 600_000 } ?? Date().timeIntervalSince1970 * 1000 - 60_000)
+        }
+        guard auth.isCurrentFeatureSession(accountID: accountID, epoch: epoch) else {
+            throw CancellationError()
+        }
+        return link
+    }
+
+    /// Whether an AI connection was made at or after `since` (server epoch
+    /// ms). Read failures answer false; the caller asks again later.
+    func coachConnected(since: Double) async -> Bool {
+        guard let jwt = currentJWT else { return false }
+        let epoch = auth.featureSessionEpoch
+        guard let grants = try? await api.coachGrants(jwt: jwt),
+              auth.isCurrentFeatureSession(accountID: accountID, epoch: epoch) else { return false }
+        guard grants.contains(where: { $0.created_at >= since }) else { return false }
+        await refreshMe()
+        return true
+    }
+
     /// Returns true when the post-revocation profile refresh also succeeded.
     /// A false result still means revocation committed; callers must not retry
     /// the destructive request merely because the follow-up read failed.

@@ -31,6 +31,7 @@ current screens:
 | `screens/activity.html` | Activity, History side (`ActivityTabView`, `ActivityHistoryView`) |
 | `screens/run-detail.html` | A run opened from History (`DayAgendaView` focused on one activity, `ActivityChartsView`) |
 | `screens/coach-connect.html` | Connect your coach before sharing is allowed (`CoachConnectView.consentSection`) |
+| `screens/coach-connected.html` | Connect your coach after Claude connected with the one-time connect link (`CoachConnectView.connectedSection`) |
 | `screens/coach-approval.html` | Review AI access when an AI app sends the member back (`CoachApprovalView`) |
 | `screens/run-recorder.html` | The run recorder's Step page during a planned run (`RunRecorderView.recordingPages`, `RunStepPage`) |
 | `screens/run-recorder-map.html` | Its Map page, with the lap strip on top (`RunLapStrip`) |

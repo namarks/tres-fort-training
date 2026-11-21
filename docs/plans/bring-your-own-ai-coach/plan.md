@@ -1,6 +1,6 @@
 # Bring Your Own AI Coach
 
-Slug: bring-your-own-ai-coach · Status: gated · Updated: 2026-11-18 · Theme: coaching
+Slug: bring-your-own-ai-coach · Status: gated · Updated: 2026-11-21 · Theme: coaching
 
 ## Goal
 
@@ -244,6 +244,37 @@ Repository delivery and actual provider connection/release evidence remain disti
     reconnecting fixed reads (2026-11-11). The website guide says to remove
     and re-add the connector if reads still ask.
 
+- [ ] **P10 — Connect Claude with one approval**
+  - The owner walked a family member through setup on their iPhone
+    (2026-11-21) and found too many screens to accept. The map: about nine
+    screens, four of them Très Fort's. The shared-data list appeared twice,
+    the Très Fort page inside Claude offered two equal buttons (**Continue
+    with Apple** added three more screens and a third list), and nothing said
+    the flow would go to Claude and back. Mocks of two options:
+    `/mnt/project-files/coach-setup/streamline-2026-11-21/`. The owner chose
+    "approve once, up front" (about five screens, two of them Très Fort's).
+  - [x] **Allow and connect Claude** makes the member's one-time connect code
+    and hands Claude a connect link, `/mcp/c/<code>`, as the connector
+    address. The link's metadata names it as the resource; `/oauth/authorize`
+    redeems it for a Claude callback, audits `connect_link` and returns to
+    Claude without a Très Fort page. A spent, expired or replaced code, another
+    app, or a client that drops the link falls back to the consent page and
+    phone approval. Token exchange and refresh accept the link; logs redact it.
+    `test/coach_connect_link.test.ts`.
+  - [x] The consent screen lists **What happens next** in two steps. Setup
+    stays open while the member is in Claude, checks for the new connection
+    and shows **Claude is connected** with a first question to ask. Without a
+    code (offline, older server) the app opens the plain address as before.
+    Mock kit `coach-connected`; website guide and connection notes updated.
+  - [ ] Owner-authorized release of the Worker, then a TestFlight build.
+  - [ ] Owner tries it on an iPhone with the Claude app: Set up your AI coach →
+    Allow and connect Claude → Add (and Connect) in Claude → back in Claude,
+    connected, with no Très Fort page → Très Fort shows Claude is connected.
+    This checks what Claude's docs don't say: that Claude keeps the link as
+    the connector address and signs in with it. If it does not, the fallback is
+    today's flow, and Option A (one button on the Très Fort page, a one-tap
+    finish without the repeated list) is the next step.
+
 ## Dependencies
 
 | Local phase | Relationship | Target | Reason |
@@ -256,10 +287,17 @@ Repository delivery and actual provider connection/release evidence remain disti
 | P6 | gated_by | external:owner-claude-directory-submission | The website release and the portal submission need the owner's accounts and authority. |
 | P7 | gated_by | external:owner-coach-apple-approval-release | The Worker, web app and iOS releases and the real-provider check need the owner. |
 | P8 | gated_by | external:owner-coach-setup-device-check | A TestFlight build and the check on a real iPhone with a Claude account need the owner. |
+| P10 | gated_by | external:owner-coach-connect-link-release | The Worker release, a TestFlight build and the check on a real iPhone with the Claude app need the owner. |
 
 ## Next step
 
-**Now (@owner):** P8 on TestFlight 1.2 (83), which carries the shorter
+**Now (@owner):** P10. Release the Worker from main after the PR merges, then
+a TestFlight build, and try **Allow and connect Claude** on an iPhone with the
+Claude app: it should come back connected with no Très Fort page. If a Très
+Fort page still appears, Claude dropped the link; the connection still works
+through the page, and Option A is the next step.
+
+**Also now (@owner):** P8 on TestFlight 1.2 (83), which carries the shorter
 setup: Profile → set up coach → Allow and connect Claude → confirm in Claude
 → review access in Très Fort → Allow and return to Claude. Also send the logo
 permission requests to Anthropic and OpenAI if they have not gone yet.

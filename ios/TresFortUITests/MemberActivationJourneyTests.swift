@@ -453,7 +453,12 @@ final class MemberActivationJourneyTests: XCTestCase {
         consentImage.name = "coach-sharing-consent"; consentImage.lifetime = .keepAlways; add(consentImage)
         // The decision stays pinned on screen: Allow is reachable without scrolling.
         XCTAssertTrue(app.buttons["coach.consent-allow"].isHittable)
-        // One tap allows sharing and opens Claude; there is no second Connect step.
+        // Claude's steps are listed before the member leaves for Claude.
+        let firstStep = app.descendants(matching: .any).matching(identifier: "coach.next-step-1").firstMatch
+        XCTAssertTrue(app.scroll(toReveal: firstStep))
+        XCTAssertTrue(firstStep.label.contains("tap Add, then Connect"))
+        // One tap allows sharing and opens Claude with a one-time connect link;
+        // there is no second Connect step and no second approval.
         tap(app.buttons["coach.consent-allow"], in: app)
         let opened = app.staticTexts["fixture.opened-url"]
         XCTAssertTrue(opened.waitForExistence(timeout: UITestWait.screen))
@@ -461,10 +466,17 @@ final class MemberActivationJourneyTests: XCTestCase {
         XCTAssertEqual(parts.host, "claude.ai")
         XCTAssertEqual(parts.path, "/customize/connectors")
         XCTAssertEqual(parts.queryItems?.first { $0.name == "connectorUrl" }?.value,
-                       "https://ui-fixture.invalid/mcp")
+                       "https://ui-fixture.invalid/mcp/c/" + String(repeating: "C", count: 43))
         XCTAssertEqual(parts.queryItems?.first { $0.name == "connectorName" }?.value, "Très Fort")
-        XCTAssertFalse(app.navigationBars["Connect your coach"].exists)
-        // Exercise the browser return through the real intent/presentation path.
+        // Setup stays open and turns into the connected screen once Claude
+        // has connected with the link.
+        let connected = app.descendants(matching: .any).matching(identifier: "coach.connected-success").firstMatch
+        XCTAssertTrue(connected.waitForExistence(timeout: UITestWait.screen))
+        XCTAssertTrue(app.staticTexts["coach.connection-title"].label.contains("is connected"))
+        let connectedImage = XCTAttachment(screenshot: app.screenshot())
+        connectedImage.name = "coach-claude-connected"; connectedImage.lifetime = .keepAlways; add(connectedImage)
+        // A spent or refused link falls back to the approval Claude sends back,
+        // which replaces setup through the real intent/presentation path.
         tap(app.buttons["fixture.coach-return"], in: app)
         XCTAssertTrue(app.staticTexts["Review AI access"].waitForExistence(timeout: UITestWait.screen))
         XCTAssertFalse(app.buttons["coach-approval.continue"].exists)
