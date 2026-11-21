@@ -322,29 +322,36 @@ final class MixedWeekSetupJourneyTests: XCTestCase {
                         file: StaticString = #filePath, line: UInt = #line) {
         let toggle = app.switches[identifier]
         revealFormControl(toggle, in: app, file: file, line: line)
+        // Every element query takes a fresh accessibility snapshot of the
+        // whole Form, which can cost a second on a hosted runner. Checking
+        // each bar, the pinned action and the keyboard on every poll made one
+        // poll take 5 to 9 seconds there, so the two matching polls a
+        // stationary row needs could not fit in the wait. Measure the
+        // visible band once, re-measure it only when the row falls outside
+        // it (a sheet still sliding in), and read the row from one snapshot.
+        var band = visibleFormBand(in: app)
         var previousFrame: CGRect?
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            guard toggle.exists, toggle.isEnabled, toggle.isHittable,
-                  let value = toggle.value as? String, value == "0" || value == "1" else {
+            guard let row = try? toggle.snapshot(), row.isEnabled,
+                  let value = row.value as? String, value == "0" || value == "1" else {
                 previousFrame = nil
                 return false
             }
-            let frame = toggle.frame
-            let bars = app.navigationBars.allElementsBoundByIndex.filter { $0.exists && $0.isHittable }
-            let top = (bars.map { $0.frame.maxY }.max() ?? app.frame.minY + 60) + 12
-            let bottom = self.formBottom(in: app)
-            guard frame.minY >= top, frame.maxY <= bottom else {
+            let frame = row.frame
+            guard frame.minY >= band.top, frame.maxY <= band.bottom else {
+                band = self.visibleFormBand(in: app)
                 previousFrame = nil
                 return false
             }
             let stationary = previousFrame == frame
             previousFrame = frame
-            return stationary
+            // Hit-testing is one more query, so ask only once the row is still.
+            return stationary && toggle.isHittable
         }, object: nil)
         // Circuit changes and scrolling can relayout the Form between separate
         // visibility and tappability checks. Observe a stable, unobscured row
         // with a known state before the single state-changing tap.
-        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: UITestWait.screen), .completed,
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: UITestWait.screen * 2), .completed,
                        "\(identifier) never settled into a visible tappable state", file: file, line: line)
         let value = toggle.value as? String
         XCTAssertTrue(value == "0" || value == "1", "\(identifier) has no toggle state", file: file, line: line)
@@ -426,6 +433,14 @@ final class MixedWeekSetupJourneyTests: XCTestCase {
         return bottom
     }
 
+    /// Where a form's rows can be tapped: below the lowest navigation bar
+    /// the member can touch, and above the pinned action or keyboard.
+    private func visibleFormBand(in app: XCUIApplication) -> (top: CGFloat, bottom: CGFloat) {
+        let bars = app.navigationBars.allElementsBoundByIndex.filter { $0.exists && $0.isHittable }
+        let top = (bars.map { $0.frame.maxY }.max() ?? app.frame.minY + 60) + 12
+        return (top, formBottom(in: app))
+    }
+
     /// XCTest can call a Form row hittable while the pinned bottom button
     /// covers its tap point. Scroll inside the form until the whole control
     /// sits between its navigation bar and its current action/keyboard.
@@ -435,9 +450,7 @@ final class MixedWeekSetupJourneyTests: XCTestCase {
             XCTAssertTrue(app.buttons["composer.save"].waitForExistence(timeout: UITestWait.screen), file: file, line: line)
         }
         for _ in 0..<16 {
-            let bars = app.navigationBars.allElementsBoundByIndex.filter { $0.exists && $0.isHittable }
-            let top = (bars.map { $0.frame.maxY }.max() ?? app.frame.minY + 60) + 12
-            let bottom = formBottom(in: app)
+            let (top, bottom) = visibleFormBand(in: app)
             if element.exists, element.isHittable, element.frame.minY >= top, element.frame.maxY <= bottom { return }
             guard bottom - top > 80 else { break }
             let above = element.exists && element.frame.midY < top
