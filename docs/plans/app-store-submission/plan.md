@@ -1,6 +1,6 @@
 # First App Store Submission
 
-Slug: app-store-submission · Status: active · Updated: 2026-11-18 · Theme: release
+Slug: app-store-submission · Status: active · Updated: 2026-11-21 · Theme: release
 
 ## Goal
 
@@ -159,9 +159,14 @@ needs these changes in the App Store build:
   only on retry. The release check on `2e2fe86` (the build 84 candidate) failed
   the same journey: once the day, time and alongside rows scrolled the composer
   down, the test searched downward for the exercise list's add button, which
-  sat above. The composer test fix makes it search upward; build 84 waits for a
-  clean full run on the merged commit. Confirm the check on the exact commit
-  before every upload.
+  sat above. The composer test fix makes it search upward. The 2026-11-20
+  nightly on `7e674ba` (app identical to the 2026-11-19 pass on `60baa1a`)
+  failed shard 4 again on the same journey's switch wait: each poll re-queried
+  every bar, the pinned action and the keyboard, taking 5 to 9 seconds on the
+  hosted runner, so two matching polls could not fit in 15 seconds. The wait
+  now reads the switch from one snapshot per poll and measures the visible band
+  once. Build 85 waits for a clean full run on the merged commit. Confirm the
+  check on the exact commit before every upload.
 - **Still open:** run the waived device checks on the live build.
 
 **Backend constraint:** the live 1.1 (70) client, and 1.0 (55) until users update, must
