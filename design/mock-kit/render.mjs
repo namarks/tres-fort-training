@@ -98,7 +98,7 @@ function page(screen, tokens, mode, palette, darkTokens) {
 <body class="${mode}">${body}</body></html>`;
 }
 
-const order = ['today', 'plan-week', 'plan-weekday', 'plan-add', 'plan-add-ride', 'plan-add-home', 'activity', 'run-detail', 'coach-connect', 'coach-approval', 'run-recorder', 'run-recorder-map', 'run-lock'];
+const order = ['today', 'plan-week', 'plan-weekday', 'plan-add', 'plan-add-ride', 'plan-add-home', 'activity', 'run-detail', 'coach-connect', 'coach-connected', 'coach-approval', 'run-recorder', 'run-recorder-map', 'run-lock'];
 const opts = args();
 const base = readPalette();
 const palettes = [{ name: 'This checkout (BrandPalette.swift)', file: null, override: {} },

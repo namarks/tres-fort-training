@@ -59,11 +59,33 @@ extension APIClient {
 
     // MARK: - M3: Coach MCP connect code
 
+    struct McpConnectCode: Decodable, Equatable {
+        let code: String
+        /// Server time, epoch ms. Older fixtures may omit it.
+        let expires_at: Double?
+    }
+
     /// Generate a short-lived, single-use code for this signed-in member.
     func createMcpConnectCode(jwt: String) async throws -> String {
-        struct Response: Decodable { let code: String }
-        let response: Response = try await post("api/me/mcp-passphrase", body: [:], jwt: jwt)
-        return response.code
+        try await issueMcpConnectCode(jwt: jwt).code
+    }
+
+    /// The same code with its server expiry, for a connect link.
+    func issueMcpConnectCode(jwt: String) async throws -> McpConnectCode {
+        try await post("api/me/mcp-passphrase", body: [:], jwt: jwt)
+    }
+
+    struct CoachGrant: Decodable, Equatable {
+        let id: String
+        /// Server time, epoch ms.
+        let created_at: Double
+    }
+
+    /// The signed-in member's live AI connections (no credentials).
+    func coachGrants(jwt: String) async throws -> [CoachGrant] {
+        struct Response: Decodable { let grants: [CoachGrant] }
+        let response: Response = try await get("api/me/coach-grants", jwt: jwt)
+        return response.grants
     }
 
     struct CoachDisconnectResult: Decodable, Equatable {

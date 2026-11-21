@@ -117,8 +117,8 @@ oauthRoutes.use('/oauth/token', cors());
 
 // ---- discovery -----------------------------------------------------------
 
-const resourceMetadata = (o: string) => ({
-  resource: `${o}/mcp`,
+const resourceMetadata = (o: string, resource = `${o}/mcp`) => ({
+  resource,
   authorization_servers: [o],
   bearer_methods_supported: ['header'],
   scopes_supported: ['mcp'],
@@ -132,6 +132,15 @@ oauthRoutes.get('/.well-known/oauth-protected-resource', (c) =>
 oauthRoutes.get('/.well-known/oauth-protected-resource/mcp', (c) =>
   c.json(resourceMetadata(origin(c.req.url))),
 );
+// A connect link's MCP URL names itself as the resource, so the AI app sends
+// that URL (and the link code in it) back to /oauth/authorize. The code is not
+// looked up here: the answer is the same whether or not it is still valid.
+oauthRoutes.get('/.well-known/oauth-protected-resource/mcp/c/:link', (c) => {
+  const o = origin(c.req.url);
+  const resource = `${o}/mcp/c/${c.req.param('link')}`;
+  if (!mcpResource(o, resource).link) return c.json({ error: 'not_found' }, 404);
+  return c.json(resourceMetadata(o, resource));
+});
 
 const asMetadata = (o: string) => ({
   issuer: o,
@@ -198,6 +207,39 @@ oauthRoutes.post('/oauth/register', async (c) => {
     201,
   );
 });
+
+// ---- connect links -------------------------------------------------------
+
+// A connect link is the member's one-time connect code (server-generated,
+// 256-bit, ten minutes, one use) carried in the MCP URL the iPhone app hands
+// to Claude after the member allows sharing there: https://<host>/mcp/c/<code>.
+// When Claude signs in with that URL as its resource, /oauth/authorize redeems
+// the code and returns to Claude without another Très Fort page. Any other
+// case (spent or expired code, another app) falls back to the normal page.
+const LINK_CODE = /^[A-Za-z0-9_-]{43}$/;
+
+/**
+ * Whether `resource` names this server's MCP endpoint: `<origin>/mcp` or a
+ * connect link under it. Absent means the default. The stored resource is
+ * always `<origin>/mcp`; `link` is the connect code a link carries.
+ */
+function mcpResource(o: string, resource: string | undefined): { ok: boolean; link?: string } {
+  if (!resource || resource === `${o}/mcp`) return { ok: true };
+  const prefix = `${o}/mcp/c/`;
+  if (!resource.startsWith(prefix)) return { ok: false };
+  const link = resource.slice(prefix.length);
+  return LINK_CODE.test(link) ? { ok: true, link } : { ok: false };
+}
+
+/** Links are made only for Claude today: the app asks consent for Claude by name. */
+function linkRecipientAllowed(redirectUri: string): boolean {
+  return recipientFor(redirectUri) === 'Claude, operated by Anthropic';
+}
+
+/** Never log a connect link's code. */
+function redactResource(resource: string | undefined): string | undefined {
+  return resource?.replace(/\/mcp\/c\/[^/?#]*/, '/mcp/c/[link]');
+}
 
 // ---- authorize (per-user consent gate) -----------------------------------
 
@@ -322,10 +364,11 @@ oauthRoutes.get('/oauth/authorize', async (c) => {
   const q = c.req.query();
   let client: Awaited<ReturnType<typeof loadClient>> = null;
   const refuse = (reason: string) => logOAuthRefusal('authorize', reason, {
-    client_name: client?.client_name ?? undefined, redirect_uri: q.redirect_uri, scope: q.scope, resource: q.resource,
+    client_name: client?.client_name ?? undefined, redirect_uri: q.redirect_uri, scope: q.scope, resource: redactResource(q.resource),
     response_type: q.response_type, code_challenge_method: q.code_challenge_method,
   });
-  if (q.resource && q.resource !== `${origin(c.req.url)}/mcp`) { refuse('invalid_target'); return c.json({ error: 'invalid_target' }, 400); }
+  const target = mcpResource(origin(c.req.url), q.resource);
+  if (!target.ok) { refuse('invalid_target'); return c.json({ error: 'invalid_target' }, 400); }
   if (!scopeAccepted(q.scope)) { refuse('invalid_scope'); return c.json({ error: 'invalid_scope' }, 400); }
   client = q.client_id ? await loadClient(c.env, q.client_id) : null;
   if (!client) { refuse('invalid_client_id'); return c.text('invalid client_id', 400); }
@@ -344,19 +387,40 @@ oauthRoutes.get('/oauth/authorize', async (c) => {
   let callback: URL;
   try { callback = new URL(q.redirect_uri); } catch { refuse('invalid_redirect_uri'); return c.text('invalid redirect_uri', 400); }
   c.header('Content-Security-Policy', consentPolicy(callback));
+  const resource = `${origin(c.req.url)}/mcp`;
+  // The member already allowed sharing with Claude in the app, which made
+  // this link: redeem it and go straight back. Rate-limited like the form.
+  if (target.link && callback.protocol === 'https:' && !callback.hash && linkRecipientAllowed(q.redirect_uri)
+      && /^[A-Za-z0-9_-]{43}$/.test(q.code_challenge) && (q.state?.length ?? 0) <= 2048) {
+    const budget = await allowCoachAuthorization(c.env.DB, c.req.header('CF-Connecting-IP') ?? 'unknown');
+    if (!budget.allowed) {
+      c.header('Retry-After', String(budget.retryAfter));
+      return c.json({ error: 'too_many_attempts' }, 429);
+    }
+    const code = rand();
+    const linked = await authorizeCoachConnectCode(c.env.DB, target.link, {
+      code, client_id: client.client_id, redirect_uri: q.redirect_uri, code_challenge: q.code_challenge,
+      scope: 'mcp', resource, expires_at: Date.now() + CODE_TTL_MS,
+    }, 'link');
+    if (linked) {
+      callback.searchParams.set('code', code);
+      if (q.state) callback.searchParams.set('state', q.state);
+      return c.redirect(callback.toString(), 302);
+    }
+    logOAuthRefusal('authorize', 'connect_link_unavailable', { client_name: client.client_name ?? undefined });
+  }
   // Only HTTPS callbacks can complete on the phone. Desktop loopback clients
   // retain the existing consent form. A request ID never grants access.
   let mobileRequest: string | undefined;
   if (callback?.protocol === 'https:' && !callback.username && !callback.password && !callback.hash
       && /^[A-Za-z0-9_-]{43}$/.test(q.code_challenge)
       && scopeAccepted(q.scope)
-      && (!q.resource || q.resource === `${origin(c.req.url)}/mcp`)
       && q.redirect_uri.length <= 2048 && (q.state?.length ?? 0) <= 2048) {
     mobileRequest = rand();
     await createMobileCoachRequest(c.env.DB, {
       id: mobileRequest, client_id: client.client_id, redirect_uri: q.redirect_uri,
       code_challenge: q.code_challenge, state: q.state ?? '',
-      resource: `${origin(c.req.url)}/mcp`, expires_at: Date.now() + CODE_TTL_MS,
+      resource, expires_at: Date.now() + CODE_TTL_MS,
     });
   }
   return c.html(
@@ -367,7 +431,7 @@ oauthRoutes.get('/oauth/authorize', async (c) => {
       code_challenge_method: 'S256',
       state: q.state ?? '',
       scope: 'mcp',
-      resource: q.resource ?? '',
+      resource: q.resource ? resource : '',
     }, client.client_name, undefined, mobileRequest),
   );
 });
@@ -376,9 +440,9 @@ oauthRoutes.post('/oauth/authorize', bodyLimit({ maxSize: 8192 }), async (c) => 
   const form = await c.req.formData();
   const f = (k: string) => String(form.get(k) ?? '');
   const refuse = (reason: string) => logOAuthRefusal('authorize_submit', reason, {
-    redirect_uri: f('redirect_uri'), scope: f('scope'), resource: f('resource'),
+    redirect_uri: f('redirect_uri'), scope: f('scope'), resource: redactResource(f('resource')),
   });
-  if (f('resource') && f('resource') !== `${origin(c.req.url)}/mcp`) { refuse('invalid_target'); return c.json({ error: 'invalid_target' }, 400); }
+  if (!mcpResource(origin(c.req.url), f('resource')).ok) { refuse('invalid_target'); return c.json({ error: 'invalid_target' }, 400); }
   if (!scopeAccepted(f('scope'))) { refuse('invalid_scope'); return c.json({ error: 'invalid_scope' }, 400); }
   if ((f('code_challenge_method') && f('code_challenge_method') !== 'S256') || !f('code_challenge')) { refuse('pkce_required'); return c.text('PKCE S256 required', 400); }
   const client = await loadClient(c.env, f('client_id'));
@@ -398,7 +462,7 @@ oauthRoutes.post('/oauth/authorize', bodyLimit({ maxSize: 8192 }), async (c) => 
     code_challenge_method: 'S256',
     state: f('state'),
     scope: 'mcp',
-    resource: f('resource'),
+    resource: f('resource') ? `${origin(c.req.url)}/mcp` : '',
   };
   const budget = await allowCoachAuthorization(c.env.DB, c.req.header('CF-Connecting-IP') ?? 'unknown');
   if (!budget.allowed) {
@@ -449,10 +513,10 @@ oauthRoutes.post('/oauth/token', async (c) => {
   const f = (k: string) => String(form.get(k) ?? '');
   const grant = f('grant_type');
   const refuse = (reason: string) => logOAuthRefusal('token', reason, {
-    grant_type: grant, client_id: f('client_id'), redirect_uri: f('redirect_uri'), scope: f('scope'), resource: f('resource'),
+    grant_type: grant, client_id: f('client_id'), redirect_uri: f('redirect_uri'), scope: f('scope'), resource: redactResource(f('resource')),
     client_auth: c.req.header('Authorization')?.split(' ')[0],
   });
-  if (f('resource') && f('resource') !== `${origin(c.req.url)}/mcp`) { refuse('invalid_target'); return c.json({ error: 'invalid_target' }, 400); }
+  if (!mcpResource(origin(c.req.url), f('resource')).ok) { refuse('invalid_target'); return c.json({ error: 'invalid_target' }, 400); }
   if (!scopeAccepted(f('scope'))) { refuse('invalid_scope'); return c.json({ error: 'invalid_scope' }, 400); }
 
   if (grant === 'authorization_code') {

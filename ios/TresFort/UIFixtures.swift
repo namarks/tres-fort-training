@@ -187,6 +187,12 @@ enum UIFixtureModel {
     }
 }
 
+/// Whether setup handed Claude a connect link, so the fixture can answer as
+/// if Claude finished connecting with it.
+enum UIFixtureCoachLink {
+    static var opened = false
+}
+
 struct UIFixtureView: View {
     @Environment(\.dynamicTypeSize) private var systemDynamicTypeSize
     @ObservedObject var auth: AuthModel
@@ -261,6 +267,10 @@ struct UIFixtureView: View {
         .tint(Theme.accent)
         .environment(\.openURL, OpenURLAction { url in
             openedURL = url
+            if ProcessInfo.processInfo.environment["TRESFORT_UI_CAPTURE_LINKS"] == "1", url.host == "claude.ai",
+               url.absoluteString.contains("/mcp/c/") {
+                UIFixtureCoachLink.opened = true
+            }
             if ProcessInfo.processInfo.environment["TRESFORT_UI_RETURN_WITH_SETUP_OPEN"] == "1", url.host == "claude.ai" {
                 // Simulate an incoming link without accepting an outbound
                 // handoff: setup must be replaced by the incoming intent alone.
@@ -921,7 +931,14 @@ private struct UIFixtureServer {
             status = known ? 200 : 201
             response = ["ok": true, "destination": "intervals.icu", "deduplicated": known, "activity_id": id]
         case ("POST", "/api/me/mcp-passphrase"):
-            response = ["code": String(repeating: "C", count: 43)]
+            response = ["code": String(repeating: "C", count: 43),
+                        "expires_at": Date().timeIntervalSince1970 * 1000 + 600_000]
+        case ("GET", "/api/me/coach-grants"):
+            // Claude "connects" once setup has handed it a connect link.
+            response = ["grants": UIFixtureCoachLink.opened
+                ? [["id": "synthetic-grant", "client_id": "synthetic-claude", "scope": "mcp",
+                    "created_at": Date().timeIntervalSince1970 * 1000, "last_refreshed_at": NSNull(), "legacy": false]]
+                : [[String: Any]]()]
         case ("POST", "/auth/logout"):
             response = ["ok": true]
         case ("GET", "/api/me/group-safety"):

@@ -29,10 +29,14 @@ function bearer(c: { req: { header: (k: string) => string | undefined } }) {
 }
 
 function unauthorized(c: any) {
-  // RFC 9728 pointer so OAuth-capable clients can discover the AS later.
+  // RFC 9728 pointer so OAuth-capable clients can discover the AS later. A
+  // connect link (/mcp/c/<code>, see src/oauth.ts) points at its own
+  // metadata, which names the link as the resource the client signs in for.
+  const link = /^\/mcp\/c\/([A-Za-z0-9_-]{43})$/.exec(new URL(c.req.url).pathname)?.[1];
+  const metadata = link ? `/.well-known/oauth-protected-resource/mcp/c/${link}` : '/.well-known/oauth-protected-resource';
   c.header(
     'WWW-Authenticate',
-    `Bearer resource_metadata="${new URL('/.well-known/oauth-protected-resource', c.req.url).href}"`,
+    `Bearer resource_metadata="${new URL(metadata, c.req.url).href}"`,
   );
   return c.json({ error: 'unauthorized' }, 401);
 }

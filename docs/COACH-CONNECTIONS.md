@@ -16,19 +16,52 @@ provider completed setup.
 
 ### Claude
 
-Read what is shared and tap **Allow and connect Claude**: one tap allows
-sharing and opens the [documented install link](https://claude.com/docs/connectors/building/directory-vs-custom#share-an-install-link),
-which opens Claude's custom-connector form with the name and current environment's
-MCP URL filled in. It contains no member code or credential. Sign in if needed,
-review and add the connector, then choose **Open Très Fort to review access**
-on the consent page. Explicitly allow access in the signed-in app; **Allow and
-return to Claude** goes back to Claude on its own. Setup closes after a successful browser handoff so the returned
-access request can present immediately. Incoming approval also replaces an open
-or restored setup sheet, including when a copied link was used. Profile, Today
-and onboarding all use this same setup presentation. If Claude intercepts the install link
-without displaying the form, return to setup, press and hold **Allow and
-connect Claude**, choose **Allow and copy setup link**, and paste it into Safari. Native mobile
-connector installation is in beta;
+Read what is shared and tap **Allow and connect Claude**. One tap allows
+sharing, asks the server for the member's one-time connect code and opens the
+[documented install link](https://claude.com/docs/connectors/building/directory-vs-custom#share-an-install-link)
+with Claude's custom-connector form filled in. The connector address is a
+**connect link**, `https://<worker>/mcp/c/<code>`: the same server-generated
+code the connect-code form takes (256-bit, ten minutes, one use, stored as a
+digest). The member taps **Add** (and **Connect** if Claude asks) and Claude
+comes back connected; no Très Fort page opens.
+
+How the link finishes (`src/oauth.ts`, `test/coach_connect_link.test.ts`):
+
+- An unauthenticated call to the link answers 401 with
+  `resource_metadata` pointing at
+  `/.well-known/oauth-protected-resource/mcp/c/<code>`, which names the link
+  itself as the resource. That metadata never looks the code up.
+- Claude signs in with the link as its `resource`. `/oauth/authorize` accepts
+  `<origin>/mcp` or a link under it, and stores `<origin>/mcp`. When the
+  callback is Claude's (named from the registered return address, as on the
+  consent page), it redeems the code for that member, writes an
+  `approve_coach_connection` audit row with result `connect_link`, and
+  redirects to the callback with a PKCE-bound authorization code. The
+  form's IP rate limit applies.
+- Anything else falls back to today's consent page with phone approval: a
+  spent, expired or replaced code, another app's callback (the code stays
+  unspent), or a client that sends `<origin>/mcp` as its resource. Token
+  exchange and refresh accept the link as `resource`, and Claude keeps calling
+  the link's address with its bearer. Refusal logs replace the code with
+  `[link]`.
+- Consent still comes first (App Review 5.1.1(i)/5.1.2(i)): the code is made
+  only after the member taps Allow, and the shared-data list is on that screen.
+  Whoever holds the link in its ten minutes can connect their Claude to the
+  account, the same exposure as a connect code; Disconnect all AI apps revokes
+  it.
+
+Setup stays open while the member is in Claude and checks
+`GET /api/me/coach-grants` every few seconds while it is in front, then shows
+**Claude is connected** with a first question to ask. Without a code (offline,
+or a server before this change) the app opens the plain `/mcp` address and the
+member approves as before: choose **Open Très Fort to review access** on the
+consent page, then **Allow and return to Claude**. Incoming approval also
+replaces an open or restored setup sheet, including when a copied link was
+used. Profile, Today and onboarding all use this same setup presentation. If
+Claude intercepts the install link without displaying the form, return to
+setup, press and hold **Allow and connect Claude**, choose **Allow and copy
+setup link** (it carries a fresh connect link), and paste it into Safari.
+Native mobile connector installation is in beta;
 [web setup remains the primary custom-connector path](https://support.claude.com/en/articles/11176164-use-connectors-to-extend-claude-s-capabilities).
 
 If the installed Worker or iOS version cannot complete app approval, expand

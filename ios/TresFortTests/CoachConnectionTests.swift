@@ -10,12 +10,28 @@ final class CoachConnectionTests: XCTestCase {
             XCTAssertEqual(parts.host, "claude.ai")
             XCTAssertEqual(parts.path, "/customize/connectors")
             let fields = Dictionary(uniqueKeysWithValues: try XCTUnwrap(parts.queryItems).map { ($0.name, $0.value) })
-            XCTAssertEqual(fields.count, 3, "Install links must not include a member code or credential")
+            XCTAssertEqual(fields.count, 3, "Plain install links must not include a member code or credential")
             XCTAssertEqual(fields["modal"], "add-custom-connector")
             XCTAssertEqual(fields["connectorName"], "Très Fort")
             XCTAssertEqual(fields["connectorUrl"], base + "/mcp")
             XCTAssertNil(parts.fragment)
         }
+    }
+
+    func testConnectLinkCarriesOnlyAOneTimeCodeInTheServerAddress() throws {
+        let code = String(repeating: "A", count: 21) + "-_" + String(repeating: "b", count: 20)
+        let url = CoachSetup.claudeInstallURL(baseURL: URL(string: "https://example.invalid")!, link: code)
+        let parts = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        let fields = Dictionary(uniqueKeysWithValues: try XCTUnwrap(parts.queryItems).map { ($0.name, $0.value) })
+        XCTAssertEqual(fields.count, 3)
+        XCTAssertEqual(fields["connectorUrl"], "https://example.invalid/mcp/c/" + code)
+        // Anything that isn't a server-made code falls back to the plain address.
+        for bad in ["", "short", String(repeating: "A", count: 44), String(repeating: "A", count: 42) + "/"] {
+            XCTAssertEqual(CoachSetup.serverURL(baseURL: URL(string: "https://example.invalid")!, link: bad).absoluteString,
+                           "https://example.invalid/mcp")
+        }
+        XCTAssertEqual(CoachSetup.serverURL(baseURL: URL(string: "https://example.invalid")!, link: nil).absoluteString,
+                       "https://example.invalid/mcp")
     }
 
     private func profile(_ fields: String) throws -> MeProfile {
