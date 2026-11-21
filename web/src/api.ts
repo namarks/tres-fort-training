@@ -50,9 +50,40 @@ export interface Me {
   id: string;
   display_name: string | null;
   email: string | null;
-  /** `is_owner` opens the owner's Diagnostics tab. */
-  coach?: { is_owner?: boolean };
+  /** `is_owner` opens the owner's Diagnostics tab; `connected` says an AI app has access. */
+  coach?: { is_owner?: boolean; connected?: boolean };
+  /** This member's intervals.icu connection (Settings → Connections). */
+  intervals?: IntervalsStatus;
+  /** Whether this member's Apple Health workouts show in their group. */
+  health?: { sharing_in_group?: boolean };
 }
+
+export interface IntervalsStatus {
+  connected: boolean;
+  needs_reauth: boolean;
+  credential_generation: number;
+  sync_pending: boolean;
+  last_synced_at: number | null;
+}
+
+export interface WhoopStatus {
+  configured: boolean;
+  connected: boolean;
+  needs_reauth: boolean;
+  connected_at: number | null;
+  last_synced_at: number | null;
+}
+
+/** One AI app's access, without any credential. */
+export interface CoachGrant {
+  id: string;
+  /** The name the app registered with: its own words, shown as text only. */
+  client_name: string | null;
+  created_at: number;
+  last_refreshed_at: number | null;
+}
+
+export type ConnectProvider = 'intervals' | 'whoop';
 
 export class SignedOutError extends Error {
   constructor() {
@@ -380,3 +411,28 @@ export async function decideCoachRequest(id: string, allow: boolean, account: st
     throw error;
   }
 }
+
+// ---- Settings: connections and AI coach --------------------------------------
+
+export const fetchWhoopStatus = () => getJson<WhoopStatus>('/api/me/whoop');
+export const fetchCoachGrants = async () => (await getJson<{ grants: CoachGrant[] }>('/api/me/coach-grants')).grants;
+
+/**
+ * Connecting a provider leaves the page for the provider's sign-in. The
+ * gateway forwards these to the API's /auth/<provider>/* for this session;
+ * the provider sends the browser back to Settings → Connections with a
+ * completion only this session can finish.
+ */
+export const connectionWrites = {
+  start: (provider: ConnectProvider) => request<{ authorize_url: string }>('POST', `/connect/${provider}/start`, {}),
+  finish: (provider: ConnectProvider, completion: string) =>
+    request<{ connected: true }>('POST', `/connect/${provider}/finish`, { completion }),
+  syncIntervals: (expectedGeneration: number) =>
+    request('POST', '/api/me/integrations/intervals/sync', { expected_generation: expectedGeneration }),
+  disconnectIntervals: () => request('PATCH', '/api/me/integrations/intervals', { api_key: null, athlete_id: null }),
+  syncWhoop: () => request('POST', '/api/me/whoop/sync', {}),
+  disconnectWhoop: () => request('DELETE', '/api/me/whoop'),
+  setHealthSharing: (enabled: boolean) => request('PATCH', '/api/me/health-sharing', { enabled }),
+  removeCoachGrant: (grantId: string) => request('DELETE', `/api/me/coach-grants/${encodeURIComponent(grantId)}`),
+  removeAllCoachGrants: () => request('DELETE', '/api/me/coach-grants'),
+};

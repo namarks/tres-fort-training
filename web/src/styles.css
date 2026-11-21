@@ -78,6 +78,14 @@ p { margin: 0 0 0.75rem; }
 .muted { color: var(--muted); }
 .fine { color: var(--muted); font-size: 0.8125rem; margin-top: 1.5rem; }
 .centered { min-height: 70vh; display: grid; place-content: center; text-align: center; padding: 2rem 16px; gap: 0.5rem; }
+/* The empty Plan page: setup is the next action, a single workout the other way in. */
+.plan-first-actions { display: flex; gap: 0.6rem; justify-content: center; flex-wrap: wrap; }
+.plan-first-actions > * { min-height: 44px; display: inline-flex; align-items: center; }
+.button-primary-link {
+  background: var(--signal-fill); color: var(--on-signal); border: 1px solid var(--signal-fill);
+  border-radius: 8px; padding: 0.45rem 0.9rem; font-weight: 600; text-decoration: none;
+}
+.button-primary-link:hover { background: var(--signal-fill-hover); }
 
 /* ---- sign in ---------------------------------------------------------- */
 .signin { min-height: 100vh; display: grid; place-items: center; padding: 2rem 16px; }

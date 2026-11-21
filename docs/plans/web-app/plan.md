@@ -1,6 +1,6 @@
 # Plan on the web
 
-Slug: web-app · Status: active · Updated: 2026-11-18 · Theme: platform
+Slug: web-app · Status: active · Updated: 2026-11-21 · Theme: platform
 
 ## Goal
 
@@ -77,6 +77,22 @@ partner training are not web features.
     `npm run test:web-onboarding` journeys use the real local gateway and D1
     at 1280 and 800 px, including keyboard operation, failed reads, lost
     replies, schedule conflicts and cross-tab account changes.
+  - First-run setup (owner, 2026-11-21: a new account landed on "Create your
+    first workout" and went straight into workout details, with no setup;
+    Nick picked mock A of two). A new account with no plan, opening the
+    site's front door in a browser that hasn't finished or skipped setup,
+    gets three optional steps, the web counterpart of member activation P5:
+    "What does your usual week look like?" (seven weekday columns, each with
+    the Add box by type, saved to the repeating week as it is added),
+    "Working toward something?" (the Event form, with "build up to it with a
+    training block" opening block setup after Finish), and "Bring in your
+    workouts" (the P4 connection rows plus an optional AI coach row). Skip is
+    always there. The step and the block choice live in `sessionStorage`, so
+    a provider's sign-in returns to the step; "done" lives in `localStorage`
+    per account; a plan made anywhere ends it. The empty Plan page offers
+    "Set up my week" (`#setup`) beside "Create a workout". Rules are pure in
+    `web/src/connections.ts`; `scripts/web-setup-journey.mjs` covers it at
+    1280 and 390 px.
   - Writes from the gateway are audited as `actor='web'`, not `'ios'`
     (built with the first P2 write, below).
   - Released 2026-11-02 with the owner's written go-ahead: migrations 0059
@@ -448,9 +464,33 @@ partner training are not web features.
     where the existing ones cannot answer a chart, and the iOS app can use
     them too.
 - [ ] **P4 — Profile and connections**
-  - Profile and units, training profile, intervals.icu connect and resync,
-    AI coach connections (personal passphrase, list and revoke grants), Apple
-    Health group sharing switch, data export, and account deletion.
+  - Built 2026-11-21 (owner: the web had no way to connect AI or any
+    integration): a Settings top-bar item with two sections.
+    - Connections: intervals.icu (where Zwift rides come from) and WHOOP
+      connect, sync and disconnect from the web; Apple Health says it
+      connects on iPhone only and links the App Store; the Apple Health group
+      sharing switch. Garmin stays hidden until it opens to members (not
+      before 2026-12-08). Status wording follows
+      `docs/CONNECTIONS-UI-SPEC.md`: missing status is never shown as
+      disconnected.
+    - AI coach: lists AI apps with access by the name each registered with
+      (`client_name` from `oauth_clients`), removes one or all, opens
+      Claude's custom-connector form with Très Fort filled in (the same
+      install link as the iPhone's "Allow and connect Claude"), links the
+      website's ChatGPT guide, and shows the connector address to copy.
+      Consent stays on the Très Fort approval page.
+    - How web connect works: a web sign-in (`client: 'web'`) mints an
+      intervals.icu or WHOOP state prefixed `web.`. The prefix is inside the
+      stored state (or its digest), so it can't be added later. The provider
+      callback then returns to `WEB_APP_ORIGIN/#settings/connections` with
+      the completion secret in the fragment (never sent to a server) instead
+      of `tresfort://`, and only the same web session can finish it. The
+      gateway forwards `POST /connect/{intervals,whoop}/{start,finish}` to
+      `/auth/...` with the same origin, header and cookie checks as writes,
+      and its write allowlist gains the connection, sync, sharing and grant
+      removal routes. No migration.
+  - Still to do in P4: profile and units, training profile, data export and
+    account deletion.
 - [ ] **P5 — Release**
   - Privacy policy names the web sign-in cookie (no analytics or tracking);
     the website links to the web app; the owner approves the `tres-fort-web`
@@ -467,14 +507,15 @@ partner training are not web features.
 
 ## Next step
 
-**Now (@owner):** Give the written go-ahead for a `tres-fort-web` release
-from current main, which carries the guided block start and the Add box by
-type (P2, public PR #13, merged 2026-11-17). It changes no API, so the API
-released on 2026-11-17 serves it. Then, signed in at `app.tresfort.app`,
-start a block with the three questions and add a run to an empty date by
-double-clicking it.
+**Now (@owner):** Review and merge the first-run setup and Settings PR
+(P1 setup, P4 Connections and AI coach). Releasing it needs two written
+go-aheads in order: the API first (it adds `WEB_APP_ORIGIN` and the web
+return for intervals.icu and WHOOP), then `tres-fort-web` (its
+`/connect/*` routes call the new API). Then sign in on the web with a new
+account to see setup, and connect intervals.icu from Settings → Connections.
 
-Released on 2026-11-17 with the owner's go-ahead (API first, then the web
+The guided block start and the Add box by type (P2, public PR #13) were
+released on 2026-11-19. Released on 2026-11-17 with the owner's go-ahead (API first, then the web
 app, both from main after public PR #12): the Plan tabs, the repeating week
 as the calendar's first row and the block beside it with its own Block tab
 (public PRs #11 and #12), and the web parts of the core lifting pass in
@@ -487,8 +528,8 @@ block's own list is [progressive plans](../progressive-plans/plan.md) P7.
 **Later (@agent):** Date-only replacement of scheduled extras, and a second
 workout on one date from the Add box, still need a shared replacement and
 lineage contract, as described in member activation P7. The remaining P3
-analysis pages (Running, Recovery, Records) and the broader P4 profile and
-connection work keep their own scope.
+analysis pages (Running, Recovery, Records) and the rest of P4 (profile,
+units, training profile, export, deletion) keep their own scope.
 
 **Release rule (@owner):** Deploy a compatible API before web bundles that
 need its changed request shapes. Repository completion does not prove the
@@ -510,9 +551,10 @@ production web bundle or API version.
 - People without an iPhone (owner reviewed 2026-11-16, decided to leave it
   for now; no plan covers it). Today they can create an Apple Account on the
   web, sign in here, plan and analyze, but the gateway refuses set logging,
-  session lifecycle, uploads and connections (intervals.icu, Garmin, WHOOP),
-  so training needs the iOS app or an AI coach, which the no-AI rule does
-  not accept. Options sized then, in the order recommended: (1) Google
+  session lifecycle, uploads and Garmin, so training needs the iOS app or an
+  AI coach, which the no-AI rule does not accept. Since 2026-11-21 they can
+  connect intervals.icu and WHOOP from the web (P4), so workouts recorded on
+  a watch, bike computer or Zwift reach their plan without an iPhone. Options sized then, in the order recommended: (1) Google
   sign-in with an identity table that lets one account hold several
   sign-ins, about two to three PRs; `users.apple_sub` is `NOT NULL` today.
   (2) Training on the web at phone size: log a workout, enter an activity,

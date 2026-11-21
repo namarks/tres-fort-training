@@ -714,6 +714,16 @@ use server status, reject late operation/profile responses, and refresh shared
 activity state after a successful import. A saved local connection is historical
 context and cannot override a current disconnected or reconnect-required state.
 
+The web app connects intervals.icu and WHOOP through the same start, callback
+and finish routes. A start from a web sign-in (app JWT `client: 'web'`) mints a
+state prefixed `web.`; the prefix is part of the stored state (intervals.icu)
+or of its stored digest (WHOOP), so a callback cannot be redirected by adding
+or removing it. A web-marked callback redirects to
+`WEB_APP_ORIGIN/#settings/connections?provider=…&completion=…` (or `&error=…`)
+instead of `tresfort://`; the completion stays in the URL fragment, and only
+the same web session can finish it. A web start without a valid
+`WEB_APP_ORIGIN` is refused with `web_connect_not_configured`. No migration.
+
 The intervals.icu event and activity caches use change-aware upserts. An
 existing row updates only when a normalized, extracted field differs or the
 row is being resurrected; an unchanged provider result performs no write and

@@ -1,6 +1,6 @@
 # Member Activation and Adherence
 
-Slug: member-activation-and-adherence · Status: paused · Updated: 2026-11-18 · Theme: gym-floor
+Slug: member-activation-and-adherence · Status: paused · Updated: 2026-11-21 · Theme: gym-floor
 
 ## Goal
 
@@ -180,6 +180,11 @@ how to populate an empty progress view without needing another setup flow.
     Today, invite and coach ordering, reopening from empty Today and skipping
     without writes run in the nightly release check. Exact-head CI on the
     delivering PR is the merge gate.
+  - Web counterpart (owner, 2026-11-21): the website's first sign-in now
+    opens the same kind of short setup (usual week, an optional goal event,
+    connect apps with an optional AI coach) instead of an empty workout form.
+    It is tracked in [web app](../web-app/plan.md) P1 and P4; this plan stays
+    paused.
 
 - [x] **P6 — Plan a run with separate timed core**
   - Owner direction (2026-11-12): fix the web calendar and first-run workout

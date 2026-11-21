@@ -2667,14 +2667,14 @@ apiRoutes.patch('/me/integrations/intervals', async (c) => {
   const athleteId = typeof rawId === 'string' && rawId.length > 0 ? rawId : null;
   const result = await setUserIntervalsCreds(c.env.DB, userId, c.env.CREDENTIAL_ENCRYPTION_KEY, apiKey, athleteId);
   // Audit the change without recording the API key itself (only the
-  // outcome). actor='ios' distinguishes this REST mutation from MCP audits.
+  // outcome). The actor ('ios' or 'web') distinguishes this REST mutation from MCP audits.
   await writeAudit(
     c.env.DB,
     userId,
     'set_intervals_creds',
     { connected: result.connected },
     result.connected ? 'connected' : 'disconnected',
-    'ios',
+    c.get('appClient'),
   );
   if (result.connected) {
     c.executionCtx.waitUntil(reconcileIntervalsConnection(

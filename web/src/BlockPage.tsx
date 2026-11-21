@@ -41,7 +41,7 @@ import type { Catalog, Write } from './WorkoutEditor';
  * member does every week stays in the Schedule tab's top row and carries on
  * beside it. Starting one is three questions (owner, 2026-11-17).
  */
-export function BlockPage({ state, write, busy, accountId, catalog, miles, onEditWorkout }: {
+export function BlockPage({ state, write, busy, accountId, catalog, miles, onEditWorkout, initialStarting = false }: {
   state: StateResponse;
   write: Write;
   busy: boolean;
@@ -49,10 +49,12 @@ export function BlockPage({ state, write, busy, accountId, catalog, miles, onEdi
   catalog: Catalog;
   miles: boolean;
   onEditWorkout: (id: string | null) => void;
+  /** `#block/start` (the first-run setup's "build a block") opens block setup. */
+  initialStarting?: boolean;
 }) {
   const today = useMemo(() => localToday(), []);
   const plan = state.plan;
-  const [starting, setStarting] = useState(false);
+  const [starting, setStarting] = useState(initialStarting);
   const newDraft = useEditorDraft({ accountId, planId: plan?.id ?? 'none', documentId: NEW_BLOCK_DOCUMENT }, isNewBlockDraft);
   const block = useBlockEditor({ state, write, busy, today, accountId });
   const active = block.kind === 'block' ? block : null;

@@ -14,6 +14,7 @@
 //   sync that was already running.
 // - WHOOP data stays out of the coach and group views (see the plan's notes on
 //   WHOOP's API terms). Those exclusions live with each query.
+import { markWebState } from '../connectReturn';
 import { credentialDigest, openCredential, randomSecret, sealCredential } from '../credentials';
 import type { Fetcher } from '../intervals';
 import type { Env } from '../types';
@@ -171,8 +172,11 @@ export function createWhoopService(deps: WhoopDeps) {
     ).bind(userId).first<ConnectionRow>();
   }
 
-  async function createWhoopOAuthState(db: D1Database, userId: string, appSessionId: string, now = Date.now()): Promise<string> {
-    const state = randomSecret();
+  async function createWhoopOAuthState(db: D1Database, userId: string, appSessionId: string, now = Date.now(),
+    web = false): Promise<string> {
+    // A web sign-in's state is marked so its callback returns to the web app.
+    // The digest covers the marker, so it can't be added or removed.
+    const state = web ? markWebState(randomSecret()) : randomSecret();
     await db.batch([
       db.prepare('DELETE FROM provider_oauth_states WHERE expires_at <= ?1').bind(now),
       db.prepare(`INSERT INTO provider_oauth_states (state_sha256, user_id, provider, app_session_id, expires_at)
@@ -183,7 +187,7 @@ export function createWhoopService(deps: WhoopDeps) {
 
   /** Single use: the row is deleted whether or not it is still valid. */
   async function consumeWhoopOAuthState(db: D1Database, state: string, now = Date.now()) {
-    if (!/^[A-Za-z0-9_-]{43}$/.test(state)) return null;
+    if (!/^(?:web\.)?[A-Za-z0-9_-]{43}$/.test(state)) return null;
     const row = await db.prepare(`DELETE FROM provider_oauth_states WHERE state_sha256 = ?1 AND provider = 'whoop'
       RETURNING user_id, app_session_id, expires_at`).bind(await credentialDigest(state))
       .first<{ user_id: string; app_session_id: string; expires_at: number }>();

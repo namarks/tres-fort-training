@@ -170,6 +170,26 @@ describe('POST /auth/intervals/start', () => {
   });
 });
 
+describe('connecting intervals.icu from the web app', () => {
+  it('marks a web sign-in\'s state and sends its callback back to the web app', async () => {
+    const r = await SELF.fetch(`${BASE}/auth/dev`, { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ secret: 'test-dev', client: 'web' }) });
+    const { jwt } = await r.json<{ jwt: string }>();
+    const start = await SELF.fetch(`${BASE}/auth/intervals/start`, { method: 'POST', headers: { Authorization: `Bearer ${jwt}` } });
+    expect(start.status).toBe(200);
+    const state = new URL((await start.json<{ authorize_url: string }>()).authorize_url).searchParams.get('state')!;
+    expect(state).toMatch(/^web\.[0-9a-f]{64}$/);
+    const declined = await SELF.fetch(`${BASE}/auth/intervals/callback?error=access_denied&state=${state}`, { redirect: 'manual' });
+    expect(declined.headers.get('location')).toBe('https://web.example/#settings/connections?provider=intervals&error=access_denied');
+    // The marker is part of the stored state: stripping it finds nothing,
+    // and the unmarked attempt returns through the app link as before.
+    const stripped = await SELF.fetch(`${BASE}/auth/intervals/callback?code=abc&state=${state.slice(4)}`, { redirect: 'manual' });
+    expect(stripped.headers.get('location')).toBe('tresfort://intervals-connected?error=bad_state');
+    const unknown = await SELF.fetch(`${BASE}/auth/intervals/callback?code=abc&state=web.${'0'.repeat(64)}`, { redirect: 'manual' });
+    expect(unknown.headers.get('location')).toBe('https://web.example/#settings/connections?provider=intervals&error=bad_state');
+  });
+});
+
 describe('GET /auth/intervals/callback (pre-exchange branches)', () => {
   it('user-declined error param → bounces back with the error', async () => {
     const r = await SELF.fetch(`${BASE}/auth/intervals/callback?error=access_denied`, {
