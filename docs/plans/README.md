@@ -226,8 +226,7 @@ integration or social breadth.
   1.2 (83). P10, changing a day's run from its details, merged on
   2026-11-18 and needs the next TestFlight build; P4 is the owner's
   interval runs.
-- [Tres Fort on Apple Watch](apple-watch/plan.md) — **planned**, waiting
-  on the owner's pick of scope; a Watch
+- [Tres Fort on Apple Watch](apple-watch/plan.md) — **active**; a Watch
   app with Today and a complication (P4), then lifting from the wrist: the
   Watch drives the iPhone's runner the way a linked iPad does (P5). Runs on
   the wrist follow: planned runs sent to Apple's Workout app, then a Watch

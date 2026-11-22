@@ -1,6 +1,6 @@
 # Tres Fort on Apple Watch
 
-Slug: apple-watch · Status: planned · Updated: 2026-11-22 · Theme: connected-training
+Slug: apple-watch · Status: active · Updated: 2026-11-22 · Theme: connected-training
 
 ## Goal
 
@@ -152,23 +152,22 @@ recorded on the iPhone.
 
 ## Next step
 
-**Now (@owner):** Pick the scope from the three mocked options put to the
-owner on 2026-11-22: lifting only, runs only, or the whole day with lifting
-first, which this plan lays out and recommends. On that pick the plan
-becomes active and P4 starts: the Watch app target, Today on the wrist and
-the complication, checked on a Watch simulator in CI, then P5. Runs on the
-wrist (P1 to P3) stay gated on a member who runs with an Apple Watch, and
-P2 starts only after the recorder's device checks for version 1.2.
+**Now (@agent):** Build P4: the Watch app target, Today on the wrist and the
+complication, checked on a Watch simulator in CI. Then P5, lifting from the
+wrist. The owner chose "the whole day, lifting first" on 2026-11-22 from
+three mocked options. Runs on the wrist (P1 to P3) stay gated on a member
+who runs with an Apple Watch, and P2 starts only after the recorder's
+device checks for version 1.2.
 
 ## Notes / open questions
 
 - The owner asked on 2026-11-03 whether Tres Fort could have an Apple Watch
   app, chose "Full Watch app, runs first" from a phased proposal, and
   paused after P0 with no Apple Watch to test on. On 2026-11-22 the owner
-  asked for the Watch app to be designed and built. The whole day with
-  lifting first is recommended: lifting can be checked on paired
-  simulators, and it is the part Apple's Workout app can't do. The owner's
-  pick is pending.
+  asked for the Watch app to be designed and built, and chose the whole
+  day with lifting first over lifting only and runs only: lifting can be
+  checked on paired simulators, and it is the part Apple's Workout app
+  can't do.
 - Apple's Workout app has no sets or reps, so lifting on the wrist needs the
   Watch app; it drives the iPhone runner the way the iPad Station link
   does. A Watch that trains with no iPhone nearby (its own sign-in, outbox
