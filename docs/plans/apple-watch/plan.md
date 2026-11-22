@@ -127,7 +127,7 @@ recorded on the iPhone.
       card and orange only for what is next, from `BrandPalette`'s dark
       values. The option mocks are in the mock kit
       (`design/mock-kit/watch.mjs`). The next item's Start arrives with P5.
-  - [ ] **(b) The complication**
+  - [x] **(b) The complication**
     - A watch face complication and Smart Stack widget for what is next
       today (`ios/TresFortWatchWidgets`, in `project-watch.yml` only): the
       row that leads with its time, "Done today" and the next workout once
@@ -143,9 +143,12 @@ recorded on the iPhone.
       from the command line. How a face tints it and the background wake
       are checked on a real Watch in P6.
   - [ ] **(c) The Watch app built in CI**
-    - The PR's iOS checks build the Watch target on a Watch simulator from
-      `project-watch.yml`, with the workflow's contract tests updated and a
-      full run on the branch.
+    - The PR's iOS job, after its unit tests, builds the Watch app and its
+      complication unsigned for a Watch simulator from `project-watch.yml`
+      (`npm run ios:verify-watch`, `scripts/verify-watch.sh`) and fails if
+      the Watch app doesn't contain the complication. The workflow's
+      contract tests pin the step, and a full run on the branch checks it
+      beside the release check's jobs.
 - [ ] **P5 — Lift from the wrist**
   - Start on a lifting workout opens it on the iPhone runner. The Watch then
     shows the set the runner is on, from the same `WorkoutDisplayState` a
@@ -180,11 +183,11 @@ recorded on the iPhone.
 
 ## Next step
 
-**Now (@agent):** Finish P4(b): build the complication's extension from
-`project-watch.yml` on a Mac and capture its sizes from the debug gallery.
-Then P4(c), the Watch build in CI, before P5, lifting from the wrist. P4(a)
-was built on a Mac on 2026-11-22 and ran on a Watch simulator with the
-fictional days. The owner chose "the whole day, lifting first" on 2026-11-22 from
+**Now (@agent):** Finish P4(c): the PR's iOS job builds the Watch app and
+its complication on a hosted runner, and a full run on the branch passes
+beside it. Then P5, lifting from the wrist. P4(a) and P4(b) were built on a
+Mac on 2026-11-22 and ran on a Watch simulator with the fictional days: the
+Watch app holds the complication, and the simulator registers it. The owner chose "the whole day, lifting first" on 2026-11-22 from
 three mocked options. Runs on the wrist (P1 to P3) stay gated on a member
 who runs with an Apple Watch, and P2 starts only after the recorder's
 device checks for version 1.2.

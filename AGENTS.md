@@ -54,6 +54,7 @@ npm run db:migrate:remote      # guarded; use the authorized migration runbook
 npm run deploy                 # deploy only, separate production authority required
 npm run release                # guarded; deployment needs separate authority
 npm run test:workout-rollout    # migration integrity and canonical contract tests
+npm run ios:verify-watch       # unsigned build of the Apple Watch app and its complication
 npm run ios:testflight         # build, upload, then give the build to external testers
 npm run testflight:external    # give a build to external TestFlight groups (--list-groups is read-only)
 npm run beta:feedback:list     # read-only: recent TestFlight feedback (--save keeps screenshots)

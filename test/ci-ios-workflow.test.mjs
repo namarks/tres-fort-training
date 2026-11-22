@@ -36,6 +36,11 @@ const nativeSteps = {
     if: "matrix.shard == 'station'",
     run: verify + ' --device com.apple.CoreSimulator.SimDeviceType.iPad-A16 --only-testing-file .github/ios-tests/station.txt',
   },
+  // The Watch targets are in no other build: the unit-test job builds them.
+  'Apple Watch app build': {
+    if: 'matrix.shard == 1',
+    run: 'npm run ios:verify-watch',
+  },
   'Verify App Store packaging without downloads': {
     if: "matrix.shard == 'app-store-iphone'",
     run: 'python3 test/app-store-packaging.test.py',
@@ -98,6 +103,7 @@ function shell(script, env = {}) {
 
 const requiredChecks = [
   'python3 test/verify-ios.test.py',
+  'python3 -B test/verify-watch.test.py',
   'python3 -B test/ci-ios-scope.test.py',
   'python3 -B test/ci-ios-setup.test.py',
   'node --test test/ci-ios-workflow.test.mjs',
@@ -136,6 +142,7 @@ function verificationCommands(script) {
 
 function validateCoverage(value, scripts = packageScripts) {
   assert.equal(scripts['ios:verify'], 'bash scripts/verify-ios.sh', 'native commands use the inspected verifier');
+  assert.equal(scripts['ios:verify-watch'], 'bash scripts/verify-watch.sh', 'the Watch build uses the inspected script');
   // Global/job defaults must not silently change critical steps' shell or cwd.
   for (const defaults of [value.defaults, ...Object.values(value.jobs).map(job => job.defaults)]) {
     assert.ok(defaults === undefined ||
@@ -265,6 +272,8 @@ const brokenCoverage = [
   ['missing App Store flag', value => { delete step(value.jobs['ios-tests'], 'iPhone App Store build and tests').env; }],
   ['wrong Station device', value => { const target = step(value.jobs['ios-tests'], 'iPad Station build and tests'); target.run = target.run.replace('iPad-A16', 'iPhone-17'); }],
   ['wrong device list', value => { const target = step(value.jobs['ios-tests'], 'iPad App Store build and tests'); target.run = target.run.replace('app-store-ipad.txt', 'station.txt'); }],
+  ['skipped Watch build', value => { step(value.jobs['ios-tests'], 'Apple Watch app build').if = "matrix.shard == 'watch'"; }],
+  ['Watch build failure ignored', value => { step(value.jobs['ios-tests'], 'Apple Watch app build')['continue-on-error'] = true; }],
   ['narrowed native tests', value => { step(value.jobs['ios-tests'], 'Unsigned simulator build and tests').run += ' --only-testing TresFortTests/OneTest'; }],
   ['full suite forced to smoke', value => { value.jobs['ios-tests'].env.IOS_UI_SUITE = 'smoke'; }],
   ['native failure ignored', value => { step(value.jobs['ios-tests'], 'iPad Station build and tests')['continue-on-error'] = true; }],
@@ -290,6 +299,7 @@ test('duplicate YAML keys cannot hide a second job definition', () => {
 
 test('a package-script alias cannot replace native verification', () => {
   assert.throws(() => validateCoverage(workflow, { ...packageScripts, 'ios:verify': 'echo skipped' }));
+  assert.throws(() => validateCoverage(workflow, { ...packageScripts, 'ios:verify-watch': 'echo skipped' }));
 });
 
 test('only public visibility selects the standard hosted Mac', () => {

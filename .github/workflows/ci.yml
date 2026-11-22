@@ -234,6 +234,12 @@ jobs:
       - name: Unsigned simulator build and tests
         if: matrix.shard != 'station' && matrix.shard != 'app-store-iphone' && matrix.shard != 'app-store-ipad'
         run: npm run ios:verify -- --runtime com.apple.CoreSimulator.SimRuntime.iOS-26-2 --device com.apple.CoreSimulator.SimDeviceType.iPhone-17 --ui-suite "$IOS_UI_SUITE" --ci-shard ${{ matrix.shard }}
+      # The Apple Watch app and its complication exist only in
+      # ios/project-watch.yml, which the builds above never use. The job that
+      # runs the unit tests also builds them, unsigned, for a Watch simulator.
+      - name: Apple Watch app build
+        if: matrix.shard == 1
+        run: npm run ios:verify-watch
       - name: iPhone App Store build and tests
         if: matrix.shard == 'app-store-iphone'
         env:
@@ -330,6 +336,7 @@ jobs:
       - name: Verification command failure and cleanup checks
         run: |
           python3 test/verify-ios.test.py
+          python3 -B test/verify-watch.test.py
           python3 -B -O test/app-store-assets.test.py
           python3 -B test/ci-ios-scope.test.py
           python3 -B test/ci-ios-setup.test.py
