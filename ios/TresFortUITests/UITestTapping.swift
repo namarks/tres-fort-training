@@ -129,7 +129,9 @@ extension XCUIApplication {
     /// navigation bar and top tab bar, above any bottom tab bar and keyboard.
     private func visibleContentBand() -> CGRect {
         var top = frame.minY + 60
-        var bottom = frame.maxY - 40
+        // Use the actual bars below. Reserving 40 points on every device
+        // excludes fully visible bottom buttons on an iPhone SE.
+        var bottom = frame.maxY
         for bar in navigationBars.allElementsBoundByIndex where bar.exists && bar.isHittable {
             top = max(top, bar.frame.maxY)
         }
