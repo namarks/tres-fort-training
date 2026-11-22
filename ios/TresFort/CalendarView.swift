@@ -63,6 +63,7 @@ private func style(for kind: DayProjection.Kind) -> StateStyle? {
 // The month grid and the activity feed share one ordinary scroll: nothing
 // resizes as the member scrolls.
 struct CalendarMonthView: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ObservedObject var sync: SyncModel
     var onWeeklySchedule: (() -> Void)? = nil
     var onStartWorkout: (() -> Void)? = nil
@@ -229,24 +230,30 @@ struct CalendarMonthView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 8) {
+        let layout = dynamicTypeSize >= .xxLarge
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+            : AnyLayout(HStackLayout(spacing: 8))
+        return layout {
             Text(monthTitle)
                 .font(Theme.display(30))
                 .foregroundStyle(Theme.text)
-                .lineLimit(1)
-            Spacer(minLength: 8)
-            // "Today" lives in the calendar itself now (not the nav bar), so
-            // the toolbar can stay a single centered segmented control with no
-            // shifting/blank trailing slot.
-            Button {
-                withAnimation { pinnedMonth = nil; todayTapped = sync.todayString }
-            } label: {
-                Text("TODAY")
-                    .font(Theme.mono(12, .bold))
-                    .foregroundStyle(Theme.accent)
+                .fixedSize(horizontal: false, vertical: true)
+            if dynamicTypeSize < .xxLarge { Spacer(minLength: 8) }
+            HStack(spacing: 8) {
+                // "Today" lives in the calendar itself now (not the nav bar), so
+                // the toolbar can stay a single centered segmented control with no
+                // shifting/blank trailing slot.
+                Button {
+                    withAnimation { pinnedMonth = nil; todayTapped = sync.todayString }
+                } label: {
+                    Text("TODAY")
+                        .font(Theme.mono(12, .bold))
+                        .foregroundStyle(Theme.accent)
+                        .frame(minHeight: 44)
+                }
+                navArrow("chevron.left") { withAnimation { shiftMonth(-1) } }
+                navArrow("chevron.right") { withAnimation { shiftMonth(1) } }
             }
-            navArrow("chevron.left") { withAnimation { shiftMonth(-1) } }
-            navArrow("chevron.right") { withAnimation { shiftMonth(1) } }
         }
         .padding(.horizontal, 20)
         .padding(.top, 8)
@@ -258,9 +265,13 @@ struct CalendarMonthView: View {
             Image(systemName: sym)
                 .font(.system(size: 16, weight: .bold))
                 .foregroundStyle(Theme.muted)
-                .frame(width: 40, height: 40)
+                .frame(width: 44, height: 44)
                 .background(Theme.surface)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
+        }
+        .accessibilityLabel(sym == "chevron.left" ? "Previous month" : "Next month")
+        .accessibilityShowsLargeContentViewer {
+            Label(sym == "chevron.left" ? "Previous month" : "Next month", systemImage: sym)
         }
     }
 
@@ -271,6 +282,7 @@ struct CalendarMonthView: View {
                     .font(Theme.mono(10, .bold)).tracking(1)
                     .foregroundStyle(Theme.dim)
                     .frame(maxWidth: .infinity)
+                    .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
             }
         }
         .padding(.horizontal, 12)
@@ -486,8 +498,14 @@ struct CalendarDayCell: View {
                         .padding(4)
                 }
             }
+            // Seven date columns must stay distinguishable. Holding a date
+            // magnifies it; opening it shows the fully scaling day agenda.
+            .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         }
         .buttonStyle(.plain)
+        .accessibilityShowsLargeContentViewer {
+            Label(DateLabel.long(ymd), systemImage: "calendar")
+        }
         .accessibilityIdentifier(identifier)
     }
 }

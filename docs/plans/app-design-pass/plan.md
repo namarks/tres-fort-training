@@ -806,12 +806,16 @@ line of their own. P30 builds that.
   - The connection artwork is compact and omitted at accessibility sizes.
     The large rest countdown and weekly total grow through XXXL; workout
     values, surrounding labels, disclosures and actions retain full scaling.
+    Seven-column calendar labels also stop at XXXL and offer press-and-hold
+    magnification; the month heading and the opened day's agenda scale fully.
   - `LargeTextJourneyTests` exercises coach choice and explicit permission,
     Today/calendar/Plan/Activity navigation, load entry, set logging and rest
-    using the simulator's actual content size. Verification and screenshot
-    review are in progress at ordinary, largest standard and AX5 settings
-    on iPhone SE (3rd generation). Exact-head review and required CI remain
-    delivery gates; device acceptance follows a separately authorized build.
+    using the simulator's actual content size at ordinary, largest standard
+    and AX5 settings on iPhone SE (3rd generation). The native run results
+    and synthetic screenshot evidence are recorded in
+    [PR #36](https://github.com/namarks/tres-fort-training/pull/36).
+    Exact-head review and required CI remain delivery gates; device
+    acceptance follows a separately authorized build.
 
 ## Execution frontier
 
@@ -852,10 +856,10 @@ line of their own. P30 builds that.
 
 ## Next step
 
-**Now (@agent):** Finish P32's simulator checks and screenshot review, then
-complete the exact-head Codex review and four required checks for its focused
-PR. Keep the layout change compatible with the independent coach-choice
-work in PR #35; the owner merges after the gate is green.
+**Now (@owner):** Review P32's synthetic captures and merge PR #36 once its
+exact head has a clean Codex review and all four required checks are green.
+If the independent coach-choice PR #35 lands first, reconcile its choices
+with the responsive grid and re-run the current-head gate before merging.
 
 **Then (@agent):** Run the release check on P30's branch for the Today
 journeys (Details, Change for today and Not today now open from the

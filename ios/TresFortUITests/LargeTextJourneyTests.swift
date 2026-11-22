@@ -44,7 +44,7 @@ final class LargeTextJourneyTests: XCTestCase {
     func testCoachChoicesDisclosureAndConsentStayReachable() {
         let app = launch(coach: true)
         capture("coach-claude")
-        for name in ["chatgpt", "other", "codex"] {
+        for name in ["other", "claude", "chatgpt"] {
             let choice = app.buttons["coach.app." + name]
             reveal(choice, in: app, searchingUp: true)
             choice.tapWhenReady()
@@ -53,9 +53,10 @@ final class LargeTextJourneyTests: XCTestCase {
         let disclosure = app.staticTexts["coach.data-sharing"]
         reveal(disclosure, in: app)
         XCTAssertTrue(disclosure.label.contains("OpenAI"))
-        XCTAssertFalse(app.buttons["coach.codex-setup"].exists,
+        let setupSteps = app.descendants(matching: .any).matching(identifier: "coach.chatgpt-steps").firstMatch
+        XCTAssertFalse(setupSteps.exists,
                        "Choosing an app does not authorize sharing")
-        capture("coach-codex")
+        capture("coach-chatgpt")
         let details = app.buttons["coach.full-details"]
         reveal(details, in: app)
         details.tapWhenReady()
@@ -68,8 +69,8 @@ final class LargeTextJourneyTests: XCTestCase {
         reveal(allow, in: app)
         capture("coach-decision")
         allow.tapWhenReady()
-        let setupPrompt = app.buttons["coach.codex-setup"]
-        reveal(setupPrompt, in: app)
+        reveal(setupSteps, in: app)
+        XCTAssertTrue(setupSteps.label.contains("Continue with Apple"))
         XCTAssertFalse(app.buttons["coach.generate-code"].exists)
         capture("coach-setup")
     }
@@ -83,7 +84,14 @@ final class LargeTextJourneyTests: XCTestCase {
         calendar.tapWhenReady()
         XCTAssertTrue(app.buttons["calendar.weeklySchedule"].waitForExistence(timeout: UITestWait.screen))
         capture("calendar")
-        app.navigationBars.buttons["Done"].tapWhenReady()
+        let day = app.buttons["calendar.date.2026-09-08"]
+        reveal(day, in: app)
+        XCTAssertGreaterThan(day.frame.width, 0)
+        day.tapWhenReady()
+        XCTAssertTrue(app.navigationBars["Workout date"].waitForExistence(timeout: UITestWait.screen))
+        capture("calendar-day")
+        app.navigationBars["Workout date"].buttons["Done"].tapWhenReady()
+        app.navigationBars["Calendar"].backButton.tapWhenReady()
         app.tabBars.buttons["Plan"].tapWhenReady()
         capture("plan")
         app.tabBars.buttons["Activity"].tapWhenReady()

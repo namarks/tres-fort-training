@@ -345,9 +345,10 @@ struct CoachConnectView: View {
     /// The AI apps as named tiles. Names only: Anthropic and OpenAI allow
     /// their logos only with permission (see "Brand logos" in DESIGN-SYSTEM.md).
     private var appChoices: some View {
-        let columns = dynamicTypeSize >= .accessibility3 ? 1 : dynamicTypeSize >= .xLarge ? 2 : 4
+        let apps = CoachApp.allCases
+        let columns = dynamicTypeSize >= .accessibility3 ? 1 : dynamicTypeSize >= .xLarge ? 2 : apps.count
         return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: columns), spacing: 8) {
-            ForEach(CoachApp.allCases) { app in
+            ForEach(apps) { app in
                 Button { selectedApp = app } label: {
                     Text(app.tileName)
                         .font(.subheadline.weight(.semibold))
@@ -457,10 +458,13 @@ struct CoachConnectView: View {
         if let link { pendingLink = link }
     }
 
-    /// Both policies on one compact row; borderless so each link keeps its own tap.
+    /// Policies stack at larger sizes; borderless so each link keeps its own tap.
     @ViewBuilder
     private var policyLinks: some View {
-        HStack(spacing: 20) {
+        let layout = dynamicTypeSize >= .xxLarge
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4))
+            : AnyLayout(HStackLayout(spacing: 20))
+        layout {
             switch selectedApp {
             case .claude:
                 Link(destination: AppInformation.anthropicPrivacyURL) { Text("Anthropic privacy").frame(minHeight: 44) }

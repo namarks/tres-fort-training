@@ -188,6 +188,10 @@ are checked separately.
   140 pt rest countdown and 58 pt weekly training total grow through XXXL;
   their surrounding labels and controls still scale fully. Keep native tab
   and navigation controls on the system's sizing and large-content behavior.
+- Seven-column calendar and week-chart labels also stop at XXXL, so adjacent
+  dates remain distinct. Selectable dates support the system large-content
+  viewer on press-and-hold; opening a date shows its agenda at the full text
+  size. Month headings and navigation actions continue to reflow and scale.
 - Check real simulator content sizes, including system controls and sheets:
   `LargeTextJourneyTests` with `scripts/verify-ios.sh --content-size large`,
   `extra-extra-extra-large`, and `accessibility-extra-extra-extra-large` on
