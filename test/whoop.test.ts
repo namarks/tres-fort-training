@@ -255,6 +255,45 @@ describe('WHOOP connect', () => {
     expect(await finishWhoopOAuth(env.DB, env, b.id, 's', completion)).toEqual({ error: 'account_in_use' });
   });
 
+  it('returns a connection started on the web to the web app, finished by that web session', async () => {
+    const id = crypto.randomUUID(), sessionId = sid();
+    await env.DB.prepare('INSERT INTO users(id,apple_sub,created_at,timezone) VALUES (?1,?1,1,?2)').bind(id, 'UTC').run();
+    const jwt = await issueAppJwt(id, 'test-secret', { sessionId, client: 'web' });
+    const start = await request('https://test/auth/whoop/start', { method: 'POST', headers: headers(jwt) });
+    expect(start.status).toBe(200);
+    const state = new URL((await start.json<{ authorize_url: string }>()).authorize_url).searchParams.get('state')!;
+    expect(state.startsWith('web.')).toBe(true);
+    // The marker is covered by the stored digest: without it the state is unknown.
+    const stripped = await request(`https://test/auth/whoop/callback?code=abc&state=${state.slice(4)}`, { redirect: 'manual' });
+    expect(stripped.headers.get('Location')).toBe('tresfort://whoop-connected?error=bad_state');
+
+    fetchMock.get(WHOOP).intercept({ path: '/oauth/oauth2/token', method: 'POST' })
+      .reply(200, { access_token: 'synthetic-access', refresh_token: 'synthetic-refresh', expires_in: 3600, scope: 'offline' });
+    fetchMock.get(WHOOP).intercept({ path: '/developer/v2/user/profile/basic' })
+      .reply(200, { user_id: 515151, email: 'x@example.com', first_name: 'A', last_name: 'B' });
+    const callback = await request(`https://test/auth/whoop/callback?code=abc&state=${encodeURIComponent(state)}`, { redirect: 'manual' });
+    const location = new URL(callback.headers.get('Location')!);
+    expect(`${location.origin}${location.pathname}`).toBe('https://web.example/');
+    expect(location.search).toBe('');
+    const params = new URLSearchParams(location.hash.replace(/^#settings\/connections\?/, ''));
+    expect(params.get('provider')).toBe('whoop');
+    const completion = params.get('completion')!;
+    expect(completion).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    for (const path of ['activity/workout', 'recovery', 'activity/sleep', 'cycle']) {
+      fetchMock.get(WHOOP).intercept({ path: new RegExp(`^/developer/v2/${path}\\?`) }).reply(200, { records: [] });
+    }
+    const finish = await request('https://test/auth/whoop/finish', {
+      method: 'POST', headers: headers(jwt), body: JSON.stringify({ completion }) });
+    expect(finish.status).toBe(200);
+    await settle();
+    expect(await env.DB.prepare(`SELECT actor FROM audit_log WHERE user_id = ?1 AND tool = 'whoop_connect'`).bind(id).first('actor')).toBe('web');
+  });
+
+  it('reports a failed web connection back to the web app', async () => {
+    const r = await request('https://test/auth/whoop/callback?error=access_denied&state=web.x', { redirect: 'manual' });
+    expect(r.headers.get('Location')).toBe('https://web.example/#settings/connections?provider=whoop&error=access_denied');
+  });
+
   it('reports a declined authorization back to the app', async () => {
     const r = await request('https://test/auth/whoop/callback?error=access_denied&state=x', { redirect: 'manual' });
     expect(r.headers.get('Location')).toBe('tresfort://whoop-connected?error=access_denied');

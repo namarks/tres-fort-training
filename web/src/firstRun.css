@@ -1,0 +1,55 @@
+/* The first-run setup: three steps on one calm column. Tokens only; the
+   step's one next button is orange, everything else is navy or neutral. */
+.first-run { max-width: 1040px; margin: 0 auto; padding: 24px 24px 40px; }
+.first-run-head { display: flex; justify-content: space-between; align-items: center; gap: 1rem; margin-bottom: 0.5rem; }
+.first-run-head button { min-height: 44px; }
+.first-run-bar { height: 4px; background: var(--surface-2); border-radius: 2px; overflow: hidden; margin-bottom: 1.5rem; }
+.first-run-bar i { display: block; height: 100%; background: var(--accent); transition: width 200ms ease; }
+@media (prefers-reduced-motion: reduce) { .first-run-bar i { transition: none; } }
+.first-run-step h1 { font-size: 2.4rem; margin-bottom: 0.4rem; }
+.first-run-lead { max-width: 70ch; }
+
+.first-run-week { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px; margin-top: 1.25rem; }
+.first-run-day {
+  display: flex; flex-direction: column; gap: 6px; min-height: 170px; min-width: 0;
+  border: 1px solid var(--line); border-radius: var(--radius); padding: 0.6rem; background: var(--surface);
+}
+.first-run-day.on { box-shadow: inset 0 0 0 2px var(--accent); }
+.first-run-dayname { font-family: JetBrains, monospace; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 400; }
+.first-run-rest { color: var(--muted); font-size: 0.875rem; }
+.first-run-entry {
+  display: flex; justify-content: space-between; align-items: flex-start; gap: 4px;
+  border: 1px solid var(--line); border-top: 3px solid var(--accent); border-radius: 8px; padding: 0.35rem 0.4rem; background: var(--bg);
+}
+.first-run-entry > span { min-width: 0; }
+.first-run-entry b { display: block; font-weight: 650; font-size: 0.875rem; overflow-wrap: anywhere; }
+.first-run-entry small { display: block; color: var(--muted); font-size: 0.75rem; }
+.first-run-entry button.icon { min-width: 28px; min-height: 28px; padding: 0; line-height: 1; }
+.first-run-add { margin-top: auto; min-height: 44px; }
+.first-run-adder { margin-top: 1rem; max-width: 640px; }
+
+.first-run-panel { background: var(--surface); max-width: 760px; }
+.first-run-block { margin: 0.75rem 0 0; }
+.first-run-block input { accent-color: var(--accent); width: 1.1rem; height: 1.1rem; }
+.first-run-foot {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--line);
+}
+.first-run-panel .first-run-foot { margin-top: 1rem; }
+.first-run-foot button { min-height: 44px; }
+.first-run-foot button.primary.big { padding: 0.6rem 1.4rem; font-size: 1rem; }
+.first-run-tail { color: var(--muted); font-size: 0.875rem; }
+.first-run-step .connection-rows + .connection-rows { margin-top: 1.25rem; }
+
+/* After setup: one dismissible line pointing to the iPhone app. */
+.notice.done a { color: var(--accent); font-weight: 650; }
+
+@media (max-width: 860px) {
+  .first-run { padding: 16px; }
+  .first-run-step h1 { font-size: 2rem; }
+  .first-run-week { grid-template-columns: minmax(0, 1fr); }
+  .first-run-day { min-height: 0; flex-direction: row; flex-wrap: wrap; align-items: center; }
+  .first-run-dayname { width: 3rem; }
+  .first-run-entry { flex: 1 1 10rem; }
+  .first-run-add { margin-top: 0; margin-left: auto; }
+}

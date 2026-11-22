@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { useEffect, useId, useMemo, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
 import type { RaceGoal } from '../../src/types';
 import { planWrites, type StateResponse } from './api';
 import { formatActivityDistance, formatDuration, formatPace, type Entry } from './activity';
@@ -522,12 +522,18 @@ function WeeksCard({ race, kinds, kind, target, weeks, miles }: {
 
 // ---- the editor -------------------------------------------------------------
 
-function EventForm({ race, miles, busy, onSave, onCancel }: {
+/** The event's name, date, type, distance and goal time. Also the first-run
+ * setup's optional goal step, with its own button words and extra choices. */
+export function EventForm({ race, miles, busy, onSave, onCancel, submitLabel, cancelLabel, children }: {
   race: RaceGoal | null;
   miles: boolean;
   busy: boolean;
   onSave: (race: RaceGoal) => void;
   onCancel?: () => void;
+  submitLabel?: string;
+  cancelLabel?: string;
+  /** Shown above the buttons. */
+  children?: ReactNode;
 }) {
   const [draft, setDraft] = useState<EventDraft>(() => eventDraft(race, miles));
   const [error, setError] = useState<string | null>(null);
@@ -615,10 +621,11 @@ function EventForm({ race, miles, busy, onSave, onCancel }: {
           <input id={`${id}-goal`} value={draft.goal} placeholder="18:00" inputMode="numeric" onChange={(e) => set({ goal: e.target.value })} />
         </div>
       </div>
+      {children}
       {error && <p className="problem" role="alert">{error}</p>}
       <div className="form-actions">
-        <button type="submit" disabled={busy}>{race ? 'Save event' : 'Set event'}</button>
-        {onCancel && <button type="button" className="ghost" onClick={onCancel}>Cancel</button>}
+        <button type="submit" disabled={busy}>{submitLabel ?? (race ? 'Save event' : 'Set event')}</button>
+        {onCancel && <button type="button" className="ghost" onClick={onCancel}>{cancelLabel ?? 'Cancel'}</button>}
       </div>
     </form>
   );

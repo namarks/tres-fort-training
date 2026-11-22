@@ -298,6 +298,16 @@ describe('API forwarding', () => {
     expect(isAllowedWrite('POST', `/api/coach-requests/${'a'.repeat(64)}`)).toBe(true);
     expect(isAllowedWrite('POST', '/api/coach-requests/short')).toBe(false);
     expect(isAllowedWrite('DELETE', `/api/coach-requests/${'a'.repeat(64)}`)).toBe(false);
+    // Settings → Connections and AI coach.
+    expect(isAllowedWrite('PATCH', '/api/me/integrations/intervals')).toBe(true);
+    expect(isAllowedWrite('POST', '/api/me/integrations/intervals/sync')).toBe(true);
+    expect(isAllowedWrite('DELETE', '/api/me/whoop')).toBe(true);
+    expect(isAllowedWrite('POST', '/api/me/whoop/sync')).toBe(true);
+    expect(isAllowedWrite('PATCH', '/api/me/health-sharing')).toBe(true);
+    expect(isAllowedWrite('DELETE', '/api/me/coach-grants/g1')).toBe(true);
+    expect(isAllowedWrite('DELETE', '/api/me/coach-grants')).toBe(true);
+    expect(isAllowedWrite('DELETE', '/api/me/garmin')).toBe(false);
+    expect(isAllowedWrite('POST', '/api/me/mcp-passphrase')).toBe(false);
 
     const { env, apiFetch } = makeEnv();
     for (const [method, path] of [
@@ -377,6 +387,38 @@ describe('API forwarding', () => {
     const deleted = apiFetch.mock.calls[1]![0] as Request;
     expect(deleted.method).toBe('DELETE');
     expect(new URL(deleted.url).search).toBe('?expected_version=5');
+  });
+
+  it('forwards starting and finishing an intervals.icu or WHOOP connection to the API, under write checks', async () => {
+    const { env, apiFetch } = makeEnv(() => Response.json({ authorize_url: 'https://intervals.icu/oauth/authorize?state=web.x' }));
+    for (const [path, upstream] of [
+      ['/connect/intervals/start', '/auth/intervals/start'],
+      ['/connect/intervals/finish', '/auth/intervals/finish'],
+      ['/connect/whoop/start', '/auth/whoop/start'],
+      ['/connect/whoop/finish', '/auth/whoop/finish'],
+    ] as const) {
+      const response = await handle(new Request(`${ORIGIN}${path}?ignored=1`, { method: 'POST',
+        headers: { ...writeHeaders, 'x-tresfort-account': 'member-1' }, body: '{"completion":"c"}' }), env);
+      expect(response.status, path).toBe(200);
+      const sent = apiFetch.mock.calls.at(-1)![0] as Request;
+      expect(new URL(sent.url).pathname + new URL(sent.url).search).toBe(upstream);
+      expect(sent.headers.get('authorization')).toBe(`Bearer ${WEB_JWT}`);
+      // The tab's account goes along, so the API refuses a switched session.
+      expect(sent.headers.get('x-tresfort-account')).toBe('member-1');
+      expect(await sent.text()).toBe('{"completion":"c"}');
+    }
+    const calls = apiFetch.mock.calls.length;
+    for (const [method, path, headers] of [
+      ['POST', '/connect/garmin/start', writeHeaders],
+      ['GET', '/connect/intervals/start', pageHeaders],
+      ['POST', '/connect/intervals/callback', writeHeaders],
+      ['POST', '/connect/intervals/start', { ...writeHeaders, origin: 'https://evil.example' }],
+      ['POST', '/connect/whoop/start', { ...writeHeaders, 'x-tres-fort-web': '' }],
+    ] as const) {
+      const response = await handle(new Request(`${ORIGIN}${path}`, { method, headers, ...(method === 'POST' ? { body: '{}' } : {}) }), env);
+      expect([403, 404], `${method} ${path}`).toContain(response.status);
+    }
+    expect(apiFetch.mock.calls.length).toBe(calls);
   });
 
   it('requires the page origin, the page header and a JSON body on writes', async () => {

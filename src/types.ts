@@ -9,6 +9,13 @@ export interface Env {
    * the nonce the web gateway bound to the browser that started sign-in.
    */
   APPLE_WEB_SERVICES_ID?: string;
+  /**
+   * The web app's public origin, such as https://app.tresfort.app
+   * (non-secret). A connection started from a web sign-in (intervals.icu,
+   * WHOOP) sends the browser back here instead of to the iPhone app's
+   * tresfort:// link. Unset → connecting from the web is refused.
+   */
+  WEB_APP_ORIGIN?: string;
   /** Apple Developer Team ID used to sign the server-to-server client secret. */
   APPLE_TEAM_ID?: string;
   /** Sign in with Apple private-key identifier (`wrangler secret put`). */

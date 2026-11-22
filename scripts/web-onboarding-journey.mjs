@@ -290,9 +290,12 @@ export async function mixedWeekJourney({ page, origin, width, apiCall }) {
     await form.getByLabel(`Time for ${name} · optional`, { exact: true }).fill(time);
     return form;
   };
+  // A new member opens the first-run setup; skipping it leaves the empty Plan page.
   await page.goto(origin);
+  await page.getByRole('heading', { name: 'What does your usual week look like?', exact: true }).waitFor();
+  await click(page.getByRole('button', { name: 'Skip setup', exact: true }));
   await page.getByRole('heading', { name: 'Plan your week', exact: true }).waitFor();
-  await click(page.getByRole('button', { name: 'Create your first workout', exact: true }));
+  await click(page.getByRole('button', { name: 'Create a workout', exact: true }));
   await click(page.getByRole('button', { name: /^Run Start with an open run/ }));
   await page.getByLabel('Workout name', { exact: true }).fill('Morning run');
   await click(page.getByRole('button', { name: 'Save reviewed workout', exact: true }));

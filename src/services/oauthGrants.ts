@@ -56,6 +56,8 @@ export interface OAuthGrantSummary {
   created_at: number;
   last_refreshed_at: number | null;
   legacy: boolean;
+  /** The name the AI app registered with (its own words, untrusted text). */
+  client_name: string | null;
 }
 
 /** Owner resolution stays in the identity service; injection avoids a cycle
@@ -536,9 +538,10 @@ export function createOAuthGrantService(
     await adoptUntrackedOAuthGrants(db, userId, isOwner);
     const rows = await db.prepare(
       `SELECT g.id, g.client_id, COALESCE(g.scope, 'mcp') AS scope, g.created_at,
-              g.last_refreshed_at, g.legacy
+              g.last_refreshed_at, g.legacy, c.client_name
          FROM oauth_grants g
          JOIN oauth_grant_lifecycle_policy p ON p.id = 1
+         LEFT JOIN oauth_clients c ON c.client_id = g.client_id
         WHERE g.revoked_at IS NULL
           AND (
             (p.activated_at IS NULL
@@ -557,8 +560,9 @@ export function createOAuthGrantService(
       created_at: number;
       last_refreshed_at: number | null;
       legacy: number;
+      client_name: string | null;
     }>();
-    return rows.results.map((row) => ({ ...row, legacy: row.legacy === 1 }));
+    return rows.results.map((row) => ({ ...row, legacy: row.legacy === 1, client_name: row.client_name ?? null }));
   }
 
   /** Caller-scoped and idempotent; never returns or audits credential values. */

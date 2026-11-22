@@ -54,8 +54,9 @@ const MAX_WRITE_BYTES = 64 * 1024;
 const SEGMENT = '[^/]+';
 /**
  * The writes the web may make, one per screen action. Everything else (sets,
- * session lifecycle, account, member groups, connections) is refused here, so a bug or an
+ * session lifecycle, account, member groups) is refused here, so a bug or an
  * injected script on the page cannot reach it through the session.
+ * Connecting intervals.icu or WHOOP goes through `/connect/*` below.
  */
 const WRITE_ROUTES: { method: string; path: RegExp }[] = [
   // Feedback on an already completed exact session; lifecycle and set writes stay blocked.
@@ -85,7 +86,27 @@ const WRITE_ROUTES: { method: string; path: RegExp }[] = [
   // comes from that app's OAuth sign-in page; the API binds the decision to
   // this session's member (src/oauth.ts).
   { method: 'POST', path: /^\/api\/coach-requests\/[a-f0-9]{64}$/ },
+  // Settings → Connections: sync now and disconnect intervals.icu (all nulls)
+  // and WHOOP, and the Apple Health group-sharing switch.
+  { method: 'PATCH', path: /^\/api\/me\/integrations\/intervals$/ },
+  { method: 'POST', path: /^\/api\/me\/integrations\/intervals\/sync$/ },
+  { method: 'DELETE', path: /^\/api\/me\/whoop$/ },
+  { method: 'POST', path: /^\/api\/me\/whoop\/sync$/ },
+  { method: 'PATCH', path: /^\/api\/me\/health-sharing$/ },
+  // Settings → AI coach: remove one AI app's access, or all of them.
+  { method: 'DELETE', path: new RegExp(`^/api/me/coach-grants/${SEGMENT}$`) },
+  { method: 'DELETE', path: /^\/api\/me\/coach-grants$/ },
 ];
+
+/**
+ * Starting and finishing a provider connection from Settings → Connections.
+ * The page calls `/connect/<provider>/<step>`; the gateway forwards it to the
+ * API's `/auth/<provider>/<step>` with the session's bearer, under the same
+ * checks as a write. The API marks a web sign-in's attempt so the provider
+ * sends the browser back to this site, and only this session can finish it.
+ * Garmin is not here until it opens to members.
+ */
+const CONNECT_ROUTE = /^\/connect\/(intervals|whoop)\/(start|finish)$/;
 
 /**
  * Sign in may return to an AI app's connection request or the block planner
@@ -112,6 +133,9 @@ export async function handle(request: Request, env: GatewayEnv): Promise<Respons
   if (path.startsWith('/auth/')) return json({ error: 'not_found' }, 404);
   if (path === '/maps/token' && request.method === 'GET') return mapsToken(request, env);
   if (path.startsWith('/maps/')) return json({ error: 'not_found' }, 404);
+  const connect = CONNECT_ROUTE.exec(path);
+  if (connect && request.method === 'POST') return forwardToApi(request, env, url, `/auth/${connect[1]}/${connect[2]}`);
+  if (path.startsWith('/connect/')) return json({ error: 'not_found' }, 404);
   if (path === '/api' || path.startsWith('/api/')) return forwardToApi(request, env, url);
   return env.ASSETS.fetch(request);
 }
@@ -254,10 +278,11 @@ function redirectAfterSignIn(returnPath: string | null, problem: string | null, 
 
 // ---- API forwarding ---------------------------------------------------------
 
-async function forwardToApi(request: Request, env: GatewayEnv, url: URL): Promise<Response> {
+async function forwardToApi(request: Request, env: GatewayEnv, url: URL, upstreamPath?: string): Promise<Response> {
   if (BLOCKED_API_PATHS.has(url.pathname)) return json({ error: 'not_found' }, 404);
   const isRead = READ_METHODS.has(request.method);
-  if (!isRead && !isAllowedWrite(request.method, url.pathname)) return json({ error: 'not_allowed' }, 405);
+  // A connect route is a write the router already matched exactly.
+  if (!isRead && !upstreamPath && !isAllowedWrite(request.method, url.pathname)) return json({ error: 'not_allowed' }, 405);
   // Same-origin GET fetches carry no Origin header, so reads rely on the
   // custom header (a cross-site page cannot send it without a CORS preflight,
   // which this gateway never answers) plus Sec-Fetch-Site when the browser
@@ -289,7 +314,7 @@ async function forwardToApi(request: Request, env: GatewayEnv, url: URL): Promis
   // Ask for the plan's superset and circuit groups, as the current app does.
   headers.set('x-tresfort-capabilities', 'groups');
 
-  const upstream = await env.API.fetch(new Request(`${API_ORIGIN}${url.pathname}${url.search}`, {
+  const upstream = await env.API.fetch(new Request(`${API_ORIGIN}${upstreamPath ?? `${url.pathname}${url.search}`}`, {
     method: request.method,
     headers,
     redirect: 'manual',

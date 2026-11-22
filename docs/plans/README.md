@@ -270,10 +270,11 @@ integration or social breadth.
   trends with a big screen and a mouse. The calendar, plan editing, the
   Activity page and the Analysis Overview, Event and Strength pages are live.
   The Plan page's tabs, the repeating week as its first row and a training
-  block beside it with its own Block tab were released on 2026-11-17; the
-  guided block start and adding to a day by type (public PR #13) are merged
-  and wait for a web release. Running, Recovery and Records pages follow.
-  Training stays on the iPhone.
+  block beside it with its own Block tab were released on 2026-11-17, and the
+  guided block start and adding to a day by type (public PR #13) on
+  2026-11-19. A three-step first-run setup and a Settings page that connects
+  intervals.icu and WHOOP and manages AI coach access are in review.
+  Running, Recovery and Records pages follow. Training stays on the iPhone.
 
 ### Member experience (`member-experience`)
 

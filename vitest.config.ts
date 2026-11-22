@@ -50,6 +50,7 @@ export default defineWorkersConfig(async () => {
               // WHOOP (docs/plans/whoop): configured so its routes run; every
               // WHOOP request in the suite is answered by fetchMock.
               WHOOP_CLIENT_ID: 'test-whoop-client',
+              WEB_APP_ORIGIN: 'https://web.example',
               WHOOP_CLIENT_SECRET: 'test-whoop-secret',
               // Garmin (docs/plans/garmin): configured so its routes run; every
               // Garmin request in the suite is answered by fetchMock.

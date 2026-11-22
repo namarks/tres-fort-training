@@ -25,6 +25,7 @@ import {
   finishIntervalsOAuth,
   reconcileIntervalsConnection,
 } from '../db';
+import { isWebState, webAppOrigin, webReturn } from '../connectReturn';
 
 export const intervalsAuthRoutes = new Hono<HonoEnv>();
 intervalsAuthRoutes.use('*', async (c, next) => {
@@ -53,7 +54,7 @@ function callbackUrl(env: Env, reqUrl: string): string {
 
 /** Deep-link back into the iOS app; ASWebAuthenticationSession intercepts the
  *  `tresfort` scheme to close the web sheet and hand control back. */
-function appReturn(ok: boolean, detail?: string, generation?: number, syncAfter?: number | null): string {
+function intervalsAppReturn(ok: boolean, detail?: string, generation?: number, syncAfter?: number | null): string {
   const q = ok ? 'ok=1' : `error=${encodeURIComponent(detail ?? 'failed')}`;
   return `tresfort://intervals-connected?${q}${generation !== undefined ? `&generation=${generation}` : ''}${syncAfter != null ? `&sync_after=${syncAfter}` : ''}`;
 }
@@ -67,8 +68,11 @@ intervalsAuthRoutes.post('/start', requireAppJwt, async (c) => {
     return c.json({ error: 'oauth_not_configured' }, 503);
   }
   const userId = c.get('userId');
+  // A web sign-in comes back to the web app, which must be configured.
+  const web = c.get('appClient') === 'web';
+  if (web && !webAppOrigin(c.env.WEB_APP_ORIGIN)) return c.json({ error: 'web_connect_not_configured' }, 503);
   let state: string;
-  try { state = await createIntervalsOAuthState(c.env.DB, userId, undefined, c.get('appSessionId')); }
+  try { state = await createIntervalsOAuthState(c.env.DB, userId, undefined, c.get('appSessionId'), web); }
   catch (error) {
     if (error instanceof Error && error.message === 'intervals_connection_changed') {
       return c.json({ error: 'connection_changed' }, 409);
@@ -87,6 +91,11 @@ intervalsAuthRoutes.post('/start', requireAppJwt, async (c) => {
 // GET /auth/intervals/callback — public browser redirect target.
 intervalsAuthRoutes.get('/callback', async (c) => {
   const q = c.req.query();
+  // Back to where the attempt started: the web app for a marked state (the
+  // marker is part of the stored state, so it can't be forged), else the app.
+  const origin = q.state && isWebState(q.state) ? webAppOrigin(c.env.WEB_APP_ORIGIN) : null;
+  const appReturn = (ok: boolean, detail?: string, generation?: number, syncAfter?: number | null) =>
+    origin ? webReturn(origin, 'intervals', { error: detail ?? 'failed' }) : intervalsAppReturn(ok, detail, generation, syncAfter);
   // User declined, or intervals returned an error. Truncate the reflected
   // value — it's attacker-influenceable and only needs to be a short hint.
   if (q.error) return c.redirect(appReturn(false, q.error.slice(0, 64)), 302);
@@ -165,7 +174,8 @@ intervalsAuthRoutes.get('/callback', async (c) => {
     }
     throw error;
   }
-  return c.redirect(`tresfort://intervals-connected?completion=${encodeURIComponent(completion)}`, 302);
+  return c.redirect(origin ? webReturn(origin, 'intervals', { completion })
+    : `tresfort://intervals-connected?completion=${encodeURIComponent(completion)}`, 302);
 });
 
 // The browser callback cannot activate a connection. Only the original app

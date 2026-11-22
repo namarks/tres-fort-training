@@ -19,6 +19,7 @@ import {
 import { exchangeWhoopCode, fetchWhoopUserId, whoopAuthorizeUrl } from '../whoop';
 import type { Fetcher } from '../intervals';
 import { diagnosticErrorType } from '../errors';
+import { isWebState, webAppOrigin, webReturn } from '../connectReturn';
 
 export const whoopAuthRoutes = new Hono<HonoEnv>();
 whoopAuthRoutes.use('*', async (c, next) => {
@@ -38,38 +39,45 @@ function appReturn(query: string): string {
   return `tresfort://whoop-connected?${query}`;
 }
 
-function failure(detail: string): string {
-  return appReturn(`error=${encodeURIComponent(detail.slice(0, 64))}`);
+function failure(detail: string, origin: string | null = null): string {
+  return origin ? webReturn(origin, 'whoop', { error: detail })
+    : appReturn(`error=${encodeURIComponent(detail.slice(0, 64))}`);
 }
 
 whoopAuthRoutes.post('/start', requireAppJwt, async (c) => {
   if (!c.env.WHOOP_CLIENT_ID || !c.env.WHOOP_CLIENT_SECRET) return c.json({ error: 'whoop_not_configured' }, 503);
   const sessionId = c.get('appSessionId');
   if (!sessionId) return c.json({ error: 'app_session_required' }, 401);
-  const state = await createWhoopOAuthState(c.env.DB, c.get('userId'), sessionId);
+  // A web sign-in comes back to the web app, which must be configured.
+  const web = c.get('appClient') === 'web';
+  if (web && !webAppOrigin(c.env.WEB_APP_ORIGIN)) return c.json({ error: 'web_connect_not_configured' }, 503);
+  const state = await createWhoopOAuthState(c.env.DB, c.get('userId'), sessionId, undefined, web);
   return c.json({ authorize_url: whoopAuthorizeUrl(c.env.WHOOP_CLIENT_ID, callbackUrl(c.env, c.req.url), state) });
 });
 
 whoopAuthRoutes.get('/callback', async (c) => {
   const q = c.req.query();
-  if (q.error) return c.redirect(failure(q.error), 302);
-  if (!q.code || !q.state) return c.redirect(failure('missing_code'), 302);
+  // Back to the web app for a marked state (src/connectReturn.ts), else the app.
+  const origin = q.state && isWebState(q.state) ? webAppOrigin(c.env.WEB_APP_ORIGIN) : null;
+  if (q.error) return c.redirect(failure(q.error, origin), 302);
+  if (!q.code || !q.state) return c.redirect(failure('missing_code', origin), 302);
   const attempt = await consumeWhoopOAuthState(c.env.DB, q.state);
-  if (!attempt) return c.redirect(failure('bad_state'), 302);
+  if (!attempt) return c.redirect(failure('bad_state', origin), 302);
   const clientId = c.env.WHOOP_CLIENT_ID, clientSecret = c.env.WHOOP_CLIENT_SECRET;
-  if (!clientId || !clientSecret || !c.env.CREDENTIAL_ENCRYPTION_KEY) return c.redirect(failure('whoop_not_configured'), 302);
+  if (!clientId || !clientSecret || !c.env.CREDENTIAL_ENCRYPTION_KEY) return c.redirect(failure('whoop_not_configured', origin), 302);
   const exchanged = await exchangeWhoopCode(fetcher, {
     clientId, clientSecret, code: q.code, redirectUri: callbackUrl(c.env, c.req.url),
   });
-  if (!exchanged.ok) return c.redirect(failure(`exchange_${exchanged.status ?? 'network'}`), 302);
-  if (!exchanged.tokens.refreshToken) return c.redirect(failure('no_refresh_token'), 302);
+  if (!exchanged.ok) return c.redirect(failure(`exchange_${exchanged.status ?? 'network'}`, origin), 302);
+  if (!exchanged.tokens.refreshToken) return c.redirect(failure('no_refresh_token', origin), 302);
   const profile = await fetchWhoopUserId(fetcher, exchanged.tokens.accessToken);
-  if (!profile.ok) return c.redirect(failure(`profile_${profile.status ?? profile.reason}`), 302);
+  if (!profile.ok) return c.redirect(failure(`profile_${profile.status ?? profile.reason}`, origin), 302);
   const completion = await createWhoopOAuthCompletion(
     c.env.DB, attempt.user_id, attempt.app_session_id, { ...exchanged.tokens, providerUserId: profile.value },
     c.env.CREDENTIAL_ENCRYPTION_KEY,
   );
-  return c.redirect(appReturn(`completion=${encodeURIComponent(completion)}`), 302);
+  return c.redirect(origin ? webReturn(origin, 'whoop', { completion })
+    : appReturn(`completion=${encodeURIComponent(completion)}`), 302);
 });
 
 whoopAuthRoutes.post('/finish', bodyLimit({ maxSize: 1024 }), requireAppJwt, async (c) => {

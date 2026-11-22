@@ -1,3 +1,4 @@
+import { markWebState } from './connectReturn';
 import { credentialDigest, openCredential, randomSecret, sealCredential } from './credentials';
 import {
   createIntervalsSyncService, INTERVALS_EFFECTIVE_ATHLETE_SQL, INTERVALS_SOURCE_FENCE_ENABLED_SQL,
@@ -2171,9 +2172,12 @@ export async function createIntervalsOAuthState(
   userId: string,
   ttlMs = 10 * 60 * 1000,
   appSessionId: string | null = null,
+  /** A web sign-in's attempt returns to the web app (src/connectReturn.ts). */
+  web = false,
 ): Promise<string> {
-  const state =
+  const random =
     crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '');
+  const state = web ? markWebState(random) : random;
   const ts = now();
   const account = await db.prepare(
     'SELECT intervals_credential_generation AS generation FROM users WHERE id = ?1',
