@@ -249,6 +249,35 @@ final class WatchWorkoutCommandTests: XCTestCase {
         XCTAssertEqual(sync.setOutbox.pending.map(\.body.duration_s), [10], "the hold logs as long as it ran")
     }
 
+    func testStopForAHoldCancelledOnTheIPhoneNeverStopsTheNextOne() async throws {
+        let sync = runner([slot("plank", timed: true)])
+        let started = await apply(tap(.startTimer, on: try shown(sync)), to: sync)
+        let first = try XCTUnwrap(started.state)
+        XCTAssertEqual(first.phase, .active)
+
+        // The member cancels that hold on the iPhone and starts it again a
+        // little later, with the same values. The Watch still shows the
+        // first one.
+        _ = sync.cancelTimedSet(controlID: try XCTUnwrap(sync.timedControlID))
+        XCTAssertFalse(sync.timedActive)
+        clock.now = clock.now.addingTimeInterval(20)
+        let again = await apply(tap(.startTimer, on: try shown(sync)), to: sync)
+        let second = try XCTUnwrap(again.state)
+        XCTAssertEqual(second.phase, .active)
+        XCTAssertEqual(second.set, first.set)
+        XCTAssertNotEqual(second.token, first.token)
+
+        clock.now = clock.now.addingTimeInterval(10)
+        let stale = await apply(tap(.stopTimer, on: first), to: sync)
+        XCTAssertEqual(stale.message, StationLinkCommandReceipt.movedOn)
+        XCTAssertTrue(sync.timedActive, "the hold the Watch never showed keeps running")
+        XCTAssertTrue(sync.setOutbox.pending.isEmpty)
+
+        let stopped = await apply(tap(.stopTimer, on: second), to: sync)
+        XCTAssertTrue(stopped.accepted)
+        XCTAssertEqual(sync.setOutbox.pending.map(\.body.duration_s), [10])
+    }
+
     func testValuesChangedOnTheIPhoneRefuseTheTapAndComeBack() async throws {
         let sync = runner([slot("squat")])
         let onWatch = try shown(sync)

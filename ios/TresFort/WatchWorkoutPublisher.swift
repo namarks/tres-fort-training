@@ -15,18 +15,24 @@ enum WatchWorkoutBuilder {
         let kind: String
         let step: WorkoutDisplayState.Step?
         let slotID: String?
+        /// When a running timed set started, in milliseconds.
+        let timerStart: Int?
     }
 
     /// Names what a tap acts on: the shown set with its exact values, or the
     /// place between sets, in one run of one workout (`run`). A rest and the
     /// ready set it leads to share one token, because the Watch ends a rest
-    /// on its own clock while the iPhone may still be asleep.
+    /// on its own clock while the iPhone may still be asleep. A running
+    /// timer is named by its start too, so Stop & log for a hold cancelled
+    /// on the iPhone never stops the one started after it.
     static func token(for display: WorkoutDisplayState, run: String) -> String {
         let kind = display.phase == .ready || display.phase == .rest ? "set" : display.phase.rawValue
+        let timerStart = display.phase == .active
+            ? display.timedStartDate.map { Int(($0.timeIntervalSince1970 * 1_000).rounded()) } : nil
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
         guard let bytes = try? encoder.encode(Shown(run: run, kind: kind, step: display.current,
-                                                    slotID: display.currentSlotID)) else {
+                                                    slotID: display.currentSlotID, timerStart: timerStart)) else {
             // Never equal to anything the Watch holds.
             return UUID().uuidString
         }

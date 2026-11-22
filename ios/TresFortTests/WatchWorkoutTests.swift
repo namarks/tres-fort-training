@@ -110,6 +110,10 @@ final class WatchWorkoutTests: XCTestCase {
         XCTAssertNotEqual(ready, token(display(.ready, step(weight: 230))))
         XCTAssertNotEqual(ready, token(display(.ready, step(reps: 6))))
         XCTAssertNotEqual(ready, token(display(.active, step())), "a running timer is another place")
+        let hold = token(display(.active, step(), timedStart: now))
+        XCTAssertEqual(hold, token(display(.active, step(), timedStart: now)))
+        XCTAssertNotEqual(hold, token(display(.active, step(), timedStart: now.addingTimeInterval(20))),
+                          "a hold started again is another timer")
         XCTAssertNotEqual(ready, token(display(.ready, step()), run: "2026-11-22#0#2000000600"),
                           "the same set of the workout started again is another run")
         XCTAssertNotEqual(ready, token(display(.ready, step()), run: "2026-11-22#1#2000000000"),
