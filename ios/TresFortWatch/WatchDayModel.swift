@@ -26,9 +26,11 @@ final class WatchDayModel: NSObject, ObservableObject {
     @Published private(set) var isSending = false
     /// Why the iPhone didn't apply the last tap. Cleared by the next state.
     @Published private(set) var notice: String?
-    /// Counts the times the iPhone said the account left. The answer to a
-    /// tap sent before then belongs to that account and is dropped.
-    private var accountClears = 0
+    /// Counts what the iPhone has sent that changed the day or the workout
+    /// here, or said the account left. The context is the iPhone's latest
+    /// word; an answer to a tap sent before the last one is older, so what
+    /// it says the runner shows is dropped.
+    private var changesFromIPhone = 0
     #if DEBUG
     /// A fictional workout answers its own taps; no iPhone is involved.
     private var workoutFixture: WatchWorkoutFixtures?
@@ -129,12 +131,12 @@ final class WatchDayModel: NSObject, ObservableObject {
         if isFictional, command.action == .start {
             workoutFixture = .ready
             finish(command, with: .accepted(command, state: WatchWorkoutFixtures.ready.state(today: today, now: Date())),
-                   sentIn: accountClears)
+                   sentIn: changesFromIPhone)
             return
         }
         if let workoutFixture {
             let answer = workoutFixture.answer(command, to: workout, today: today, now: Date())
-            finish(command, with: answer, sentIn: accountClears)
+            finish(command, with: answer, sentIn: changesFromIPhone)
             return
         }
         #endif
@@ -146,7 +148,7 @@ final class WatchDayModel: NSObject, ObservableObject {
         }
         isSending = true
         notice = nil
-        let sentIn = accountClears
+        let sentIn = changesFromIPhone
         WCSession.default.sendMessageData(message, replyHandler: { [weak self] data in
             let receipt = WatchWorkoutMessage.receipt(from: data)
             Task { @MainActor in self?.finish(command, with: receipt, sentIn: sentIn) }
@@ -157,20 +159,21 @@ final class WatchDayModel: NSObject, ObservableObject {
 
     private func finish(_ command: WatchWorkoutCommand, with receipt: WatchWorkoutReceipt?, sentIn: Int) {
         isSending = false
-        // The account left while the tap was on its way: its answer may
-        // carry that account's workout, which must not come back.
-        guard sentIn == accountClears else { return }
+        // The iPhone has sent a newer day or workout since the tap left, or
+        // said the account left or the workout closed. This answer is older
+        // than that: it must not bring back what the iPhone took away.
+        let isLatest = sentIn == changesFromIPhone
         guard let receipt, receipt.id == command.id else {
-            fail(WatchWorkoutPresentation.noAnswer(command.action))
+            if isLatest { fail(WatchWorkoutPresentation.noAnswer(command.action)) }
             return
         }
         // The iPhone says what its runner shows after the tap. A refusal
         // with nothing to show keeps the screen and says why.
-        if receipt.accepted || receipt.state != nil { setWorkout(receipt.state) }
+        if isLatest, receipt.accepted || receipt.state != nil { setWorkout(receipt.state) }
         if receipt.accepted {
             notice = nil
             WKInterfaceDevice.current().play(command.action == .endRest ? .click : .success)
-        } else {
+        } else if isLatest {
             fail(receipt.message ?? WatchWorkoutPresentation.noAnswer(command.action))
         }
     }
@@ -199,8 +202,10 @@ final class WatchDayModel: NSObject, ObservableObject {
     /// The day and the running workout travel in one context.
     private func apply(context: [String: Any]) {
         if let received = WatchDayMessage.decode(context) {
+            let dayBefore = snapshot, workoutBefore = workout
             apply(received)
             setWorkout(WatchWorkoutMessage.workout(in: context))
+            if received == .cleared || dayBefore != snapshot || workoutBefore != workout { changesFromIPhone += 1 }
         }
     }
 
@@ -213,7 +218,6 @@ final class WatchDayModel: NSObject, ObservableObject {
         case .cleared:
             changed = WatchDayStore.save(nil, to: defaults)
             if snapshot != nil { snapshot = nil }
-            accountClears += 1
         }
         refreshToday()
         // The complication reads the stored copy; an unchanged one is not
