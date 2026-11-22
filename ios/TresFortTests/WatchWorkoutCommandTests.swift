@@ -321,6 +321,18 @@ final class WatchWorkoutCommandTests: XCTestCase {
         XCTAssertEqual(sync.setOutbox.pending.count, 1)
     }
 
+    func testAWorkoutOpenPastMidnightKeepsItsOwnDay() throws {
+        let sync = runner([slot("squat")])
+        let started = today
+        clock.now = clock.now.addingTimeInterval(86_400)
+        XCTAssertNotEqual(sync.todayString, started)
+
+        let state = try shown(sync)
+        XCTAssertEqual(state.date, started, "the workout is dated by the day it belongs to")
+        XCTAssertNil(WatchWorkoutPresentation.shown(state, today: sync.todayString),
+                     "the Watch shows the new day's list, not yesterday's workout")
+    }
+
     func testASetWhoseLoadIsNotChosenNeedsOneFromTheCrown() async throws {
         let sync = runner([slot("squat")])
         sync.clearWeightChoice()

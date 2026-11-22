@@ -113,11 +113,14 @@ enum WatchWorkoutBuilder {
 @MainActor
 extension SyncModel {
     /// What the Watch shows of the workout: nothing unless this account's
-    /// own runner is open. A partner workout has its own controls.
+    /// own runner is open. A partner workout has its own controls. It is
+    /// dated by the day the workout belongs to, not the day it is read: a
+    /// workout still open past midnight stays the earlier day's, which the
+    /// Watch doesn't show over the new day's list.
     func watchWorkoutState(displayUnit: WeightUnit) -> WatchWorkoutState? {
         guard running, !isPartnerWorkout, terminalActionTarget != nil else { return nil }
         return WatchWorkoutBuilder.state(WorkoutDisplayState.project(sync: self, displayUnit: displayUnit),
-                                         date: todayString, run: watchWorkoutRun)
+                                         date: currentWorkoutScope.date, run: watchWorkoutRun)
     }
 
     /// Names this run of this workout: its place in the day and when the

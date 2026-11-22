@@ -26,6 +26,9 @@ final class WatchDayModel: NSObject, ObservableObject {
     @Published private(set) var isSending = false
     /// Why the iPhone didn't apply the last tap. Cleared by the next state.
     @Published private(set) var notice: String?
+    /// Counts the times the iPhone said the account left. The answer to a
+    /// tap sent before then belongs to that account and is dropped.
+    private var accountClears = 0
     #if DEBUG
     /// A fictional workout answers its own taps; no iPhone is involved.
     private var workoutFixture: WatchWorkoutFixtures?
@@ -127,12 +130,13 @@ final class WatchDayModel: NSObject, ObservableObject {
         #if DEBUG
         if isFictional, command.action == .start {
             workoutFixture = .ready
-            finish(command, with: .accepted(command, state: WatchWorkoutFixtures.ready.state(today: today, now: Date())))
+            finish(command, with: .accepted(command, state: WatchWorkoutFixtures.ready.state(today: today, now: Date())),
+                   sentIn: accountClears)
             return
         }
         if let workoutFixture {
             let answer = workoutFixture.answer(command, to: workout, today: today, now: Date())
-            finish(command, with: answer)
+            finish(command, with: answer, sentIn: accountClears)
             return
         }
         #endif
@@ -144,16 +148,20 @@ final class WatchDayModel: NSObject, ObservableObject {
         }
         isSending = true
         notice = nil
+        let sentIn = accountClears
         WCSession.default.sendMessageData(message, replyHandler: { [weak self] data in
             let receipt = WatchWorkoutMessage.receipt(from: data)
-            Task { @MainActor in self?.finish(command, with: receipt) }
+            Task { @MainActor in self?.finish(command, with: receipt, sentIn: sentIn) }
         }, errorHandler: { [weak self] _ in
-            Task { @MainActor in self?.finish(command, with: nil) }
+            Task { @MainActor in self?.finish(command, with: nil, sentIn: sentIn) }
         })
     }
 
-    private func finish(_ command: WatchWorkoutCommand, with receipt: WatchWorkoutReceipt?) {
+    private func finish(_ command: WatchWorkoutCommand, with receipt: WatchWorkoutReceipt?, sentIn: Int) {
         isSending = false
+        // The account left while the tap was on its way: its answer may
+        // carry that account's workout, which must not come back.
+        guard sentIn == accountClears else { return }
         guard let receipt, receipt.id == command.id else {
             fail(WatchWorkoutPresentation.noAnswer(command.action))
             return
@@ -207,6 +215,7 @@ final class WatchDayModel: NSObject, ObservableObject {
         case .cleared:
             changed = WatchDayStore.save(nil, to: defaults)
             if snapshot != nil { snapshot = nil }
+            accountClears += 1
         }
         refreshToday()
         // The complication reads the stored copy; an unchanged one is not
