@@ -82,6 +82,10 @@ protocol WatchDayChannel: AnyObject {
     var canSend: Bool { get }
     /// Called, on any queue, whenever `canSend` may have become true.
     var onReady: (() -> Void)? { get set }
+    /// Called, on any queue, when the Watch at the other end may no longer
+    /// hold what was sent: another Watch became the active one, or the Watch
+    /// app was installed again. A context belongs to one Watch.
+    var onCounterpartChanged: (() -> Void)? { get set }
     func send(_ context: [String: Any]) throws
 }
 
@@ -104,6 +108,9 @@ final class WatchDaySender: WatchDayPublishing {
         channel.onReady = { [weak self] in
             Task { @MainActor in self?.flush() }
         }
+        channel.onCounterpartChanged = { [weak self] in
+            Task { @MainActor in self?.resend() }
+        }
     }
 
     func publish(_ snapshot: WatchDaySnapshot?) {
@@ -116,6 +123,13 @@ final class WatchDaySender: WatchDayPublishing {
         }
         guard next != wanted else { return }
         wanted = next
+        flush()
+    }
+
+    /// What was sent went to a Watch that may not be the one listening now,
+    /// so the latest value, a clear included, goes out again.
+    private func resend() {
+        sent = nil
         flush()
     }
 
@@ -136,6 +150,7 @@ final class WatchDaySender: WatchDayPublishing {
 final class WatchSessionChannel: NSObject, WCSessionDelegate, WatchDayChannel {
     private let session: WCSession
     var onReady: (() -> Void)?
+    var onCounterpartChanged: (() -> Void)?
 
     init(session: WCSession = .default) {
         self.session = session
@@ -159,14 +174,17 @@ final class WatchSessionChannel: NSObject, WCSessionDelegate, WatchDayChannel {
 
     func sessionDidBecomeInactive(_ session: WCSession) {}
 
-    /// Another Watch became the active one: follow it.
+    /// Another Watch became the active one: follow it. It has not had
+    /// what the earlier Watch was sent; activation then sends the latest.
     func sessionDidDeactivate(_ session: WCSession) {
+        onCounterpartChanged?()
         session.activate()
     }
 
-    /// The Watch was paired, or the Watch app installed, after launch.
+    /// The Watch was paired or unpaired, or the Watch app installed or
+    /// removed, after launch. A newly installed app holds nothing yet.
     func sessionWatchStateDidChange(_ session: WCSession) {
-        onReady?()
+        onCounterpartChanged?()
     }
 }
 

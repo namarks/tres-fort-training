@@ -249,6 +249,35 @@ final class WatchDayTests: XCTestCase {
         XCTAssertEqual(channel.sent.count, 1)
     }
 
+    func testAnotherWatchGetsTheLatestDayAndTheClear() async {
+        let channel = ChannelStub()
+        channel.canSend = true
+        let sender = WatchDaySender(channel: channel)
+        let day = snapshot(date: today)
+        sender.publish(day)
+        XCTAssertEqual(channel.sent.count, 1)
+
+        // The member switches to a second Watch: the session deactivates
+        // (nothing can be sent) and then activates for the new Watch.
+        channel.canSend = false
+        channel.onCounterpartChanged?()
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(channel.sent.count, 1)
+        channel.canSend = true
+        channel.onReady?()
+        for _ in 0..<50 where channel.sent.count < 2 { await Task.yield() }
+        XCTAssertEqual(channel.sent.count, 2, "the new Watch has not had the unchanged day")
+        XCTAssertEqual(WatchDayMessage.decode(channel.sent[1]), .day(day))
+
+        // Signed out, then another Watch: it must not keep an earlier day.
+        sender.publish(nil)
+        XCTAssertEqual(channel.sent.count, 3)
+        channel.onCounterpartChanged?()
+        for _ in 0..<50 where channel.sent.count < 4 { await Task.yield() }
+        XCTAssertEqual(channel.sent.count, 4)
+        XCTAssertEqual(WatchDayMessage.decode(channel.sent[3]), .cleared)
+    }
+
     func testAFailedSendIsRetriedWhenTheWatchIsBack() async {
         let channel = ChannelStub()
         channel.canSend = true
@@ -271,6 +300,7 @@ private final class ChannelStub: WatchDayChannel {
     var canSend = false
     var fails = false
     var onReady: (() -> Void)?
+    var onCounterpartChanged: (() -> Void)?
     private(set) var sent: [[String: Any]] = []
 
     func send(_ context: [String: Any]) throws {
