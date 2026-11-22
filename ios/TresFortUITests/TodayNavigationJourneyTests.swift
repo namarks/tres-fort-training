@@ -258,8 +258,8 @@ final class TodayNavigationJourneyTests: XCTestCase {
         app.launchEnvironment["TRESFORT_UI_CAPTURE_LINKS"] = "1"
         app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         app.launch()
-        tap(app.todayChoice("today.viewWorkout"), in: app)
-        tap(app.buttons["workoutDetails.edit"], in: app)
+        tap(app.todayChoice("today.changeWorkout"), in: app)
+        tap(app.buttons["dayChange.kind.run"], in: app)
         tap(app.buttons["dayRun.editSteps"], in: app)
         tap(app.buttons["30 min"], in: app)
         tap(app.segmentedControls["runStep.target"].buttons["Heart rate"], in: app)
