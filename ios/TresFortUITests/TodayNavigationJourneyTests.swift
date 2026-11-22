@@ -149,10 +149,11 @@ final class TodayNavigationJourneyTests: XCTestCase {
         tap(app.navigationBars["Log activity"].buttons["Cancel"], in: app)
     }
 
-    private func launchRestDay(largeText: Bool = false) -> XCUIApplication {
+    private func launchRestDay(largeText: Bool = false, captureWrites: Bool = false) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment["TRESFORT_UI_FIXTURE"] = "app-store"
         app.launchEnvironment["TRESFORT_UI_REST_DAY"] = "1"
+        if captureWrites { app.launchEnvironment["TRESFORT_UI_CAPTURE_LINKS"] = "1" }
         if largeText { app.launchEnvironment["TRESFORT_UI_LARGE_TEXT"] = "1" }
         app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         app.launch()
@@ -181,6 +182,73 @@ final class TodayNavigationJourneyTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Easy run"].exists)
         XCTAssertFalse(app.buttons["runRecorder.close"].exists, "Saving the plan does not start the run")
         capture("planned-run-awaits-start")
+    }
+
+    func testRunStepEditingCanBeCancelledWithoutPlanningTheDay() {
+        let app = launchRestDay(captureWrites: true)
+        tap(app.buttons["today.activity.run"], in: app)
+        tap(app.buttons["todayActivity.plan"], in: app)
+        tap(app.buttons["dayRun.kind.intervals"], in: app)
+        let original = app.staticTexts["dayRun.summary"].label
+        tap(app.buttons["dayRun.editSteps"], in: app)
+        XCTAssertTrue(app.navigationBars["Plan run"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertEqual(app.buttons["runPlan.cancel"].label, "Cancel")
+        app.steppers["runPlan.repeats.1"].buttons["Increment"].tapWhenReady()
+        tap(app.buttons["runPlan.cancel"], in: app)
+        XCTAssertTrue(app.buttons["dayRun.save"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertEqual(app.staticTexts["dayRun.summary"].label, original)
+
+        // Accepting detailed steps still only changes the local draft.
+        tap(app.buttons["dayRun.editSteps"], in: app)
+        app.steppers["runPlan.repeats.1"].buttons["Increment"].tapWhenReady()
+        XCTAssertEqual(app.buttons["runPlan.save"].label, "Done")
+        tap(app.buttons["runPlan.save"], in: app)
+        XCTAssertTrue(app.buttons["dayRun.save"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertTrue(app.staticTexts["dayRun.summary"].label.contains("3 ×"))
+        tap(app.navigationBars["Tuesday's run"].backButton, in: app)
+        tap(app.buttons["Cancel"], in: app)
+        XCTAssertTrue(app.staticTexts["Rest day"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertEqual(app.staticTexts["fixture.plan-writes"].value as? String, "0",
+                       "Opening, editing and leaving the planner must send no plan writes")
+        XCTAssertFalse(app.buttons["today.startRun"].exists)
+    }
+
+    func testDetailedRunIsSavedOnlyByTheDayConfirmation() {
+        let app = launchRestDay(captureWrites: true)
+        tap(app.buttons["today.activity.run"], in: app)
+        tap(app.buttons["todayActivity.plan"], in: app)
+        tap(app.buttons["dayRun.kind.intervals"], in: app)
+        tap(app.buttons["dayRun.editSteps"], in: app)
+        app.steppers["runPlan.repeats.1"].buttons["Increment"].tapWhenReady()
+        tap(app.buttons["3 min"], in: app)
+        tap(app.segmentedControls["runStep.target"].buttons["Heart rate"], in: app)
+        tap(app.buttons["runStep.done"], in: app)
+        tap(app.buttons["runPlan.save"], in: app)
+        XCTAssertTrue(app.buttons["dayRun.save"].waitForExistence(timeout: UITestWait.screen))
+        let summary = app.staticTexts["dayRun.summary"].label
+        XCTAssertTrue(summary.contains("3 ×"))
+        XCTAssertTrue(summary.contains("bpm"))
+        XCTAssertEqual(app.staticTexts["dayRun.customAmount"].label, "35 min")
+
+        // Reopening and dismissing keeps the accepted draft intact.
+        tap(app.buttons["dayRun.editSteps"], in: app)
+        tap(app.buttons["runPlan.cancel"], in: app)
+        XCTAssertTrue(app.buttons["dayRun.save"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertEqual(app.staticTexts["dayRun.summary"].label, summary)
+        tap(app.buttons["dayRun.save"], in: app)
+        XCTAssertTrue(app.buttons["today.startRun"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertEqual(app.staticTexts["fixture.plan-writes"].value as? String, "2",
+                       "One run creation and one exact steps update, only after Save for Tuesday")
+        XCTAssertFalse(app.buttons["runRecorder.close"].exists)
+
+        tap(app.todayChoice("today.viewWorkout"), in: app)
+        tap(app.buttons["workoutDetails.edit"], in: app)
+        XCTAssertTrue(app.buttons["dayRun.editSteps"].waitForExistence(timeout: UITestWait.screen))
+        tap(app.buttons["dayRun.editSteps"], in: app)
+        XCTAssertTrue(app.steppers["runPlan.repeats.1"].label.contains("3 times"))
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@ AND label CONTAINS %@",
+                                                       "3 min", "bpm")).firstMatch.exists,
+                      "The saved workout must contain the exact edited target")
     }
 
     func testRestDayRunCanOpenRecorderWithoutPlanning() {

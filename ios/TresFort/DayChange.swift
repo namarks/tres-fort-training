@@ -108,10 +108,29 @@ enum DayChange {
 
     /// What the run screen shows: one kind and one amount.
     struct RunDraft: Equatable {
+        enum Steps: Equatable {
+            case suggested
+            /// Nil explicitly means a run at your own pace.
+            case custom(RunPlan?)
+        }
+
         var kind: RunKind
         var measure: Measure
         var minutes: Int
         var distance: Double
+        var steps: Steps = .suggested
+
+        var hasCustomSteps: Bool {
+            if case .custom = steps { return true }
+            return false
+        }
+
+        func plan(targets: Targets, unit: RunDistanceUnit) -> RunPlan? {
+            switch steps {
+            case .suggested: return DayChange.runPlan(self, targets: targets, unit: unit)
+            case .custom(let plan): return plan
+            }
+        }
 
         static let minuteStep = 5
         static let maxMinutes = 360
@@ -126,6 +145,7 @@ enum DayChange {
         /// A new kind keeps the amount when it still fits, else starts at
         /// the kind's own.
         mutating func choose(_ next: RunKind, unit: RunDistanceUnit) {
+            if kind != next { steps = .suggested }
             kind = next
             let amount = next.defaultAmount(unit)
             if minutes < next.minimumMinutes { minutes = amount.minutes }
@@ -264,6 +284,9 @@ enum DayChange {
 
     /// The one line under the amount: what the run will be, step by step.
     static func summary(_ draft: RunDraft, targets: Targets, unit: RunDistanceUnit) -> String {
+        if case .custom(let plan) = draft.steps {
+            return plan.map { RunPlanFormat.summary($0, unit: unit) + "." } ?? "Run at your own pace."
+        }
         let plan = runPlan(draft, targets: targets, unit: unit)
         let line = RunPlanFormat.summary(plan, unit: unit)
         return targets.work(draft.kind) == nil ? line + ". By feel: add your threshold heart rate or pace in Profile for a target." : line + "."

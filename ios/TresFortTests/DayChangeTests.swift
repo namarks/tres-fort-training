@@ -115,6 +115,33 @@ final class DayChangeTests: XCTestCase {
 
     // MARK: - The draft
 
+    func testDetailedStepsKeepExactIntervalsAndTargetsUntilConfirmed() throws {
+        var draft = DayChange.RunDraft.fresh(.intervals, unit: .miles)
+        let steps = try XCTUnwrap(RunPlan(json: #"[{"kind":"warmup","duration_s":601},{"repeat":7,"steps":[{"kind":"work","distance_m":401,"target":{"type":"heart_rate","min_bpm":147,"max_bpm":153}},{"kind":"recovery","duration_s":93}]}]"#))
+        draft.steps = .custom(steps)
+
+        XCTAssertEqual(draft.plan(targets: .none, unit: .miles), steps)
+        XCTAssertEqual(draft.plan(targets: .init(heartRate: 180, pace: 240, own: nil), unit: .miles), steps,
+                       "A later threshold response cannot replace the member's edits")
+        XCTAssertEqual(DayChange.summary(draft, targets: .none, unit: .miles),
+                       RunPlanFormat.summary(steps, unit: .miles) + ".")
+
+        draft.choose(.intervals, unit: .miles)
+        XCTAssertEqual(draft.plan(targets: .none, unit: .miles), steps, "Tapping the selected kind keeps edits")
+        draft.choose(.easy, unit: .miles)
+        XCTAssertFalse(draft.hasCustomSteps)
+        XCTAssertEqual(draft.plan(targets: .none, unit: .miles), DayChange.runPlan(draft, targets: .none, unit: .miles))
+    }
+
+    func testClearingDetailedStepsStaysAnUntargetedRun() {
+        var draft = DayChange.RunDraft.fresh(unit: .miles)
+        draft.steps = .custom(nil)
+        XCTAssertTrue(draft.hasCustomSteps)
+        XCTAssertNil(draft.plan(targets: .init(heartRate: 163, pace: nil, own: nil), unit: .miles),
+                     "Explicitly removing steps must not regenerate the quick preset on Save")
+        XCTAssertEqual(DayChange.summary(draft, targets: .none, unit: .miles), "Run at your own pace.")
+    }
+
     func testANewKindKeepsTheAmountWhenItFitsAndStepsStayInBounds() {
         var draft = DayChange.RunDraft.fresh(.easy, unit: .miles)
         draft.minutes = 15
