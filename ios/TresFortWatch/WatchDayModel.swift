@@ -161,10 +161,11 @@ final class WatchDayModel: NSObject, ObservableObject {
         isSending = false
         // The iPhone has sent a newer day or workout since the tap left, or
         // said the account left or the workout closed. This answer is older
-        // than that: it must not bring back what the iPhone took away.
+        // than that: it must not bring back what the iPhone took away, but
+        // its reason for a refusal still stands.
         let isLatest = sentIn == changesFromIPhone
         guard let receipt, receipt.id == command.id else {
-            if isLatest { fail(WatchWorkoutPresentation.noAnswer(command.action)) }
+            fail(WatchWorkoutPresentation.noAnswer(command.action))
             return
         }
         // The iPhone says what its runner shows after the tap. A refusal
@@ -173,7 +174,7 @@ final class WatchDayModel: NSObject, ObservableObject {
         if receipt.accepted {
             notice = nil
             WKInterfaceDevice.current().play(command.action == .endRest ? .click : .success)
-        } else if isLatest {
+        } else {
             fail(receipt.message ?? WatchWorkoutPresentation.noAnswer(command.action))
         }
     }
