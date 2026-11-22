@@ -211,6 +211,9 @@ recorded on the iPhone.
       it. A Start for yesterday's list, for a row that has gone or for one
       since given another workout is refused with the reason, and a second Start for a runner already open
       only shows it.
+    - Today on the wrist opens on that card when it has a Start, so the
+      button is in view without scrolling; the date and what is already
+      done are a scroll up.
     - Starting from the wrist never asks for notification permission, since
       the iPhone may be locked in a pocket: the rest's notification reaches
       the wrist only where the member already allowed it on the iPhone.

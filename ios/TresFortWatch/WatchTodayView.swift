@@ -8,17 +8,34 @@ struct WatchTodayView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                if let screen = model.screen {
-                    WatchDayList(screen: screen, model: model)
-                } else {
-                    WatchWaitingView()
+            ScrollViewReader { proxy in
+                ScrollView {
+                    if let screen = model.screen {
+                        WatchDayList(screen: screen, model: model)
+                    } else {
+                        WatchWaitingView()
+                    }
+                }
+                // A workout the wrist can start opens on its card, with
+                // Start in view: the title, the date and what is already
+                // done are a scroll up.
+                .task(id: startRowID) {
+                    guard let startRowID else { return }
+                    // After the list has been laid out.
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    proxy.scrollTo(startRowID, anchor: .top)
                 }
             }
             .navigationTitle("Today")
             .containerBackground(Color.black, for: .navigation)
         }
         .tint(WatchTheme.signal)
+    }
+
+    /// The leading row when the wrist can start it.
+    private var startRowID: String? {
+        guard let screen = model.screen, screen.source == .today else { return nil }
+        return screen.rows.first { $0.state == .next && $0.start != nil }?.id
     }
 }
 
@@ -35,6 +52,7 @@ struct WatchDayList: View {
                 if row.state == .next {
                     // Start asks the iPhone, which wrote this list today.
                     WatchNextCard(row: row, start: screen.source == .today ? startAction(row) : nil)
+                        .id(row.id)
                 } else {
                     WatchRowLine(row: row)
                 }
@@ -97,7 +115,8 @@ struct WatchNextCard: View {
                     Text(row.detail)
                         .font(.footnote)
                         .foregroundStyle(WatchTheme.muted)
-                        .lineLimit(3)
+                        // With Start under it, the card stays one screen.
+                        .lineLimit(start == nil ? 3 : 2)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
