@@ -14,11 +14,11 @@ enum WatchDayBuilder {
     /// Later days the Watch can fall back on before the iPhone writes again.
     static let upcomingDayCount = 6
 
-    /// `startTitle` is what Start reads on the row that leads when the wrist
-    /// can start it ("Start", "Continue"); nil when it can't.
+    /// `start` is the Start on the row that leads when the wrist can start
+    /// it; nil when it can't.
     static func snapshot(today: String, rows: [DailyWorkoutAgenda.Item], agenda: TrainingAgendaSnapshot,
                          unit: RunDistanceUnit, locale: Locale = .current,
-                         startTitle: String? = nil) -> WatchDaySnapshot {
+                         start: WatchDayRow.Start? = nil) -> WatchDaySnapshot {
         let nextID = TodayDayList.nextID(rows)
         let dayRows = rows.map { item -> WatchDayRow in
             let leads = item.id == nextID
@@ -32,7 +32,7 @@ enum WatchDayBuilder {
                 state: state,
                 glyph: item.workout.map(PlanItemSummary.glyph)
                     ?? (item.session?.isFreestyle == true ? "figure.strengthtraining.traditional" : "list.bullet.clipboard"),
-                startTitle: leads ? startTitle : nil)
+                start: leads ? start : nil)
         }
         let empty = emptyDay(agenda.day(for: today)?.status)
         let upcoming = agenda.days.filter { $0.date > today }.prefix(upcomingDayCount).map(upcomingDay)
@@ -74,9 +74,12 @@ extension SyncModel {
         // Start on the wrist, where the row that leads is a lifting workout
         // this iPhone can open now (`watchStart`).
         let leading = TodayDayList.nextID(rows).flatMap { id in rows.first { $0.id == id } }
-        let startTitle = leading.flatMap { watchStart(for: $0) == nil ? nil : TodayDayList.actionTitle($0) }
+        let start = leading.flatMap { item -> WatchDayRow.Start? in
+            guard watchStart(for: item) != nil, let title = TodayDayList.actionTitle(item) else { return nil }
+            return WatchDayRow.Start(title: title, token: watchStartToken(for: item))
+        }
         return WatchDayBuilder.snapshot(today: todayString, rows: rows, agenda: agenda,
-                                        unit: RunDistanceUnit.preferred(), startTitle: startTitle)
+                                        unit: RunDistanceUnit.preferred(), start: start)
     }
 }
 

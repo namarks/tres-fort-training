@@ -62,8 +62,8 @@ struct WatchDayList: View {
 
     /// Start or Continue for a lifting workout the iPhone can open.
     private func startAction(_ row: WatchDayRow) -> WatchNextCard.Start? {
-        guard let title = row.startTitle else { return nil }
-        return WatchNextCard.Start(title: title, isReachable: model.isReachable, isSending: model.isSending) {
+        guard let start = row.start else { return nil }
+        return WatchNextCard.Start(title: start.title, isReachable: model.isReachable, isSending: model.isSending) {
             model.start(row)
         }
     }

@@ -39,6 +39,25 @@ enum WatchWorkoutBuilder {
         return SHA256.hash(data: bytes).prefix(12).map { String(format: "%02x", $0) }.joined()
     }
 
+    private struct Startable: Encodable {
+        let date: String
+        let rowID: String
+        let workoutID: String?
+        let attempt: Int?
+    }
+
+    /// Names what a Start on a row of the day's list would open: the day,
+    /// the row, the workout it holds and that session's attempt. A row since
+    /// given another workout, or begun again, is another Start, so a tap
+    /// for the earlier one is refused.
+    static func startToken(date: String, rowID: String, workoutID: String?, attempt: Int?) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        guard let bytes = try? encoder.encode(Startable(date: date, rowID: rowID, workoutID: workoutID,
+                                                        attempt: attempt)) else { return UUID().uuidString }
+        return SHA256.hash(data: bytes).prefix(12).map { String(format: "%02x", $0) }.joined()
+    }
+
     static func state(_ display: WorkoutDisplayState, date: String, run: String) -> WatchWorkoutState {
         let words = betweenSets(display)
         return WatchWorkoutState(
@@ -169,6 +188,13 @@ extension SyncModel {
         return canAddAnotherWorkout ? .scheduled(workoutID: workout.id) : nil
     }
 
+    /// Names what Start on this row of today's list would open now.
+    func watchStartToken(for item: DailyWorkoutAgenda.Item) -> String {
+        WatchWorkoutBuilder.startToken(date: todayString, rowID: item.id,
+                                       workoutID: item.workout?.id ?? item.session?.workout_id,
+                                       attempt: item.session?.attempt)
+    }
+
     /// Starts what the wrist asked for through the steps Today's own button
     /// takes (`TodayView.startPrimary`, `startListed`, and a planned add-on's
     /// `addAnotherWorkout`). It never asks for notification permission: the
@@ -216,10 +242,9 @@ enum WatchWorkoutCommandRunner {
             }
             return .accepted(command, state: state)
         }
-        let today = sync.todayString
-        // The row the Watch showed, as Today lists it now.
+        // The row the Watch showed, still holding the same workout today.
         guard let item = TodayDayList.rows(sync.dailyWorkoutAgenda).first(where: {
-            WatchWorkoutPresentation.startToken(date: today, rowID: $0.id) == command.token
+            sync.watchStartToken(for: $0) == command.token
         }) else { return .refused(command, dayChanged) }
         guard let start = sync.watchStart(for: item), await sync.performWatchStart(start),
               let state = sync.watchWorkoutState(displayUnit: displayUnit)

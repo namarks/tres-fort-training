@@ -75,7 +75,7 @@ struct WatchWorkoutCommand: Codable, Equatable {
     let id: UUID
     let action: Action
     /// The `token` of the state the Watch showed when tapped. For `start`,
-    /// the day and row it was tapped on (`WatchWorkoutPresentation.startToken`).
+    /// the token of the row's `WatchDayRow.Start`.
     let token: String
     /// Values changed with the crown, in the units the set was shown in.
     /// nil keeps what the runner holds.
@@ -213,10 +213,6 @@ enum WatchWorkoutPresentation {
     /// In the button's place while it can't act.
     static let outOfReachShort = "iPhone out of reach"
     static let chooseWeight = "Turn the crown for the weight"
-
-    /// Names the row a Start was tapped on: the day the Watch showed and the
-    /// row's id, so a Start for yesterday's list is never today's.
-    static func startToken(date: String, rowID: String) -> String { "start|\(date)|\(rowID)" }
 
     /// The workout to show on `today`, or nil for the day's list: nothing is
     /// running, or what the Watch holds is from another day.

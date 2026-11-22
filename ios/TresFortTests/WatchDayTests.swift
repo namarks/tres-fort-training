@@ -94,16 +94,17 @@ final class WatchDayTests: XCTestCase {
         let agenda = agenda([(today, .workout, "Kettlebell A", ["Swing"])])
 
         let plain = WatchDayBuilder.snapshot(today: today, rows: list, agenda: agenda, unit: .miles, locale: gb)
-        XCTAssertEqual(plain.rows.map(\.startTitle), [nil, nil], "a row the wrist can't start carries none")
+        XCTAssertEqual(plain.rows.map(\.start), [nil, nil], "a row the wrist can't start carries none")
+        let start = WatchDayRow.Start(title: "Start", token: "kb-today")
         let offered = WatchDayBuilder.snapshot(today: today, rows: list, agenda: agenda, unit: .miles, locale: gb,
-                                               startTitle: "Start")
+                                               start: start)
         XCTAssertEqual(offered.rows.map(\.state), [.next, .open])
-        XCTAssertEqual(offered.rows.map(\.startTitle), ["Start", nil])
+        XCTAssertEqual(offered.rows.map(\.start), [start, nil])
 
         // A day with no Start is the bytes an earlier build sent, and a day
         // from an iPhone that sends none still reads.
         let bytes = try XCTUnwrap(WatchDayMessage.encode(plain))
-        XCTAssertFalse(try XCTUnwrap(String(data: bytes, encoding: .utf8)).contains("startTitle"))
+        XCTAssertFalse(try XCTUnwrap(String(data: bytes, encoding: .utf8)).contains("\"start\""))
         XCTAssertEqual(try JSONDecoder().decode(WatchDaySnapshot.self, from: bytes), plain)
         XCTAssertEqual(WatchDayMessage.decode(WatchDayMessage.context(day: try XCTUnwrap(WatchDayMessage.encode(offered)))),
                        .day(offered))

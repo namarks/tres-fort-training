@@ -120,10 +120,8 @@ final class WatchDayModel: NSObject, ObservableObject {
     /// Start on the row that leads: ask the iPhone to open that workout on
     /// its runner. The Watch shows it once the iPhone says it is open.
     func start(_ row: WatchDayRow) {
-        guard !isSending, row.startTitle != nil, let screen, screen.source == .today else { return }
-        deliver(WatchWorkoutCommand(
-            id: UUID(), action: .start,
-            token: WatchWorkoutPresentation.startToken(date: screen.date, rowID: row.id)))
+        guard !isSending, let start = row.start, screen?.source == .today else { return }
+        deliver(WatchWorkoutCommand(id: UUID(), action: .start, token: start.token))
     }
 
     private func deliver(_ command: WatchWorkoutCommand) {

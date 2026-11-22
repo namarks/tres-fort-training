@@ -297,8 +297,7 @@ final class WatchWorkoutTests: XCTestCase {
         let unanswered = try XCTUnwrap(WatchWorkoutMessage.receipt(from: try XCTUnwrap(firstReply)))
         XCTAssertEqual(unanswered, .refused(command, StationLinkCommandReceipt.openWorkout))
         // A Start has no workout to open yet: it asks for the app.
-        let start = WatchWorkoutCommand(id: UUID(), action: .start,
-                                        token: WatchWorkoutPresentation.startToken(date: "2026-11-22", rowID: "primary"))
+        let start = WatchWorkoutCommand(id: UUID(), action: .start, token: "row")
         let startMessage = try XCTUnwrap(WatchWorkoutMessage.encode(start))
         let startReply = await channel.ask(startMessage)
         let unstarted = try XCTUnwrap(WatchWorkoutMessage.receipt(from: try XCTUnwrap(startReply)))

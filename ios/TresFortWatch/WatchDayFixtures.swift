@@ -34,7 +34,7 @@ enum WatchDayFixtures: String {
                 WatchDayRow(id: "run", title: "Easy run", detail: "Done", kicker: nil, state: .done, glyph: "figure.run"),
                 WatchDayRow(id: "lift", title: "Lower Body", detail: "Back squat, Deadlift, Split squat +2",
                             kicker: "Up next · 5:30 PM", state: .next, glyph: "dumbbell",
-                            startTitle: offersStart ? "Start" : nil),
+                            start: offersStart ? WatchDayRow.Start(title: "Start", token: "lift") : nil),
                 WatchDayRow(id: "core", title: "Core", detail: "Plank, Dead bug", kicker: nil, state: .open,
                             glyph: "figure.core.training"),
             ], emptyTitle: "Rest day", emptyDetail: "Nothing planned today.", upcoming: later)

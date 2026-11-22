@@ -198,17 +198,18 @@ recorded on the iPhone.
       P2.
     - The iPhone says on the day's leading row whether the wrist can start
       it and what the button reads, "Start" or "Continue"
-      (`WatchDayRow.startTitle`, from `SyncModel.watchStart`, which follows
+      (`WatchDayRow.start`, from `SyncModel.watchStart`, which follows
       the rules of Today's own row button). A run, an activity, a partner
       workout and a workout that can't start now carry none, and neither
-      does any row while a workout is open. The tap names the day and the
-      row the Watch showed. `WatchWorkoutCommandRunner.start` finds that row
-      in today's list as it is now and takes the steps Today's button
+      does any row while a workout is open. The tap carries the row's
+      token, which names the day, the row, the workout it holds and that
+      session's attempt. `WatchWorkoutCommandRunner.start` finds the row
+      that still matches in today's list and takes the steps Today's button
       takes: the day's own workout starts or continues, a workout already
       on the list opens, and one planned beside the day's own starts as a
       new session. The answer brings the first set, so the Watch turns to
-      it. A Start for yesterday's list, or for a row that has gone, is
-      refused with the reason, and a second Start for a runner already open
+      it. A Start for yesterday's list, for a row that has gone or for one
+      since given another workout is refused with the reason, and a second Start for a runner already open
       only shows it.
     - Starting from the wrist never asks for notification permission, since
       the iPhone may be locked in a pocket: the rest's notification reaches

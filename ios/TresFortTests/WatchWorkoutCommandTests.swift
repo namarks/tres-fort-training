@@ -357,33 +357,30 @@ final class WatchWorkoutCommandTests: XCTestCase {
         sync.watchDaySnapshot(agenda: TrainingAgendaSnapshot(days: []))
     }
 
-    private func start(_ rowID: String, on date: String) -> WatchWorkoutCommand {
-        WatchWorkoutCommand(id: UUID(), action: .start,
-                            token: WatchWorkoutPresentation.startToken(date: date, rowID: rowID))
+    private func start(_ token: String) -> WatchWorkoutCommand {
+        WatchWorkoutCommand(id: UUID(), action: .start, token: token)
     }
 
     func testStartOnTheWristOpensTheDaysWorkoutOnTheRunner() async throws {
         let sync = runner([slot("squat")], start: false)
-        let shownDay = day(sync)
-        let lead = try XCTUnwrap(shownDay.rows.first { $0.state == .next })
+        let lead = try XCTUnwrap(day(sync).rows.first { $0.state == .next })
         XCTAssertEqual(lead.title, "Strength")
-        XCTAssertNotNil(lead.startTitle, "the leading lifting workout can start from the wrist")
+        let offered = try XCTUnwrap(lead.start, "the leading lifting workout can start from the wrist")
         XCTAssertFalse(sync.running)
 
-        let receipt = await apply(start(lead.id, on: shownDay.date), to: sync)
+        let receipt = await apply(start(offered.token), to: sync)
         XCTAssertTrue(receipt.accepted, receipt.message ?? "")
         XCTAssertTrue(sync.running)
         let first = try XCTUnwrap(receipt.state, "the answer brings the first set")
         XCTAssertEqual(first.phase, .ready)
         XCTAssertEqual(first.set?.exerciseName, "Exercise squat")
         XCTAssertEqual(first.set?.position, "Set 1 of 3")
-        XCTAssertNil(day(sync).rows.first { $0.state == .next }?.startTitle,
-                     "an open workout offers no Start")
+        XCTAssertNil(day(sync).rows.first { $0.state == .next }?.start, "an open workout offers no Start")
 
         // The answer was lost and the wearer taps Start again: the runner is
         // already open, so the Watch gets what it shows and nothing restarts.
         let started = sync.workoutStart
-        let again = await apply(start(lead.id, on: shownDay.date), to: sync)
+        let again = await apply(start(offered.token), to: sync)
         XCTAssertTrue(again.accepted)
         XCTAssertEqual(again.state?.token, first.token)
         XCTAssertEqual(sync.workoutStart, started)
@@ -394,29 +391,53 @@ final class WatchWorkoutCommandTests: XCTestCase {
         XCTAssertEqual(sync.setOutbox.pending.count, 1)
     }
 
+    func testTheStartTokenNamesTheDayTheRowTheWorkoutAndItsAttempt() {
+        func token(date: String = "2026-11-22", row: String = "session:s", workout: String? = "a",
+                   attempt: Int? = 0) -> String {
+            WatchWorkoutBuilder.startToken(date: date, rowID: row, workoutID: workout, attempt: attempt)
+        }
+        XCTAssertEqual(token(), token())
+        XCTAssertNotEqual(token(date: "2026-11-23"), token(), "yesterday's Start is never today's")
+        XCTAssertNotEqual(token(row: "primary"), token())
+        XCTAssertNotEqual(token(workout: "b"), token(), "the row was given another workout")
+        XCTAssertNotEqual(token(attempt: 1), token(), "the row's session was begun again")
+    }
+
     func testStartForADayOrRowTheIPhoneNoLongerShowsIsRefused() async throws {
         let sync = runner([slot("squat")], start: false)
-        let shownDay = day(sync)
-        let lead = try XCTUnwrap(shownDay.rows.first { $0.state == .next })
+        let lead = try XCTUnwrap(day(sync).rows.first { $0.state == .next })
+        let offered = try XCTUnwrap(lead.start)
+        XCTAssertEqual(offered.token, WatchWorkoutBuilder.startToken(
+            date: today, rowID: lead.id, workoutID: "day", attempt: 0))
 
         // Yesterday's list, still on the Watch after midnight.
-        let stale = start(lead.id, on: "2000-01-01")
+        let stale = start(WatchWorkoutBuilder.startToken(date: "2000-01-01", rowID: lead.id,
+                                                         workoutID: "day", attempt: 0))
         let late = await apply(stale, to: sync)
         XCTAssertEqual(late, .refused(stale, WatchWorkoutCommandRunner.dayChanged))
 
-        let gone = start("session:gone", on: shownDay.date)
-        let missing = await apply(gone, to: sync)
-        XCTAssertEqual(missing, .refused(gone, WatchWorkoutCommandRunner.dayChanged))
+        // The row held another workout when the Watch showed it.
+        let other = start(WatchWorkoutBuilder.startToken(date: today, rowID: lead.id,
+                                                         workoutID: "other", attempt: 0))
+        let changed = await apply(other, to: sync)
+        XCTAssertEqual(changed, .refused(other, WatchWorkoutCommandRunner.dayChanged))
+
+        // The row's session has been begun again since.
+        let earlier = start(WatchWorkoutBuilder.startToken(date: today, rowID: lead.id,
+                                                           workoutID: "day", attempt: 7))
+        let begunAgain = await apply(earlier, to: sync)
+        XCTAssertEqual(begunAgain, .refused(earlier, WatchWorkoutCommandRunner.dayChanged))
         XCTAssertFalse(sync.running, "a refused Start opens nothing")
     }
 
     func testARunOffersNoStartOnTheWristAndIsRefusedIfAsked() async throws {
         let sync = runner([slot("run", exerciseID: RunPlan.exerciseID)], start: false)
-        let shownDay = day(sync)
-        let lead = try XCTUnwrap(shownDay.rows.first { $0.state == .next })
-        XCTAssertNil(lead.startTitle, "a run starts on the iPhone's recorder")
+        let lead = try XCTUnwrap(day(sync).rows.first { $0.state == .next })
+        XCTAssertNil(lead.start, "a run starts on the iPhone's recorder")
 
-        let asked = start(lead.id, on: shownDay.date)
+        // A Watch can't make this tap; the iPhone still decides for itself.
+        let asked = start(WatchWorkoutBuilder.startToken(date: today, rowID: lead.id,
+                                                         workoutID: "day", attempt: 0))
         let refused = await apply(asked, to: sync)
         XCTAssertEqual(refused, .refused(asked, WatchWorkoutCommandRunner.startOnPhone))
         XCTAssertFalse(sync.running)
