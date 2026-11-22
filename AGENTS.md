@@ -74,7 +74,8 @@ The Apple Watch app (`ios/TresFortWatch`) is only in `project-watch.yml`,
 which includes `project.yml`: generate with
 `xcodegen generate --spec project-watch.yml` and run the **TresFortWatch**
 scheme on a Watch simulator (`-watch-day-fixture today` shows a fictional
-day). TestFlight (`project.yml`) and App Store builds don't carry it.
+day, `-watch-workout-fixture ready` a fictional workout). TestFlight
+(`project.yml`) and App Store builds don't carry it.
 
 ## Workout contract
 
@@ -209,8 +210,12 @@ sends them as WatchConnectivity's application context and clears them at
 every account boundary, like the Today widget. `ios/Shared/WatchDay.swift`
 holds the format and what the Watch shows for a day; keep day rules on the
 iPhone. The complication (`ios/TresFortWatchWidgets`) reads the Watch app's
-stored copy of that day from the Watch's App Group. See
-`docs/plans/apple-watch/plan.md`.
+stored copy of that day from the Watch's App Group. During a lifting
+workout the same context carries the set the runner is on
+(`WatchWorkoutPublisher`, `ios/Shared/WatchWorkout.swift`), and a tap on the
+Watch is a request: `WatchWorkoutCommandRunner` applies it through the
+Station link's guarded commands, so the iPhone logs every set and the Watch
+keeps no workout state. See `docs/plans/apple-watch/plan.md`.
 
 **Ordered workouts on a date (migration 0073).** Sessions are unique by
 `(user_id, date, slot)`. Slot 0 is the primary workout; additional workouts

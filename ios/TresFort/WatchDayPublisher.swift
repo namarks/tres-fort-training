@@ -6,6 +6,8 @@ import WatchConnectivity
 // and clears it at every account boundary, exactly as it does for the Today
 // widget. The day travels as WatchConnectivity's application context: only
 // the latest value is kept, and the Watch gets it the next time it wakes.
+// A running workout's state rides in the same context, and the Watch's taps
+// come back through the same session (P5, `WatchWorkoutPublisher`).
 
 /// Builds the day the Watch shows from the same rows Today's list shows.
 enum WatchDayBuilder {
@@ -86,22 +88,34 @@ protocol WatchDayChannel: AnyObject {
     /// hold what was sent: another Watch became the active one, or the Watch
     /// app was installed again. A context belongs to one Watch.
     var onCounterpartChanged: (() -> Void)? { get set }
+    /// Called, on any queue, with a message the Watch sent and the way to
+    /// answer it. Every message gets one answer; nil says it wasn't
+    /// understood.
+    var onMessage: ((Data, @escaping (Data?) -> Void) -> Void)? { get set }
     func send(_ context: [String: Any]) throws
 }
 
-/// Keeps the Watch's copy of the day current. It holds only the latest day
-/// wanted, sends it when a Watch with the app can take it, and never sends
-/// the same bytes twice.
+/// Keeps the Watch's copy of the day, and of a running workout, current. It
+/// holds only the latest of each, sends them when a Watch with the app can
+/// take them, and never sends the same bytes twice. The two travel in one
+/// application context, because WatchConnectivity keeps only the latest.
 @MainActor
-final class WatchDaySender: WatchDayPublishing {
+final class WatchDaySender: WatchDayPublishing, WatchWorkoutPublishing {
     private struct Wanted: Equatable {
         /// The encoded day, or nil for "cleared".
-        let day: Data?
+        var day: Data?
+        /// The encoded workout state, or nil for none. Never kept beside a
+        /// cleared day: the account that ran it has left.
+        var workout: Data?
     }
 
     private let channel: WatchDayChannel
+    /// nil until a day, or a clear, has been asked for.
     private var wanted: Wanted?
     private var sent: Wanted?
+    /// A workout handed over before the first day waits here for it.
+    private var workout: Data?
+    var onWorkoutCommand: ((WatchWorkoutCommand) async -> WatchWorkoutReceipt)?
 
     init(channel: WatchDayChannel) {
         self.channel = channel
@@ -111,17 +125,37 @@ final class WatchDaySender: WatchDayPublishing {
         channel.onCounterpartChanged = { [weak self] in
             Task { @MainActor in self?.resend() }
         }
+        channel.onMessage = { [weak self] message, reply in
+            Task { @MainActor in
+                guard let self else { return reply(nil) }
+                reply(await self.answer(message))
+            }
+        }
     }
 
     func publish(_ snapshot: WatchDaySnapshot?) {
         let next: Wanted
         if let snapshot {
             guard let bytes = WatchDayMessage.encode(snapshot) else { return }
-            next = Wanted(day: bytes)
+            next = Wanted(day: bytes, workout: workout)
         } else {
-            next = Wanted(day: nil)
+            // The account is leaving: its workout leaves the wrist with its day.
+            workout = nil
+            next = Wanted(day: nil, workout: nil)
         }
         guard next != wanted else { return }
+        wanted = next
+        flush()
+    }
+
+    func publishWorkout(_ state: WatchWorkoutState?) {
+        let bytes = state.flatMap { WatchWorkoutMessage.encode($0) }
+        guard bytes != workout else { return }
+        workout = bytes
+        // A workout rides beside a day. Before the first day, or after a
+        // clear, it waits for the next day.
+        guard var next = wanted, next.day != nil else { return }
+        next.workout = bytes
         wanted = next
         flush()
     }
@@ -135,7 +169,8 @@ final class WatchDaySender: WatchDayPublishing {
 
     private func flush() {
         guard let wanted, wanted != sent, channel.canSend else { return }
-        let context = wanted.day.map(WatchDayMessage.context(day:)) ?? WatchDayMessage.clearedContext
+        var context = wanted.day.map(WatchDayMessage.context(day:)) ?? WatchDayMessage.clearedContext
+        if let workout = wanted.workout { context[WatchWorkoutMessage.workoutKey] = workout }
         do {
             try channel.send(context)
             sent = wanted
@@ -144,6 +179,15 @@ final class WatchDaySender: WatchDayPublishing {
             // The next readiness change sends the latest value.
         }
     }
+
+    /// A tap on the Watch. With no signed-in account to take it, the Watch
+    /// is told to open the app on the iPhone.
+    private func answer(_ message: Data) async -> Data? {
+        guard let command = WatchWorkoutMessage.command(from: message) else { return nil }
+        let receipt = await onWorkoutCommand?(command)
+            ?? .refused(command, StationLinkCommandReceipt.openWorkout)
+        return WatchWorkoutMessage.encode(receipt)
+    }
 }
 
 /// The app's one WatchConnectivity session.
@@ -151,6 +195,7 @@ final class WatchSessionChannel: NSObject, WCSessionDelegate, WatchDayChannel {
     private let session: WCSession
     var onReady: (() -> Void)?
     var onCounterpartChanged: (() -> Void)?
+    var onMessage: ((Data, @escaping (Data?) -> Void) -> Void)?
 
     init(session: WCSession = .default) {
         self.session = session
@@ -185,6 +230,14 @@ final class WatchSessionChannel: NSObject, WCSessionDelegate, WatchDayChannel {
     /// removed, after launch. A newly installed app holds nothing yet.
     func sessionWatchStateDidChange(_ session: WCSession) {
         onCounterpartChanged?()
+    }
+
+    /// A tap on the Watch, which waits for the answer. An empty answer
+    /// tells it the message wasn't understood.
+    func session(_ session: WCSession, didReceiveMessageData messageData: Data,
+                 replyHandler: @escaping (Data) -> Void) {
+        guard let onMessage else { return replyHandler(Data()) }
+        onMessage(messageData) { replyHandler($0 ?? Data()) }
     }
 }
 

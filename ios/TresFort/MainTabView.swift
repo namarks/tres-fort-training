@@ -14,6 +14,7 @@ private final class MainTabModels: ObservableObject {
     let connectivity: SetConnectivityMonitor
     let stationLink = StationLinkController()
     let agenda: TrainingAgendaPublisher
+    let watchWorkout: WatchWorkoutPublisher
     let now: () -> Date
     private var syncObservation: AnyCancellable?
 
@@ -70,6 +71,9 @@ private final class MainTabModels: ObservableObject {
         // Today widget and opt-in workout reminders follow this account's
         // published projection and are cleared at its feature boundary.
         self.agenda = TrainingAgendaPublisher(sync: sync, auth: auth, now: now)
+        // The set this account's runner is on shows on its Apple Watch,
+        // whose taps reach this runner only.
+        self.watchWorkout = WatchWorkoutPublisher(sync: sync, auth: auth)
         // A linked iPad's controls reach this account's runner only.
         stationLink.onCommand = { [weak sync] command in
             guard let sync else { return .refused(command, StationLinkCommandReceipt.openWorkout) }

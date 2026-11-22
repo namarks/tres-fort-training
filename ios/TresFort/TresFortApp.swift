@@ -37,6 +37,9 @@ final class TresFortAppDelegate: NSObject, UIApplicationDelegate {
         // Installed before launch finishes so a reminder that cold-launches
         // the app is still routed.
         UNUserNotificationCenter.current().delegate = WorkoutReminderNotificationDelegate.shared
+        // A tap on the Apple Watch can launch the app in the background.
+        // Start the Watch session now so that tap gets an answer.
+        _ = WatchDayLink.shared
         return true
     }
 }

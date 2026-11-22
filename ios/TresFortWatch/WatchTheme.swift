@@ -8,6 +8,9 @@ enum WatchTheme {
     static let text = BrandPalette.text
     static let muted = BrandPalette.muted
     static let signal = BrandPalette.signal
+    /// The orange fill of the one action to take, and the navy on it.
+    static let signalFill = BrandPalette.signalFill
+    static let onSignal = BrandPalette.onSignal
     static let done = BrandPalette.done
     static let surface = BrandPalette.surface
     static let hero = BrandPalette.hero

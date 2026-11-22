@@ -1,11 +1,16 @@
 import Foundation
 import WatchConnectivity
+import WatchKit
 import WidgetKit
 
 /// Holds the last day the iPhone sent and the civil date it is shown for.
 /// The Watch keeps its own copy, so the app opens with the day before the
 /// iPhone is in reach, and drops it when the iPhone says the account left.
 /// The complication reads the same copy and reloads when it changes.
+///
+/// It also holds the set the iPhone's runner is on during a lifting workout
+/// and sends the wearer's taps to the iPhone (P5). That state is never
+/// stored: the iPhone keeps the workout.
 @MainActor
 final class WatchDayModel: NSObject, ObservableObject {
     /// The app's one model: the screen and the background wake share it.
@@ -13,6 +18,18 @@ final class WatchDayModel: NSObject, ObservableObject {
 
     @Published private(set) var snapshot: WatchDaySnapshot?
     @Published private(set) var today: String
+    /// What the iPhone's runner shows, as last received.
+    @Published private(set) var workout: WatchWorkoutState?
+    /// Whether a tap can reach the iPhone now.
+    @Published private(set) var isReachable = false
+    /// A tap is on its way to the iPhone; the controls wait for its answer.
+    @Published private(set) var isSending = false
+    /// Why the iPhone didn't apply the last tap. Cleared by the next state.
+    @Published private(set) var notice: String?
+    #if DEBUG
+    /// A fictional workout answers its own taps; no iPhone is involved.
+    private var workoutFixture: WatchWorkoutFixtures?
+    #endif
 
     private let defaults: UserDefaults
     /// Kept for the life of the app, which owns one model.
@@ -25,14 +42,27 @@ final class WatchDayModel: NSObject, ObservableObject {
         WatchDayPresentation.screen(snapshot, today: today)
     }
 
+    /// The running workout to show today, or nil for the day's list.
+    var shownWorkout: WatchWorkoutState? {
+        WatchWorkoutPresentation.shown(workout, today: today)
+    }
+
     init(defaults: UserDefaults = WatchDayStore.sharedDefaults,
          arguments: [String] = ProcessInfo.processInfo.arguments) {
         self.defaults = defaults
         today = WatchDayPresentation.todayString()
         super.init()
         #if DEBUG
-        // Fictional days for simulator screenshots; no session is started.
-        if let fixture = WatchDayFixtures.requested(in: arguments) {
+        // Fictional days and workouts for simulator screenshots; no session
+        // is started.
+        let workoutFixture = WatchWorkoutFixtures.requested(in: arguments)
+        if let workoutFixture {
+            self.workoutFixture = workoutFixture
+            workout = workoutFixture.state(today: today, now: Date())
+            isReachable = workoutFixture != .outOfReach
+            notice = workoutFixture.notice
+        }
+        if let fixture = WatchDayFixtures.requested(in: arguments) ?? workoutFixture.map({ _ in WatchDayFixtures.today }) {
             snapshot = fixture.snapshot(today: today)
             return
         }
@@ -60,15 +90,88 @@ final class WatchDayModel: NSObject, ObservableObject {
             if session.activationState == .activated, !session.hasContentPending { break }
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
-        guard session.activationState == .activated,
-              let received = WatchDayMessage.decode(session.receivedApplicationContext)
-        else { return }
-        apply(received)
+        guard session.activationState == .activated else { return }
+        apply(context: session.receivedApplicationContext)
     }
 
     func refreshToday() {
         let now = WatchDayPresentation.todayString()
         if now != today { today = now }
+        if listens { setReachable(WCSession.default.isReachable) }
+    }
+
+    /// A tap on the workout screen: ask the iPhone, and wait for its answer.
+    /// Nothing changes on the Watch until the iPhone says what its runner
+    /// shows now.
+    func send(_ command: WatchWorkoutCommand) {
+        guard !isSending, shownWorkout?.token == command.token else { return }
+        #if DEBUG
+        if let workoutFixture {
+            let answer = workoutFixture.answer(command, to: workout, today: today, now: Date())
+            finish(command, with: answer)
+            return
+        }
+        #endif
+        guard listens, WCSession.default.activationState == .activated, WCSession.default.isReachable,
+              let message = WatchWorkoutMessage.encode(command) else {
+            isReachable = false
+            fail(WatchWorkoutPresentation.outOfReach)
+            return
+        }
+        isSending = true
+        notice = nil
+        WCSession.default.sendMessageData(message, replyHandler: { [weak self] data in
+            let receipt = WatchWorkoutMessage.receipt(from: data)
+            Task { @MainActor in self?.finish(command, with: receipt) }
+        }, errorHandler: { [weak self] _ in
+            Task { @MainActor in self?.finish(command, with: nil) }
+        })
+    }
+
+    private func finish(_ command: WatchWorkoutCommand, with receipt: WatchWorkoutReceipt?) {
+        isSending = false
+        guard let receipt, receipt.id == command.id else {
+            fail(WatchWorkoutPresentation.noAnswer)
+            return
+        }
+        // The iPhone says what its runner shows after the tap. A refusal
+        // with nothing to show keeps the screen and says why.
+        if receipt.accepted || receipt.state != nil { setWorkout(receipt.state) }
+        if receipt.accepted {
+            notice = nil
+            WKInterfaceDevice.current().play(command.action == .endRest ? .click : .success)
+        } else {
+            fail(receipt.message ?? WatchWorkoutPresentation.noAnswer)
+        }
+    }
+
+    /// The wearer has read why the last tap wasn't applied.
+    func clearNotice() {
+        if notice != nil { notice = nil }
+    }
+
+    private func fail(_ message: String) {
+        notice = message
+        WKInterfaceDevice.current().play(.failure)
+    }
+
+    private func setWorkout(_ state: WatchWorkoutState?) {
+        guard state != workout else { return }
+        // A reason belongs to the set it was given for.
+        if state?.token != workout?.token { notice = nil }
+        workout = state
+    }
+
+    private func setReachable(_ reachable: Bool) {
+        if reachable != isReachable { isReachable = reachable }
+    }
+
+    /// The day and the running workout travel in one context.
+    private func apply(context: [String: Any]) {
+        if let received = WatchDayMessage.decode(context) {
+            apply(received)
+            setWorkout(WatchWorkoutMessage.workout(in: context))
+        }
     }
 
     private func apply(_ received: WatchDayMessage.Received) {
@@ -93,15 +196,22 @@ extension WatchDayModel: WCSessionDelegate {
     nonisolated func session(_ session: WCSession,
                              activationDidCompleteWith activationState: WCSessionActivationState,
                              error: Error?) {
-        guard activationState == .activated,
-              let received = WatchDayMessage.decode(session.receivedApplicationContext)
-        else { return }
-        Task { @MainActor in self.apply(received) }
+        guard activationState == .activated else { return }
+        let context = session.receivedApplicationContext
+        let reachable = session.isReachable
+        Task { @MainActor in
+            self.apply(context: context)
+            self.setReachable(reachable)
+        }
     }
 
     nonisolated func session(_ session: WCSession,
                              didReceiveApplicationContext applicationContext: [String: Any]) {
-        guard let received = WatchDayMessage.decode(applicationContext) else { return }
-        Task { @MainActor in self.apply(received) }
+        Task { @MainActor in self.apply(context: applicationContext) }
+    }
+
+    nonisolated func sessionReachabilityDidChange(_ session: WCSession) {
+        let reachable = session.isReachable
+        Task { @MainActor in self.setReachable(reachable) }
     }
 }

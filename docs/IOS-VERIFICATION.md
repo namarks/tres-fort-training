@@ -68,7 +68,8 @@ job (the smoke job, and shard 1 of a full run) then runs
 unsigned for a Watch simulator and fails if the built Watch app doesn't
 contain its complication. It creates no simulator and runs nothing: what
 the Watch decides is covered by `TresFortTests`, and how it looks is checked
-on a Mac with the fictional days (`-watch-day-fixture`).
+on a Mac with the fictional days (`-watch-day-fixture`) and the fictional
+workout (`-watch-workout-fixture`).
 
 ## Release check
 

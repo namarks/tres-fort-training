@@ -19,9 +19,10 @@ targets:
     platform: watchOS
     sources:
       - TresFortWatch
-      # The day the iPhone sends, its civil-date rule and the color tokens:
-      # the same files the iPhone app compiles.
+      # The day and the running workout the iPhone sends, the civil-date
+      # rule and the color tokens: the same files the iPhone app compiles.
       - path: Shared/WatchDay.swift
+      - path: Shared/WatchWorkout.swift
       - path: Shared/TrainingAgenda.swift
       - path: Shared/BrandPalette.swift
       - path: TresFort/Fonts/BebasNeue-Regular.ttf

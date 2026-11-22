@@ -379,6 +379,7 @@ private final class ChannelStub: WatchDayChannel {
     var fails = false
     var onReady: (() -> Void)?
     var onCounterpartChanged: (() -> Void)?
+    var onMessage: ((Data, @escaping (Data?) -> Void) -> Void)?
     private(set) var sent: [[String: Any]] = []
 
     func send(_ context: [String: Any]) throws {
