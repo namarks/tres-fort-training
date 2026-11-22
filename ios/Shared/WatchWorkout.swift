@@ -198,15 +198,21 @@ enum WatchWorkoutPresentation {
     }
 
     static let outOfReach = "Your iPhone is out of reach. Nothing is logged until it is back."
-    static let noAnswer = "Your iPhone didn’t answer. Nothing was logged. Try again."
     static let startOutOfReach = "Your iPhone is out of reach. Start once it is back."
-    static let startNoAnswer = "Your iPhone didn’t answer. The workout hasn’t started. Try again."
+    // No answer is not a refusal: the iPhone may have taken the tap and
+    // lost only its reply, so these never say that nothing happened. Trying
+    // again is safe either way: a tap names the set the Watch showed, so a
+    // set already logged is refused, not logged twice, and a Start for a
+    // runner already open only shows it.
+    static let noAnswer = "Your iPhone didn’t answer, so this may not be logged. Try again."
+    static let startNoAnswer = "Your iPhone didn’t answer, so the workout may not have started. Try again."
 
-    /// Why a tap never reached the iPhone, or came back with no answer.
+    /// Why a tap never reached the iPhone.
     static func outOfReach(_ action: WatchWorkoutCommand.Action) -> String {
         action == .start ? startOutOfReach : outOfReach
     }
 
+    /// A tap that went out and brought no answer back.
     static func noAnswer(_ action: WatchWorkoutCommand.Action) -> String {
         action == .start ? startNoAnswer : noAnswer
     }

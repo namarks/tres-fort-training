@@ -150,8 +150,8 @@ recorded on the iPhone.
       contract tests pin the step. GitHub's hosted runner built the Watch
       app with its complication on 2026-11-22, on the pull request and
       again on `main` after the merge.
-- [ ] **P5 — Lift from the wrist**
-  - [ ] **(a) The set on the wrist**
+- [x] **P5 — Lift from the wrist**
+  - [x] **(a) The set on the wrist**
     - While a lifting workout is open on the iPhone, the Watch app opens on
       the set the runner is on, with Today a swipe away: the exercise, the
       set number, the load and reps, and one button for what to do next
@@ -182,7 +182,9 @@ recorded on the iPhone.
       the iPhone's rest. While the app is in front, a haptic marks the end
       of a rest or a timed set; otherwise the iPhone's own notification for
       that moment reaches the wrist. With the iPhone out of reach the Watch
-      says so and logs nothing, and a refused tap says why.
+      says so and logs nothing, and a refused tap says why. A tap the
+      iPhone never answers is said to be unconfirmed, never "not logged":
+      trying again is safe, because a set already logged is refused.
     - Choosing another exercise, review and Finish stay on the iPhone, and
       the Watch says so at those points: the Station link has no Finish
       command. A partner workout doesn't show on the wrist. The runner's
@@ -191,7 +193,7 @@ recorded on the iPhone.
       against the iPhone's real runner are unit tested in the iOS tests. A
       fictional workout that answers its own taps
       (`-watch-workout-fixture`) is the simulator evidence.
-  - [ ] **(b) Start from the wrist**
+  - [x] **(b) Start from the wrist**
     - Start on the row that leads on the wrist's Today starts or resumes
       that lifting workout on the iPhone's runner, through the same guarded
       steps as Today's own button. A run still starts on the iPhone until
@@ -230,7 +232,7 @@ recorded on the iPhone.
 
 ## Execution frontier
 
-- P5
+- P6
 
 ## Dependencies
 
@@ -240,19 +242,24 @@ recorded on the iPhone.
 | P2 | coordinates_with | plan:run-recorder | Moves pure recorder logic into `ios/Shared` and saves Watch runs through the recorder's store and upload. |
 | P4 | coordinates_with | plan:app-store-submission | The Watch app stays out of the TestFlight and App Store projects until the owner says it ships; then the project files, privacy answers and review notes change. |
 | P5 | coordinates_with | plan:ipad-workout-station | Reuses the Station link's display state and guarded commands over WatchConnectivity. |
+| P6 | gated_by | external:apple-watch-lifting-device-verification | Needs a member with an Apple Watch and a TestFlight build that carries the Watch app, which the owner has to authorize: the build script and signing for the two Watch bundle ids are not set up, and the owner has no Watch. |
 | P1 | gated_by | external:apple-watch-device-verification | Runs on the wrist (P1 to P3) wait for a member who runs with an Apple Watch to test them on an authorized TestFlight build; GPS, wrist heart rate and haptics can't be trusted from the simulator. |
 
 ## Next step
 
-**Now (@agent):** P5(b), Start from the wrist, after P5(a) is reviewed. P4
-is in the repository: the Watch app with Today, the complication, and its
-build in the pull request job. P5(a), the set on the wrist, was built on a
-Mac on 2026-11-22 and ran on a Watch simulator with the fictional workout;
-its taps are tested against the iPhone's real runner in the iOS tests. No
-real Watch has run any of it: that is P6. The owner chose "the whole day,
-lifting first" on 2026-11-22 from three mocked options. Runs on the wrist
-(P1 to P3) stay gated on a member who runs with an Apple Watch, and P2
-starts only after the recorder's device checks for version 1.2.
+**Now (@owner):** Choose when the Watch app goes to TestFlight and who
+with an Apple Watch tries it: that is P6. P4 and P5 are in the repository:
+Today on the wrist with its complication, the set the iPhone's runner is on
+with one tap to log it, and Start on the day's leading row. All of it was
+built on a Mac on 2026-11-22 and ran on 40 mm and 46 mm Watch simulators
+with the fictional day and workout; every tap and Start is tested against
+the iPhone's real runner in the iOS tests. No real Watch has run any of it,
+and no TestFlight or App Store build carries the Watch app. A TestFlight
+build needs the upload script to take `project-watch.yml` and signing for
+the Watch app and its complication. The owner chose "the whole day, lifting
+first" on 2026-11-22 from three mocked options. Runs on the wrist (P1 to
+P3) stay gated on a member who runs with an Apple Watch, and P2 starts only
+after the recorder's device checks for version 1.2.
 
 ## Notes / open questions
 
