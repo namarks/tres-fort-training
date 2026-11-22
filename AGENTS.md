@@ -207,7 +207,9 @@ rows (`WatchDayBuilder`, worded by `TodayDayList`) to `WatchDaySender`, which
 sends them as WatchConnectivity's application context and clears them at
 every account boundary, like the Today widget. `ios/Shared/WatchDay.swift`
 holds the format and what the Watch shows for a day; keep day rules on the
-iPhone. See `docs/plans/apple-watch/plan.md`.
+iPhone. The complication (`ios/TresFortWatchWidgets`) reads the Watch app's
+stored copy of that day from the Watch's App Group. See
+`docs/plans/apple-watch/plan.md`.
 
 **Ordered workouts on a date (migration 0073).** Sessions are unique by
 `(user_id, date, slot)`. Slot 0 is the primary workout; additional workouts

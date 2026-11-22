@@ -32,15 +32,38 @@ targets:
         buildPhase: resources
       - path: TresFort/Fonts/OFL-JetBrainsMono.txt
         buildPhase: resources
+    dependencies:
+      - target: TresFortWatchWidgets   # the complication, inside the Watch app
     settings:
       base:
         # A companion Watch app's identifier starts with the iPhone app's.
         PRODUCT_BUNDLE_IDENTIFIER: com.nmarkspdx.tresfort.watchkitapp
         INFOPLIST_FILE: TresFortWatch/Info.plist
+        # App Group shared with the complication for the day it shows.
+        CODE_SIGN_ENTITLEMENTS: TresFortWatch/TresFortWatch.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         SKIP_INSTALL: YES
         ENABLE_PREVIEWS: YES
+
+  # The watch face complication and Smart Stack widget. Like the iPhone's
+  # widget extension it has no scheme of its own: it is built and embedded
+  # through the Watch app.
+  TresFortWatchWidgets:
+    type: app-extension
+    platform: watchOS
+    sources:
+      - TresFortWatchWidgets
+      - path: TresFortWatch/WatchComplicationView.swift
+      - path: Shared/WatchDay.swift
+      - path: Shared/TrainingAgenda.swift
+      - path: Shared/BrandPalette.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nmarkspdx.tresfort.watchkitapp.widgets
+        INFOPLIST_FILE: TresFortWatchWidgets/Info.plist
+        CODE_SIGN_ENTITLEMENTS: TresFortWatchWidgets/TresFortWatchWidgets.entitlements
+        SKIP_INSTALL: YES
 
 # Build and run the Watch app on a Watch simulator with this scheme. The
 # TresFort scheme builds the iPhone app with the Watch app inside it.

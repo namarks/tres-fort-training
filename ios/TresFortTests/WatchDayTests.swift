@@ -179,6 +179,84 @@ final class WatchDayTests: XCTestCase {
         XCTAssertEqual(WatchDayPresentation.dateLabel("not a date", locale: us), "not a date")
     }
 
+    // MARK: the complication
+
+    func testTheComplicationSaysWhatIsNext() throws {
+        let us = Locale(identifier: "en_US")
+        let zone = TimeZone(identifier: "Pacific/Auckland")!
+        let later = [
+            WatchUpcomingDay(date: "2026-11-21", title: "Rest day", detail: nil, isWorkout: false),
+            WatchUpcomingDay(date: "2026-11-22", title: "Upper", detail: "Bench press, Row", isWorkout: true),
+        ]
+        let done = WatchDayRow(id: "run", title: "Easy run", detail: "Done", kicker: nil, state: .done,
+                               glyph: "figure.run")
+        let next = WatchDayRow(id: "lift", title: "Lower Body", detail: "Back squat, Deadlift",
+                               kicker: "Up next · 5:30 PM", state: .next, glyph: "dumbbell")
+        func complication(_ rows: [WatchDayRow], upcoming: [WatchUpcomingDay] = later) -> WatchComplication {
+            WatchComplication(WatchDayPresentation.screen(snapshot(date: today, rows: rows, upcoming: upcoming),
+                                                          today: today),
+                              locale: us, timeZone: zone)
+        }
+
+        XCTAssertEqual(complication([done, next]), WatchComplication(
+            kicker: "Up next · 5:30 PM", title: "Lower Body", detail: "Back squat, Deadlift",
+            glyph: "dumbbell", inline: "Lower Body", tone: .next))
+        XCTAssertEqual(complication([done]), WatchComplication(
+            kicker: "Today", title: "Done today", detail: "Sun · Upper",
+            glyph: "checkmark", inline: "Done today", tone: .finished))
+        let aside = WatchDayRow(id: "lift", title: "Lower Body", detail: "Not today", kicker: nil,
+                                state: .setAside, glyph: "dumbbell")
+        XCTAssertEqual(complication([aside]).title, "Nothing left today")
+        XCTAssertEqual(complication([]), WatchComplication(
+            kicker: "Today", title: "Rest day", detail: "Sun · Upper",
+            glyph: "calendar", inline: "Rest day", tone: .empty))
+        XCTAssertNil(complication([], upcoming: []).detail, "nothing later to name")
+
+        // A later day shows the entry the iPhone resolved for it.
+        let planned = WatchComplication(
+            WatchDayPresentation.screen(snapshot(date: today, upcoming: later), today: "2026-11-22"),
+            locale: us, timeZone: zone)
+        XCTAssertEqual(planned.kicker, "Planned")
+        XCTAssertEqual(planned.title, "Upper")
+        XCTAssertEqual(planned.tone, .next)
+
+        XCTAssertEqual(WatchComplication(nil), .waiting)
+        XCTAssertEqual(WatchComplication.waiting.title, "Open on iPhone")
+    }
+
+    func testTheComplicationTurnsOverAtMidnightAndThenAsksForTheIPhone() throws {
+        let calendar = TrainingAgendaCalendar.calendar(timeZone: TimeZone(identifier: "Pacific/Auckland")!)
+        let start = try XCTUnwrap(TrainingAgendaCalendar.date(from: today, calendar: calendar))
+        let now = start.addingTimeInterval(9 * 3600)
+        let day = snapshot(date: today, rows: [
+            WatchDayRow(id: "lift", title: "Lower Body", detail: "Back squat", kicker: "Up next",
+                        state: .next, glyph: "dumbbell"),
+        ], upcoming: [
+            WatchUpcomingDay(date: "2026-11-21", title: "Rest day", detail: nil, isWorkout: false),
+            WatchUpcomingDay(date: "2026-11-22", title: "Upper", detail: nil, isWorkout: true),
+        ])
+
+        let entries = WatchDayTimeline.entries(snapshot: day, now: now, calendar: calendar)
+        let midnights = try ["2026-11-21", "2026-11-22", "2026-11-23"].map {
+            try XCTUnwrap(TrainingAgendaCalendar.date(from: $0, calendar: calendar))
+        }
+        XCTAssertEqual(entries.map(\.date), [now] + midnights)
+        XCTAssertEqual(entries[0].screen?.source, .today)
+        XCTAssertEqual(entries[1].screen?.emptyTitle, "Rest day")
+        XCTAssertEqual(entries[2].screen?.rows.first?.title, "Upper")
+        XCTAssertNil(entries[3].screen, "past what the copy covers, it asks for the iPhone")
+
+        let alone = WatchDayTimeline.entries(snapshot: snapshot(date: today), now: now, calendar: calendar)
+        XCTAssertEqual(alone.count, 2)
+        XCTAssertNil(alone[1].screen)
+
+        XCTAssertEqual(WatchDayTimeline.entries(snapshot: nil, now: now, calendar: calendar),
+                       [WatchDayTimeline.Entry(date: now, screen: nil)])
+        let old = WatchDayTimeline.entries(snapshot: snapshot(date: "2026-11-01"), now: now, calendar: calendar)
+        XCTAssertEqual(old, [WatchDayTimeline.Entry(date: now, screen: nil)],
+                       "a copy that can't speak for today schedules nothing")
+    }
+
     // MARK: on the wire and on the Watch
 
     func testADayAndAClearSurviveTheTrip() throws {

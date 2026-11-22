@@ -102,7 +102,7 @@ recorded on the iPhone.
     planned and unplanned runs with the Watch app (P2), including a pause,
     a recovered session and a run saved while the iPhone was out of range.
 - [ ] **P4 — The Watch app, Today and the complication**
-  - [ ] **(a) The Watch app and Today on the wrist**
+  - [x] **(a) The Watch app and Today on the wrist**
     - A watchOS app target (`ios/TresFortWatch`) in its own project spec,
       `ios/project-watch.yml`, which includes `project.yml` and embeds the
       Watch app in the iPhone app. The TestFlight spec (`project.yml`) and
@@ -129,7 +129,19 @@ recorded on the iPhone.
       (`design/mock-kit/watch.mjs`). The next item's Start arrives with P5.
   - [ ] **(b) The complication**
     - A watch face complication and Smart Stack widget for what is next
-      today, from the Watch's own copy of the day, opening the app.
+      today (`ios/TresFortWatchWidgets`, in `project-watch.yml` only): the
+      row that leads with its time, "Done today" and the next workout once
+      everything is finished, or the rest day and what is coming
+      (`WatchComplication`). A tap opens the app.
+    - It reads the Watch's own copy of the day, kept in the Watch's App
+      Group, turns over at each midnight the copy covers and then asks for
+      the iPhone (`WatchDayTimeline`). The Watch app reloads it when the
+      iPhone sends a changed day, also when the system wakes the app in the
+      background for it.
+    - Simulator evidence is the app's debug gallery of the complication's
+      sizes (`-watch-complication-gallery`): a watch face can't be set up
+      from the command line. How a face tints it and the background wake
+      are checked on a real Watch in P6.
   - [ ] **(c) The Watch app built in CI**
     - The PR's iOS checks build the Watch target on a Watch simulator from
       `project-watch.yml`, with the workflow's contract tests updated and a
@@ -168,11 +180,11 @@ recorded on the iPhone.
 
 ## Next step
 
-**Now (@agent):** Finish P4(a): build the Watch target from
-`project-watch.yml` on a Mac, run it on a Watch simulator with the fictional
-days and capture the real screens for the owner. Then P4(b), the
-complication, and P4(c), the Watch build in CI, before P5, lifting from the
-wrist. The owner chose "the whole day, lifting first" on 2026-11-22 from
+**Now (@agent):** Finish P4(b): build the complication's extension from
+`project-watch.yml` on a Mac and capture its sizes from the debug gallery.
+Then P4(c), the Watch build in CI, before P5, lifting from the wrist. P4(a)
+was built on a Mac on 2026-11-22 and ran on a Watch simulator with the
+fictional days. The owner chose "the whole day, lifting first" on 2026-11-22 from
 three mocked options. Runs on the wrist (P1 to P3) stay gated on a member
 who runs with an Apple Watch, and P2 starts only after the recorder's
 device checks for version 1.2.
@@ -192,6 +204,10 @@ device checks for version 1.2.
   and offline rules) is not planned.
 - The owner has no Apple Watch. P6 and P3 need a member who has one; until
   then the simulator is the evidence, and the plan says so.
+- A TestFlight build with the Watch app needs `scripts/upload-testflight.sh`
+  to take `project-watch.yml`, and signing for two new identifiers, the
+  Watch app and its complication, each with the App Group. That is the
+  owner's call and is not part of P4.
 - Open for P5: whether the Watch also runs a strength workout session
   during lifting, which keeps the app in front on a wrist raise and records
   heart rate to Apple Health. It needs a Health permission on the Watch and

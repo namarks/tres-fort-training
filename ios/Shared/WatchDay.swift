@@ -140,6 +140,91 @@ enum WatchDayPresentation {
     }
 }
 
+/// What the watch face complication and the Smart Stack say about a day:
+/// what is next, in the words the day's list already uses.
+struct WatchComplication: Equatable {
+    enum Tone: Equatable {
+        /// Something to do leads the day.
+        case next
+        /// Everything on the day is finished or set aside.
+        case finished
+        /// A day with nothing to train.
+        case empty
+        /// The Watch holds nothing for today.
+        case waiting
+    }
+
+    /// Small capitals over the title: "Up next · 5:30 PM", "Today".
+    let kicker: String
+    let title: String
+    let detail: String?
+    /// SF Symbol for the round and corner complications.
+    let glyph: String
+    /// One line beside the time on a watch face.
+    let inline: String
+    let tone: Tone
+
+    static let waiting = WatchComplication(
+        kicker: "Très Fort", title: "Open on iPhone", detail: nil,
+        glyph: "iphone", inline: "Très Fort", tone: .waiting)
+}
+
+extension WatchComplication {
+    init(_ screen: WatchDayScreen?, locale: Locale = .current, timeZone: TimeZone = .current) {
+        guard let screen else {
+            self = .waiting
+            return
+        }
+        if let next = screen.rows.first(where: { $0.state == .next }) {
+            self = WatchComplication(
+                kicker: next.kicker ?? "Up next", title: next.title,
+                detail: next.detail.isEmpty ? nil : next.detail,
+                glyph: next.glyph, inline: next.title, tone: .next)
+            return
+        }
+        let later = screen.comingUp.map {
+            "\(WatchDayPresentation.weekdayLabel($0.date, locale: locale, timeZone: timeZone)) · \($0.title)"
+        }
+        if let title = screen.emptyTitle {
+            self = WatchComplication(kicker: "Today", title: title, detail: later,
+                                     glyph: "calendar", inline: title, tone: .empty)
+            return
+        }
+        // Rows, and none leads: each is finished or set aside.
+        let title = screen.rows.contains { $0.state == .done } ? "Done today" : "Nothing left today"
+        self = WatchComplication(kicker: "Today", title: title, detail: later,
+                                 glyph: "checkmark", inline: title, tone: .finished)
+    }
+}
+
+/// When the complication changes without the app: at each midnight the
+/// Watch's copy still covers, then once more to ask for the iPhone.
+enum WatchDayTimeline {
+    struct Entry: Equatable {
+        let date: Date
+        let screen: WatchDayScreen?
+    }
+
+    static func entries(snapshot: WatchDaySnapshot?, now: Date, calendar: Calendar) -> [Entry] {
+        let today = TrainingAgendaCalendar.dateString(now, calendar: calendar)
+        var entries = [Entry(date: now, screen: WatchDayPresentation.screen(snapshot, today: today))]
+        // A copy that can't speak for today can't speak for a later day.
+        guard entries[0].screen != nil, let snapshot,
+              var start = TrainingAgendaCalendar.date(from: today, calendar: calendar)
+        else { return entries }
+        // One step past the last day the copy covers ends on "ask the iPhone".
+        for _ in 0...snapshot.upcoming.count {
+            guard let next = calendar.date(byAdding: .day, value: 1, to: start) else { break }
+            start = next
+            let day = TrainingAgendaCalendar.dateString(next, calendar: calendar)
+            let screen = WatchDayPresentation.screen(snapshot, today: day)
+            entries.append(Entry(date: next, screen: screen))
+            if screen == nil { break }
+        }
+        return entries
+    }
+}
+
 /// What travels from the iPhone to the Watch as WatchConnectivity's
 /// application context: the latest day, or word that the account left.
 enum WatchDayMessage {
@@ -182,9 +267,16 @@ enum WatchDayMessage {
 }
 
 /// The Watch's own copy of the last day it received, so the app opens with
-/// it before the iPhone is in reach.
+/// it before the iPhone is in reach. It lives in the Watch's App Group so
+/// the complication reads the same copy.
 enum WatchDayStore {
     static let snapshotKey = "com.nmarkspdx.tresfort.watch-day.v1"
+    /// The Watch's group has the iPhone's identifier but its own storage:
+    /// nothing is shared between the two devices through it.
+    static let appGroupID = "group.com.nmarkspdx.tresfort"
+    static let complicationKind = "WatchNextComplication"
+
+    static var sharedDefaults: UserDefaults { UserDefaults(suiteName: appGroupID) ?? .standard }
 
     static func load(from defaults: UserDefaults) -> WatchDaySnapshot? {
         guard let data = defaults.data(forKey: snapshotKey),
