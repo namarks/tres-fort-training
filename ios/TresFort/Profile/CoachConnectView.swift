@@ -354,7 +354,10 @@ struct CoachConnectView: View {
                         .font(.subheadline.weight(.semibold))
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
-                        .padding(.horizontal, 8).padding(.vertical, 8)
+                        // Four choices fit a small iPhone at ordinary sizes
+                        // without spending the label's width on extra padding.
+                        .padding(.horizontal, columns == apps.count ? 2 : 8)
+                        .padding(.vertical, 8)
                         .frame(maxWidth: .infinity, minHeight: 44)
                         .foregroundStyle(selectedApp == app ? Theme.onAccent : Theme.text)
                         .background(selectedApp == app ? Theme.accent : Theme.surface,
