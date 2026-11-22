@@ -266,6 +266,7 @@ struct PlanItemBadge: View {
 /// A saved workout as a list shows it: name, the weekdays that use it and
 /// what's in it.
 struct PlanItemLabel: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let workout: Workout
     let plan: PlanTree?
     var showsWeekdays = true
@@ -273,23 +274,34 @@ struct PlanItemLabel: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            PlanItemBadge(glyph: PlanItemSummary.glyph(for: workout))
+            if !dynamicTypeSize.isAccessibilitySize { PlanItemBadge(glyph: PlanItemSummary.glyph(for: workout)) }
             VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
+                let titleLayout = dynamicTypeSize >= .xxLarge
+                    ? AnyLayout(VStackLayout(alignment: .leading, spacing: 6))
+                    : AnyLayout(HStackLayout(spacing: 6))
+                titleLayout {
                     Text(workout.name).font(Theme.mono(15, .bold)).foregroundStyle(Theme.text)
-                        .lineLimit(1)
+                        .lineLimit(dynamicTypeSize >= .xxLarge ? nil : 1)
+                        .fixedSize(horizontal: false, vertical: true)
                     if showsWeekdays {
-                        ForEach(PlanItemSummary.weekdays(using: workout.id, plan: plan), id: \.self) { key in
-                            Text(key.uppercased())
-                                .font(Theme.mono(10, .bold)).foregroundStyle(Theme.muted)
-                                .padding(.horizontal, 5).padding(.vertical, 2)
-                                .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 5))
+                        if dynamicTypeSize >= .xxLarge {
+                            Text(PlanItemSummary.weekdays(using: workout.id, plan: plan).map { $0.uppercased() }.joined(separator: " · "))
+                                .font(.caption2.weight(.bold)).foregroundStyle(Theme.muted)
+                                .fixedSize(horizontal: false, vertical: true)
+                        } else {
+                            ForEach(PlanItemSummary.weekdays(using: workout.id, plan: plan), id: \.self) { key in
+                                Text(key.uppercased())
+                                    .font(Theme.mono(10, .bold)).foregroundStyle(Theme.muted)
+                                    .padding(.horizontal, 5).padding(.vertical, 2)
+                                    .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 5))
+                            }
                         }
                     }
                 }
                 Text(PlanItemSummary.detail(for: workout, unit: unit))
                     .font(Theme.mono(12)).foregroundStyle(Theme.muted)
-                    .lineLimit(2)
+                    .lineLimit(dynamicTypeSize >= .xxLarge ? nil : 2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .accessibilityElement(children: .ignore)
@@ -301,6 +313,7 @@ struct PlanItemLabel: View {
 /// with its kind and contents, so the plan reads without opening anything.
 /// Tapping any day, rest days too, opens that day to change it.
 struct PlanWeekSummary: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ObservedObject var sync: SyncModel
     var onChangeDay: (String) -> Void
 
@@ -339,15 +352,16 @@ struct PlanWeekSummary: View {
                         .font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.dim)
                     Text(extras.map { timed($0, row) }.joined(separator: " · "))
                         .font(Theme.mono(12)).foregroundStyle(Theme.muted)
-                        .lineLimit(1)
+                        .lineLimit(dynamicTypeSize >= .xxLarge ? nil : 1)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .padding(.leading, 48)
+                .padding(.leading, dynamicTypeSize >= .xxLarge ? 0 : 48)
                 .accessibilityHidden(true)
             }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
-        .frame(minHeight: 52)
+        .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
         .contentShape(Rectangle())
     }
 
@@ -363,27 +377,35 @@ struct PlanWeekSummary: View {
 
     private func mainLine(_ row: WorkoutLibraryPolicy.WeekRow) -> some View {
         let workout = sync.workout(id: row.workoutID)
-        return HStack(alignment: .center, spacing: 12) {
+        let layout = dynamicTypeSize >= .xxLarge
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+            : AnyLayout(HStackLayout(alignment: .center, spacing: 12))
+        return layout {
             Text(row.weekdayKey.uppercased())
                 .font(Theme.mono(11, .bold)).foregroundStyle(Theme.muted)
-                .frame(width: 36, alignment: .leading)
+                .frame(width: dynamicTypeSize >= .xxLarge ? nil : 36, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
             if let workout {
                 PlanItemLabel(workout: workout, plan: sync.plan, showsWeekdays: false)
-                Spacer(minLength: 0)
+                if dynamicTypeSize < .xxLarge { Spacer(minLength: 0) }
                 if let time = timeText(workout.id, row) {
                     Text(time).font(Theme.mono(12, .bold)).foregroundStyle(Theme.muted)
                         .accessibilityHidden(true)
                 }
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.dim)
-                    .accessibilityHidden(true)
+                if dynamicTypeSize < .xxLarge {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.dim)
+                        .accessibilityHidden(true)
+                }
             } else {
-                Image(systemName: "moon.zzz")
-                    .font(.system(size: 15)).foregroundStyle(Theme.dim)
-                    .frame(width: 30)
-                    .accessibilityHidden(true)
+                if !dynamicTypeSize.isAccessibilitySize {
+                    Image(systemName: "moon.zzz")
+                        .font(.system(size: 15)).foregroundStyle(Theme.dim)
+                        .frame(width: 30)
+                        .accessibilityHidden(true)
+                }
                 Text("Rest").font(Theme.mono(15, .medium)).foregroundStyle(Theme.muted)
-                Spacer(minLength: 0)
+                if dynamicTypeSize < .xxLarge { Spacer(minLength: 0) }
                 Label("Add", systemImage: "plus")
                     .font(Theme.mono(14, .bold)).foregroundStyle(Theme.accent)
                     .accessibilityHidden(true)

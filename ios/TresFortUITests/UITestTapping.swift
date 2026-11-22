@@ -95,9 +95,9 @@ extension XCUIApplication {
     /// as a picker at the top of a long form the test has scrolled through.
     @discardableResult
     func scroll(toReveal element: XCUIElement, searchingUp: Bool = false,
-                maxDrags: Int = 16) -> Bool {
+                maxDrags: Int = 16, above bottomBar: XCUIElement? = nil) -> Bool {
         for _ in 0..<maxDrags {
-            let band = visibleContentBand()
+            let band = visibleContentBand(above: bottomBar)
             guard band.height > 80 else { break }
             if isVisibleForTap(element, in: band) { return true }
             let elementIsAbove = element.exists ? element.frame.midY < band.minY + 8 : searchingUp
@@ -113,7 +113,7 @@ extension XCUIApplication {
             start.press(forDuration: 0.1, thenDragTo: end,
                         withVelocity: .slow, thenHoldForDuration: 0.3)
         }
-        return isVisibleForTap(element, in: visibleContentBand())
+        return isVisibleForTap(element, in: visibleContentBand(above: bottomBar))
     }
 
     private func isVisibleForTap(_ element: XCUIElement, in band: CGRect) -> Bool {
@@ -127,9 +127,11 @@ extension XCUIApplication {
 
     /// The part of the screen where scrolled content can be tapped: below any
     /// navigation bar and top tab bar, above any bottom tab bar and keyboard.
-    private func visibleContentBand() -> CGRect {
+    private func visibleContentBand(above bottomBar: XCUIElement? = nil) -> CGRect {
         var top = frame.minY + 60
-        var bottom = frame.maxY - 40
+        // Use the actual bars below. Reserving 40 points on every device
+        // excludes fully visible bottom buttons on an iPhone SE.
+        var bottom = frame.maxY
         for bar in navigationBars.allElementsBoundByIndex where bar.exists && bar.isHittable {
             top = max(top, bar.frame.maxY)
         }
@@ -143,6 +145,11 @@ extension XCUIApplication {
         }
         let keyboard = keyboards.firstMatch
         if keyboard.exists { bottom = min(bottom, keyboard.frame.minY) }
+        // SwiftUI can report a Form row as hittable behind a safe-area
+        // action bar. Its caller can bound scrolling above that fixed bar.
+        if let bottomBar, bottomBar.exists && bottomBar.isHittable {
+            bottom = min(bottom, bottomBar.frame.minY)
+        }
         return CGRect(x: frame.minX, y: top, width: frame.width, height: max(0, bottom - top))
     }
 }

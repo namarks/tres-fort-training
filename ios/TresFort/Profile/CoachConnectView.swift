@@ -106,6 +106,7 @@ struct CoachSharingDetails: View {
 /// them. The app's tile carries its name, not its logo: Anthropic and OpenAI
 /// allow their logos only with permission.
 struct CoachConnectionHeader: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     /// The name on the AI app's tile.
     let tileName: String
     /// The app's name in "Connect Très Fort to …".
@@ -126,35 +127,45 @@ struct CoachConnectionHeader: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            HStack(spacing: 10) {
-                Image("brand_tres_fort")
-                    .resizable().interpolation(.high)
-                    .frame(width: 56, height: 56)
-                    .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-                dots
-                Image(systemName: "checkmark.shield")
-                    .font(.body.weight(.semibold))
-                    .foregroundStyle(Theme.accent)
-                    .frame(width: 32, height: 32)
-                    .background(Theme.surface2, in: Circle())
-                dots
-                Text(tileName)
-                    .font(.footnote.weight(.bold))
-                    .lineLimit(1).minimumScaleFactor(0.6)
-                    .padding(.horizontal, 4)
-                    .frame(width: 56, height: 56)
-                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous)
-                        .strokeBorder(Theme.text.opacity(0.14)))
+            if !dynamicTypeSize.isAccessibilitySize {
+                artwork
             }
-            .accessibilityHidden(true)
             Text(title ?? "Connect Très Fort to \(appName)")
                 .font(.title3.weight(.semibold))
                 .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
                 .accessibilityAddTraits(.isHeader)
                 .accessibilityIdentifier("coach.connection-title")
         }
         .frame(maxWidth: .infinity)
+    }
+
+    /// Decorative: the heading repeats both names. Keep these tiles compact
+    /// and omit them at accessibility sizes to leave room for the disclosure.
+    private var artwork: some View {
+        HStack(spacing: 10) {
+            Image("brand_tres_fort")
+                .resizable().interpolation(.high)
+                .frame(width: 56, height: 56)
+                .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+            dots
+            Image(systemName: "checkmark.shield")
+                .font(.body.weight(.semibold))
+                .foregroundStyle(Theme.accent)
+                .frame(width: 32, height: 32)
+                .background(Theme.surface2, in: Circle())
+            dots
+            Text(tileName)
+                .font(.footnote.weight(.bold))
+                .lineLimit(1).minimumScaleFactor(0.6)
+                .padding(.horizontal, 4)
+                .frame(width: 56, height: 56)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .strokeBorder(Theme.text.opacity(0.14)))
+        }
+        .dynamicTypeSize(.large)
+        .accessibilityHidden(true)
     }
 
     private var dots: some View {
@@ -203,6 +214,7 @@ struct CoachConnectView: View {
     var onHandoff: () -> Void
     @Environment(\.openURL) private var openURL
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var selectedApp: CoachApp = .claude
     /// App Review 5.1.1(i)/5.1.2(i): setup, connection details and connect codes
     /// stay hidden until the member allows sharing with the named recipient.
@@ -228,6 +240,9 @@ struct CoachConnectView: View {
     private static let choicesTopID = "coach.choices-top"
     private static let setupTopID = "coach.setup-top"
     private var connectorURL: String { CoachSetup.serverURL(baseURL: Config.apiBaseURL).absoluteString }
+    /// A pinned, multiline decision can consume most of a small phone. Keep
+    /// the whole disclosure and its actions on one scroll surface at XXXL+.
+    private var scrollsConsentActions: Bool { dynamicTypeSize >= .xxxLarge }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -255,15 +270,22 @@ struct CoachConnectView: View {
                         if selectedApp == .chatgpt { chatGPTConnectionInfo }
                     }
                     .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
                     if consentedApp == selectedApp {
                         setupSections
                     } else {
                         consentSection
                         if selectedApp == .claude { nextSteps }
+                        if scrollsConsentActions {
+                            Section { consentActions }
+                                .listRowBackground(Color.clear)
+                                .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                        }
                     }
                 }
             }
+            .contentMargins(.top, 12, for: .scrollContent)
             // The consent button sits below the disclosure; bring the member back
             // to the first setup step once they allow sharing.
             .onChange(of: consentedApp) { _, app in
@@ -274,9 +296,10 @@ struct CoachConnectView: View {
                 DispatchQueue.main.async { proxy.scrollTo(Self.choicesTopID, anchor: .top) }
             }
         }
-        // The decision stays on screen while the member reads, at any text size.
         .safeAreaInset(edge: .bottom) {
-            if consentedApp != selectedApp && connectedApp == nil { consentActions }
+            if !scrollsConsentActions && consentedApp != selectedApp && connectedApp == nil {
+                consentActions.padding(.horizontal, 16).background(.bar)
+            }
         }
         .navigationTitle("Connect your coach")
         .navigationBarTitleDisplayMode(.inline)
@@ -332,12 +355,19 @@ struct CoachConnectView: View {
     /// The AI apps as named tiles. Names only: Anthropic and OpenAI allow
     /// their logos only with permission (see "Brand logos" in DESIGN-SYSTEM.md).
     private var appChoices: some View {
-        HStack(spacing: 8) {
-            ForEach(CoachApp.primaryChoices) { app in
+        let apps = CoachApp.primaryChoices
+        let columns = dynamicTypeSize >= .accessibility3 ? 1 : dynamicTypeSize >= .xLarge ? 2 : apps.count
+        return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: columns), spacing: 8) {
+            ForEach(apps) { app in
                 Button { selectedApp = app } label: {
                     Text(app.tileName)
                         .font(.subheadline.weight(.semibold))
-                        .lineLimit(1).minimumScaleFactor(0.7)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                        // The choices fit a small iPhone at ordinary sizes
+                        // without spending the label's width on extra padding.
+                        .padding(.horizontal, columns == apps.count ? 2 : 8)
+                        .padding(.vertical, 8)
                         .frame(maxWidth: .infinity, minHeight: 44)
                         .foregroundStyle(selectedApp == app ? Theme.onAccent : Theme.text)
                         .background(selectedApp == app ? Theme.accent : Theme.surface,
@@ -424,9 +454,7 @@ struct CoachConnectView: View {
                 .frame(maxWidth: .infinity, minHeight: 44)
                 .accessibilityIdentifier("coach.consent-decline")
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 10)
-        .background(.bar)
+        .padding(.vertical, 10)
     }
 
     /// Allowing sharing with Claude opens Claude straight away: the member
@@ -466,10 +494,13 @@ struct CoachConnectView: View {
         if let link { pendingLink = link }
     }
 
-    /// Both policies on one compact row; borderless so each link keeps its own tap.
+    /// Policies stack at larger sizes; borderless so each link keeps its own tap.
     @ViewBuilder
     private var policyLinks: some View {
-        HStack(spacing: 20) {
+        let layout = dynamicTypeSize >= .xxLarge
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4))
+            : AnyLayout(HStackLayout(spacing: 20))
+        layout {
             switch selectedApp {
             case .claude:
                 Link(destination: AppInformation.anthropicPrivacyURL) { Text("Anthropic privacy").frame(minHeight: 44) }

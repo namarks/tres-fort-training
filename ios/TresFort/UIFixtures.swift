@@ -126,6 +126,11 @@ enum UIFixtureModel {
             auth.handleDeepLink(URL(string: "https://tresfort.app/coach/authorize?request=" + String(repeating: "a", count: 64))!)
         }
         if UIFixtureScenario.selected == .appStore {
+            if ProcessInfo.processInfo.environment["TRESFORT_UI_PENDING_COACH_SETUP"] == "1" {
+                // The same entry intent as Profile, without scrolling unrelated
+                // settings in each system-text-size verification run.
+                auth.requestEntry(.coach)
+            }
             if let remembered = ProcessInfo.processInfo.environment["TRESFORT_UI_STATION_REMEMBERED_ACCOUNT"] {
                 defaults.preferences.set(remembered, forKey: StationLink.stationEnabledAccountDefaultsKey)
             }
