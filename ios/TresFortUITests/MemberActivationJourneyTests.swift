@@ -438,7 +438,7 @@ final class MemberActivationJourneyTests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Connect your coach"].waitForExistence(timeout: UITestWait.screen))
     }
 
-    func testCoachSetupSharesChatGPTAndKeepsDirectCodexAdvanced() {
+    func testCoachSetupConnectsClaudeAndReturnsToApproval() {
         let app = launch("activation-manual", captureLinks: true)
         tap(app.buttons["Sign in with Apple"], in: app)
         onboard(app)
@@ -446,9 +446,6 @@ final class MemberActivationJourneyTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["coach.data-sharing"].label.contains("Anthropic"))
         XCTAssertTrue(app.staticTexts["coach.connection-title"].label.contains("Claude"))
         XCTAssertTrue(app.buttons["coach.app.claude"].isSelected)
-        XCTAssertTrue(app.buttons["coach.app.chatgpt"].exists)
-        XCTAssertTrue(app.buttons["coach.app.other"].exists)
-        XCTAssertFalse(app.buttons["coach.app.codex"].exists)
         // Nothing that shares data is offered before explicit permission.
         XCTAssertFalse(app.buttons["coach.connect-claude"].exists)
         XCTAssertFalse(app.buttons["Use a connect code"].exists)
@@ -491,8 +488,17 @@ final class MemberActivationJourneyTests: XCTestCase {
         // Allowing returns to the AI app without another tap.
         XCTAssertTrue(app.staticTexts["fixture.opened-url"].label.hasPrefix("https://client.example/callback"))
         tap(app.buttons["Done"], in: app)
-        tap(app.tabBars.buttons["Today"], in: app)
+    }
+
+    func testCoachSetupSharesChatGPTAndKeepsDirectCodexAdvanced() {
+        let app = launch("activation-manual")
+        tap(app.buttons["Sign in with Apple"], in: app)
+        onboard(app)
         tap(app.buttons["Set up my coach"], in: app)
+        XCTAssertTrue(app.buttons["coach.app.claude"].exists)
+        XCTAssertTrue(app.buttons["coach.app.chatgpt"].exists)
+        XCTAssertTrue(app.buttons["coach.app.other"].exists)
+        XCTAssertFalse(app.buttons["coach.app.codex"].exists)
 
         tap(app.buttons["coach.app.other"], in: app)
         XCTAssertTrue(app.staticTexts["coach.data-sharing"].label.contains("configured model provider"))
@@ -511,7 +517,7 @@ final class MemberActivationJourneyTests: XCTestCase {
         XCTAssertTrue(chatGPTSteps.waitForExistence(timeout: UITestWait.screen))
         XCTAssertTrue(chatGPTSteps.label.contains("Continue with Apple"))
         XCTAssertFalse(app.buttons["coach.direct-codex"].exists)
-        scrollAndTap(app.buttons["coach.advanced"], in: app)
+        scrollAndTap(app.buttons["Advanced"], in: app)
         scrollAndTap(app.buttons["coach.direct-codex"], in: app)
         // ChatGPT consent must not authorize a separately configured model
         // provider in the direct Codex route.

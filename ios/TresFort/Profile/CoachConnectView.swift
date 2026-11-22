@@ -402,7 +402,6 @@ struct CoachConnectView: View {
                 .frame(minHeight: 44)
                 .accessibilityIdentifier("coach.direct-codex")
         }
-        .accessibilityIdentifier("coach.advanced")
     }
 
     private var consentActions: some View {
