@@ -27,8 +27,9 @@ final class LargeTextJourneyTests: XCTestCase {
     }
 
     private func reveal(_ element: XCUIElement, in app: XCUIApplication,
-                        searchingUp: Bool = false, file: StaticString = #filePath, line: UInt = #line) {
-        XCTAssertTrue(app.scroll(toReveal: element, searchingUp: searchingUp, maxDrags: 30),
+                        searchingUp: Bool = false, above bottomBar: XCUIElement? = nil,
+                        file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(app.scroll(toReveal: element, searchingUp: searchingUp, maxDrags: 30, above: bottomBar),
                       "Content must remain reachable", file: file, line: line)
         XCTAssertGreaterThanOrEqual(element.frame.minX, app.frame.minX, file: file, line: line)
         XCTAssertLessThanOrEqual(element.frame.maxX, app.frame.maxX, file: file, line: line)
@@ -43,29 +44,30 @@ final class LargeTextJourneyTests: XCTestCase {
 
     func testCoachChoicesDisclosureAndConsentStayReachable() {
         let app = launch(coach: true)
+        let allow = app.buttons["coach.consent-allow"]
         capture("coach-claude")
         for name in ["other", "claude", "chatgpt"] {
             let choice = app.buttons["coach.app." + name]
-            reveal(choice, in: app, searchingUp: true)
+            reveal(choice, in: app, searchingUp: true, above: allow)
             choice.tapWhenReady()
             XCTAssertTrue(choice.isSelected)
         }
         let disclosure = app.staticTexts["coach.data-sharing"]
-        reveal(disclosure, in: app)
+        reveal(disclosure, in: app, above: allow)
         XCTAssertTrue(disclosure.label.contains("OpenAI"))
         let setupSteps = app.descendants(matching: .any).matching(identifier: "coach.chatgpt-steps").firstMatch
         XCTAssertFalse(setupSteps.exists,
                        "Choosing an app does not authorize sharing")
         capture("coach-chatgpt")
         let details = app.buttons["coach.full-details"]
-        reveal(details, in: app)
+        reveal(details, in: app, above: allow)
         details.tapWhenReady()
+        XCTAssertFalse(setupSteps.exists, "Reading the disclosure must not authorize sharing")
         let shared = app.staticTexts["What is shared"]
-        reveal(shared, in: app)
+        reveal(shared, in: app, above: allow)
         capture("coach-details")
-        reveal(details, in: app, searchingUp: true)
+        reveal(details, in: app, searchingUp: true, above: allow)
         details.tapWhenReady()
-        let allow = app.buttons["coach.consent-allow"]
         reveal(allow, in: app)
         capture("coach-decision")
         allow.tapWhenReady()
