@@ -1,10 +1,17 @@
-# Runs on Apple Watch
+# Tres Fort on Apple Watch
 
-Slug: apple-watch · Status: paused · Updated: 2026-11-06 · Theme: connected-training
+Slug: apple-watch · Status: planned · Updated: 2026-11-22 · Theme: connected-training
 
 ## Goal
 
-A member with an Apple Watch can follow and record a run from the wrist. The
+A member with an Apple Watch sees their day on the wrist and trains from it.
+A Tres Fort Watch app shows today's list as the iPhone does, with a watch
+face complication for what is next. During a lifting workout it shows the
+set the iPhone runner is on, logs it with one tap, changes the load or reps
+with the crown, and counts the rest down with a tap on the wrist. The iPhone
+keeps the workout and stays in a pocket or bag.
+
+The member can also follow and record a run from the wrist. The
 rest timer and the run recorder's stats show on the Watch laid out for it. A
 planned run can be sent to Apple's Workout app with its steps and pace or
 heart rate alerts, and the finished run comes back to Tres Fort with its
@@ -50,11 +57,11 @@ recorded on the iPhone.
   - Unplanned Workout-app runs keep arriving through the existing Apple
     Health import, unchanged.
 - [ ] **P2 — Record runs with the Tres Fort Watch app**
-  - [ ] **(a) Watch app and its build**
-    - A watchOS app target embedded in the iPhone app (`project.yml`), built
-      and unit tested on a Watch simulator in the PR's iOS job. Pure recorder
-      logic (`RunPlan`, `RunPlanProgress`, `RunTargetCoach`, `RecordedRun`,
-      `RecordedRunTCX`) moves to `ios/Shared` and compiles into both apps.
+  - [ ] **(a) Recorder logic shared with the Watch app**
+    - The Watch app and its build come from P4. Pure recorder logic
+      (`RunPlan`, `RunPlanProgress`, `RunTargetCoach`, `RecordedRun`,
+      `RecordedRunTCX`) moves to `ios/Shared` and compiles into both apps,
+      once the recorder's device checks for version 1.2 are done.
     - The start screen shows today's planned run, sent from the iPhone over
       WatchConnectivity with its steps and unit preference, or Start an
       unplanned run. The Watch never signs in or calls the Worker.
@@ -94,6 +101,44 @@ recorded on the iPhone.
     the wrist layouts (P0), a planned run through the Workout app (P1), and
     planned and unplanned runs with the Watch app (P2), including a pause,
     a recovered session and a run saved while the iPhone was out of range.
+- [ ] **P4 — The Watch app, Today and the complication**
+  - A watchOS app target embedded in the iPhone app in `project.yml` only,
+    built and unit tested on a Watch simulator in the PR's iOS job. The App
+    Store project (`project-app-store.yml`) replaces the app's dependencies,
+    so the Watch app stays out of App Store builds until the owner says it
+    ships.
+  - Today on the wrist: the day's list as the iPhone shows it, finished rows
+    shrunk and the next item on navy with Start, a rest day with what is
+    coming, and a watch face complication and Smart Stack widget for what is
+    next. The iPhone sends the day it already resolved (the
+    `TrainingAgenda` snapshot, extended with times and figures) over
+    WatchConnectivity after each published change and clears it at every
+    account boundary. The Watch never signs in, calls the Worker or decides
+    what a day is, and says when its copy is from an earlier day.
+  - Black background as watchOS expects, the hero navy for the day's key
+    card and orange only for the next action and progress, from
+    `BrandPalette`. The option mocks join the mock kit as Watch screens.
+- [ ] **P5 — Lift from the wrist**
+  - Start on a lifting workout opens it on the iPhone runner. The Watch then
+    shows the set the runner is on, from the same `WorkoutDisplayState` a
+    linked iPad shows: exercise, set number, load and reps, and last time.
+  - Log set, a load or reps change with the crown, start and stop of a timed
+    set, End rest and Finish go to the iPhone as the Station link's guarded
+    commands (`StationLinkCommandRunner`), so the iPhone acts only while its
+    runner still shows what the Watch showed and answers each tap with
+    accepted or the reason it refused. Sets are logged by the iPhone through
+    its own outbox; the Watch holds no workout state of its own.
+  - The rest counts down on the wrist with a haptic at zero. With the iPhone
+    out of reach, the Watch says so and logs nothing.
+- [ ] **P6 — A lifting workout on a real Apple Watch**
+  - P4 and P5 pass on paired iPhone and Watch simulators, and a member with
+    an Apple Watch runs a lifting workout from the wrist on a TestFlight
+    build: the complication, every set logged from the Watch, a changed
+    load, a timed set, rests, and Finish.
+
+## Execution frontier
+
+- P4
 
 ## Dependencies
 
@@ -101,26 +146,39 @@ recorded on the iPhone.
 |---|---|---|---|
 | P1 | coordinates_with | plan:planned-runs | Reads the planned-run step format and marks the slot done through planned-runs P7's path. |
 | P2 | coordinates_with | plan:run-recorder | Moves pure recorder logic into `ios/Shared` and saves Watch runs through the recorder's store and upload. |
-| P2 | coordinates_with | plan:app-store-submission | A Watch app ships only in a version after 1.0 and needs the App Store project file and review notes updated. |
-| P1 | gated_by | external:apple-watch-device-verification | The owner paused after P0: P1 onward waits for a member who runs with an Apple Watch to test it (P3) on an authorized TestFlight build. |
+| P4 | coordinates_with | plan:app-store-submission | The Watch app stays out of the App Store project until the owner says it ships; then the project file, privacy answers and review notes change. |
+| P5 | coordinates_with | plan:ipad-workout-station | Reuses the Station link's display state and guarded commands over WatchConnectivity. |
+| P1 | gated_by | external:apple-watch-device-verification | Runs on the wrist (P1 to P3) wait for a member who runs with an Apple Watch to test them on an authorized TestFlight build; GPS, wrist heart rate and haptics can't be trusted from the simulator. |
 
 ## Next step
 
-**Paused (owner, 2026-11-03):** The owner has no Apple Watch, and no
-member is known to run with one, so P1 and P2 could only be checked on the
-Watch simulator. The owner chose to stop after P0's wrist layouts. Resume
-with P1 when a member who runs with an Apple Watch will test it (P3).
+**Now (@owner):** Pick the scope from the three mocked options put to the
+owner on 2026-11-22: lifting only, runs only, or the whole day with lifting
+first, which this plan lays out and recommends. On that pick the plan
+becomes active and P4 starts: the Watch app target, Today on the wrist and
+the complication, checked on a Watch simulator in CI, then P5. Runs on the
+wrist (P1 to P3) stay gated on a member who runs with an Apple Watch, and
+P2 starts only after the recorder's device checks for version 1.2.
 
 ## Notes / open questions
 
 - The owner asked on 2026-11-03 whether Tres Fort could have an Apple Watch
-  app, and chose "Full Watch app, runs first" from a phased proposal. Logging
-  lifting sets from the wrist and a Today screen with a watch-face
-  complication were proposed as later phases and stay candidates.
+  app, chose "Full Watch app, runs first" from a phased proposal, and
+  paused after P0 with no Apple Watch to test on. On 2026-11-22 the owner
+  asked for the Watch app to be designed and built. The whole day with
+  lifting first is recommended: lifting can be checked on paired
+  simulators, and it is the part Apple's Workout app can't do. The owner's
+  pick is pending.
 - Apple's Workout app has no sets or reps, so lifting on the wrist needs the
-  Watch app; it would drive the iPhone runner the way the iPad Station link
+  Watch app; it drives the iPhone runner the way the iPad Station link
   does. A Watch that trains with no iPhone nearby (its own sign-in, outbox
   and offline rules) is not planned.
+- The owner has no Apple Watch. P6 and P3 need a member who has one; until
+  then the simulator is the evidence, and the plan says so.
+- Open for P5: whether the Watch also runs a strength workout session
+  during lifting, which keeps the app in front on a wrist raise and records
+  heart rate to Apple Health. It needs a Health permission on the Watch and
+  a real Watch to check, so it is not in P5.
 - P1 and P2 overlap for planned runs. P1 is quick and uses Apple's own
   recorder; P2 keeps the whole run in Tres Fort with its own cues. Both stay,
   since P1 also serves members who prefer the Workout app.
