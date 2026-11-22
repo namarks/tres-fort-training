@@ -184,7 +184,8 @@ recorded on the iPhone.
       that moment reaches the wrist. With the iPhone out of reach the Watch
       says so and logs nothing, and a refused tap says why. A tap the
       iPhone never answers is said to be unconfirmed, never "not logged":
-      trying again is safe, because a set already logged is refused.
+      the Watch asks for another tap only if nothing changed on it, and a
+      set already logged is refused either way.
     - Choosing another exercise, review and Finish stay on the iPhone, and
       the Watch says so at those points: the Station link has no Finish
       command. A partner workout doesn't show on the wrist. The runner's
