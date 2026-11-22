@@ -798,7 +798,7 @@ line of their own. P30 builds that.
   - On 2026-11-22 the owner requested a large-text design pass after a
     family member's coach-connection screen became crowded. Essential
     content and consent follow the selected text size; exceptions are
-    limited to decorative artwork and already-oversized numeric readouts.
+    limited to decorative artwork, oversized readouts and compact date grids.
   - Coach choices reflow into two or one columns; from XXXL the decision
     follows the disclosure in its scrollable Form. Today, upcoming days,
     the Plan week and library, Activity and runner controls reflow from XXL.

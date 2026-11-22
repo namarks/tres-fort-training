@@ -361,7 +361,7 @@ struct PlanWeekSummary: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
-        .frame(minHeight: 52)
+        .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
         .contentShape(Rectangle())
     }
 
