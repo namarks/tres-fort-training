@@ -1763,6 +1763,7 @@ private struct ProgressBar: View {
 
 private struct RunnerView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    private var stacksControls: Bool { dynamicTypeSize >= .xxLarge }
     @Environment(\.scenePhase) private var scenePhase
     @ObservedObject var sync: SyncModel
     @ObservedObject var auth: AuthModel
@@ -1841,7 +1842,7 @@ private struct RunnerView: View {
                         if !sync.isFreestyle {
                             ProgressBar(exercises: sync.exercises, currentIndex: sync.exerciseIndex, sync: sync)
                         }
-                        let titleLayout = dynamicTypeSize.isAccessibilitySize
+                        let titleLayout = stacksControls
                             ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4))
                             : AnyLayout(HStackLayout(alignment: .center, spacing: 8))
                         titleLayout {
@@ -1850,7 +1851,7 @@ private struct RunnerView: View {
                                 .fixedSize(horizontal: false, vertical: true)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .accessibilityIdentifier("runner.exerciseTitle")
-                            if dynamicTypeSize.isAccessibilitySize {
+                            if stacksControls {
                                 Button("Technique & history", systemImage: "info.circle") {
                                     informationFor = InformationDestination(exercise: ex)
                                 }
@@ -1887,12 +1888,12 @@ private struct RunnerView: View {
                         .accessibilityIdentifier("runner.outline")
                     }
                     .padding(.horizontal, 20).padding(.vertical, 12)
-                    // The footer stays fixed at ordinary sizes. At accessibility
-                    // sizes all actions share the scroll view so none are clipped.
-                    if dynamicTypeSize.isAccessibilitySize { runnerActions(ex) }
+                    // At XXL and above, actions share the scroll view so the
+                    // footer cannot consume the input viewport on a small phone.
+                    if stacksControls { runnerActions(ex) }
                 }
                 .contentShape(Rectangle())
-                if !dynamicTypeSize.isAccessibilitySize { runnerActions(ex) }
+                if !stacksControls { runnerActions(ex) }
             }
             }
             }
@@ -2159,7 +2160,7 @@ private struct RunnerView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(previous.isEmpty ? empty : "Last session · " + values + more)
                         .font(.caption).multilineTextAlignment(.leading)
-                        .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
+                        .lineLimit(stacksControls ? nil : 2)
                     Image(systemName: "chevron.right").font(.caption2).accessibilityHidden(true)
                 }
                 .foregroundStyle(Theme.muted).frame(minHeight: 44, alignment: .leading)
@@ -2338,7 +2339,7 @@ private struct RunnerView: View {
                 .disabled(sync.timedActive)
                 .accessibilityIdentifier("runner.menu.skip")
         } label: {
-            if dynamicTypeSize.isAccessibilitySize {
+            if stacksControls {
                 Label("Exercise options", systemImage: "ellipsis.circle")
                     .font(.subheadline).frame(minHeight: 44)
             } else {
@@ -2512,7 +2513,7 @@ private struct RunnerView: View {
                          onTapValue: (() -> Void)? = nil) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(label).font(.caption).foregroundStyle(Theme.muted)
-            if dynamicTypeSize.isAccessibilitySize {
+            if stacksControls {
                 stepperValue(value, display: display, context: context, onTap: onTapValue)
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
                     ForEach(steps, id: \.0) { s in
@@ -2559,8 +2560,8 @@ private struct RunnerView: View {
                          _ a: @escaping () -> Void) -> some View {
         Button(action: a) {
             Text(t).font(Theme.mono(15, .bold))
-                .frame(maxWidth: dynamicTypeSize.isAccessibilitySize ? .infinity : nil)
-                .frame(width: dynamicTypeSize.isAccessibilitySize ? nil : 44)
+                .frame(maxWidth: stacksControls ? .infinity : nil)
+                .frame(width: stacksControls ? nil : 44)
                 .frame(minHeight: 44)
                 .background(Theme.surface2).foregroundStyle(Theme.text)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -2821,6 +2822,9 @@ private struct RestOverlay: View {
                                 .foregroundStyle(Theme.muted).padding(.bottom, 8)
                             Text(clock(remaining))
                                 .font(Theme.display(140))
+                                // Already a large, full-width readout. Bounding
+                                // its growth leaves the timer actions reachable.
+                                .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
                                 .lineLimit(1).minimumScaleFactor(0.2)
                                 .frame(maxWidth: .infinity)
                                 .accessibilityLabel(remaining <= 0 ? "Rest complete" : "Rest remaining")

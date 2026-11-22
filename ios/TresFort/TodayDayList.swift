@@ -123,6 +123,7 @@ struct TodayDayListView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     private static let badgeSize: CGFloat = 30
     private let unit = RunDistanceUnit.preferred()
+    private var stacksRows: Bool { dynamicTypeSize >= .xxLarge }
 
     var body: some View {
         let nextID = TodayDayList.nextID(rows)
@@ -155,27 +156,30 @@ struct TodayDayListView: View {
                 Spacer(minLength: 8)
                 moreButton(action.more, title: item.title, identifier: "today.upNext.more")
             }
-            let layout = dynamicTypeSize.isAccessibilitySize
+            let layout = stacksRows
                 ? AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
                 : AnyLayout(HStackLayout(alignment: .center, spacing: 12))
             layout {
                 HStack(alignment: .center, spacing: 12) {
-                    badge(item, size: 34)
+                    if !dynamicTypeSize.isAccessibilitySize { badge(item, size: 34) }
                     VStack(alignment: .leading, spacing: 2) {
                         Text(item.title).font(.title3.weight(.bold)).foregroundStyle(Theme.text)
-                            .lineLimit(2).minimumScaleFactor(0.8)
+                            .lineLimit(stacksRows ? nil : 2)
+                            .fixedSize(horizontal: false, vertical: true)
                         Text(TodayDayList.detail(item, unit: unit, showsTime: false))
                             .font(.subheadline.weight(.semibold).monospacedDigit()).foregroundStyle(Theme.text)
                             .fixedSize(horizontal: false, vertical: true)
                             .accessibilityIdentifier("today.agenda.status.\(item.id)")
                     }
                 }
-                if !dynamicTypeSize.isAccessibilitySize { Spacer(minLength: 8) }
+                if !stacksRows { Spacer(minLength: 8) }
                 if let primary = action.primary, let title = TodayDayList.actionTitle(item) {
                     Button(title, action: primary)
                         .font(.headline)
+                        .fixedSize(horizontal: false, vertical: true)
                         .foregroundStyle(action.primaryDisabled ? Theme.muted : Theme.onSignal)
-                        .padding(.horizontal, 18)
+                        .padding(.horizontal, 18).padding(.vertical, 8)
+                        .frame(maxWidth: stacksRows ? .infinity : nil)
                         .frame(minWidth: 72, minHeight: 44)
                         .background(action.primaryDisabled ? Theme.surface2 : Theme.signalFill,
                                     in: RoundedRectangle(cornerRadius: 12))
@@ -201,30 +205,32 @@ struct TodayDayListView: View {
     private func row(_ item: DailyWorkoutAgenda.Item, ruled: Bool) -> some View {
         let action = actions(item)
         let finished = item.isDone || item.status == "skipped"
-        let layout = dynamicTypeSize.isAccessibilitySize
-            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 2))
+        let layout = stacksRows
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
             : AnyLayout(HStackLayout(spacing: 12))
         return layout {
             HStack(alignment: .center, spacing: 12) {
-                if item.isDone {
+                if item.isDone && !dynamicTypeSize.isAccessibilitySize {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.title3).foregroundStyle(Theme.done)
                         .frame(width: Self.badgeSize, height: Self.badgeSize)
                         .accessibilityHidden(true)
-                } else {
+                } else if !dynamicTypeSize.isAccessibilitySize {
                     badge(item, size: Self.badgeSize)
                 }
                 VStack(alignment: .leading, spacing: 2) {
                     Text(item.title).font(.subheadline.weight(.semibold))
                         .foregroundStyle(finished ? Theme.muted : Theme.text)
-                        .lineLimit(2)
+                        .lineLimit(stacksRows ? nil : 2)
+                        .fixedSize(horizontal: false, vertical: true)
                     Text(TodayDayList.detail(item, unit: unit))
                         .font(.footnote.monospacedDigit()).foregroundStyle(Theme.muted)
-                        .lineLimit(2)
+                        .lineLimit(stacksRows ? nil : 2)
+                        .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("today.agenda.status.\(item.id)")
                 }
             }
-            if !dynamicTypeSize.isAccessibilitySize { Spacer(minLength: 8) }
+            if !stacksRows { Spacer(minLength: 8) }
             HStack(spacing: 4) {
                 if let primary = action.primary, let title = TodayDayList.actionTitle(item) {
                     Button(title, action: primary)
@@ -237,10 +243,10 @@ struct TodayDayListView: View {
                 moreButton(action.more, title: item.title, identifier: "today.item.more.\(item.id)")
             }
         }
-        .padding(.horizontal, 14).padding(.vertical, 4)
+        .padding(.horizontal, 14).padding(.vertical, stacksRows ? 10 : 4)
         .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
         .overlay(alignment: .top) {
-            if ruled { Rectangle().fill(Theme.surface2).frame(height: 1).padding(.leading, 14 + Self.badgeSize + 12) }
+            if ruled { Rectangle().fill(Theme.surface2).frame(height: 1).padding(.leading, dynamicTypeSize.isAccessibilitySize ? 14 : 14 + Self.badgeSize + 12) }
         }
         .contentShape(Rectangle())
         .onTapGesture(perform: action.more)
@@ -282,7 +288,7 @@ struct TodayDayListView: View {
             Image(systemName: "ellipsis")
                 .font(.body.weight(.semibold))
                 .foregroundStyle(Theme.muted)
-                .frame(minWidth: 36, minHeight: 44)
+                .frame(minWidth: 44, minHeight: 44)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
