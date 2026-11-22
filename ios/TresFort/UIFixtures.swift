@@ -232,6 +232,12 @@ struct UIFixtureView: View {
                             .font(.caption2)
                             .accessibilityIdentifier("fixture.plan-writes")
                             .accessibilityValue(Text(String(requestEvidence.planWrites)))
+                        if ProcessInfo.processInfo.environment["TRESFORT_UI_RUN_EDIT_CONFLICT"] == "1" {
+                            Text("Plan version: \(requestEvidence.planVersion)")
+                                .font(.caption2)
+                                .accessibilityIdentifier("fixture.plan-version")
+                                .accessibilityValue(Text(String(requestEvidence.planVersion)))
+                        }
                         if let openedURL {
                             Text(openedURL.absoluteString).font(.caption2).lineLimit(1)
                                 .accessibilityIdentifier("fixture.opened-url")
@@ -296,6 +302,7 @@ private final class UIFixtureRequestEvidence: ObservableObject {
     static let shared = UIFixtureRequestEvidence()
     @Published private(set) var value = "signIn:0;state:0;profileWrites:0;starterWrites:0;workoutWrites:0;scheduleWrites:0"
     @Published private(set) var planWrites = 0
+    @Published var planVersion = 0
     private var signIn = 0, state = 0, profileWrites = 0, starterWrites = 0, workoutWrites = 0, scheduleWrites = 0
 
     func record(method: String, path: String) {
@@ -446,6 +453,11 @@ final class UIFixtureProtocol: URLProtocol {
         Self.lock.unlock()
         do {
             let (status, data) = try result.get()
+            if request.url?.path == "/api/state",
+               let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let version = state["plan_version"] as? Int {
+                Task { @MainActor in UIFixtureRequestEvidence.shared.planVersion = version }
+            }
             let response = HTTPURLResponse(url: request.url!, statusCode: status,
                 httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
@@ -476,6 +488,7 @@ private struct UIFixtureServer {
     var returnedMoveConflict = false
     var returnedScheduleFailure = false
     var returnedProgramConflict = false
+    var pendingRunEditConflict = false
     var scheduleAttempts = 0
     var signInAttempts = 0
     var stateAttempts = 0
@@ -664,6 +677,21 @@ private struct UIFixtureServer {
                 // Keep the rest of the week, as on an ordinary rest day.
                 plan?["meta"] = #"{"schedule":{"version":1,"week":{"thu":"strength-b","sat":"synthetic-day"}}}"#
                 sessions.removeAll { $0["date"] as? String == "2026-09-08" }
+            }
+            if ProcessInfo.processInfo.environment["TRESFORT_UI_RUN_EDIT_CONFLICT"] == "1" {
+                var days = plan!["days"] as! [[String: Any]]
+                var slot = (days[0]["exercises"] as! [[String: Any]])[0]
+                slot["id"] = "created-slot-0"
+                slot["exercise_id"] = RunPlan.exerciseID
+                slot["exercise_name"] = "Outdoor run"
+                slot["exercise_modality"] = "cardio"
+                slot["run_steps"] = #"[{"kind":"work","duration_s":1800}]"#
+                days.append(["id": "created-workout", "name": "Easy run", "order_index": days.count,
+                             "one_time_date": "2026-09-08", "exercises": [slot]])
+                plan?["days"] = days
+                sessions = [["id": "run-for-today", "date": "2026-09-08", "slot": 0,
+                             "status": "planned", "workout_id": "created-workout", "attempt": 1,
+                             "updated_at": revision, "write_protocol": "attempt-v1"]]
             }
             if ProcessInfo.processInfo.environment["TRESFORT_UI_EMPTY_WORKOUT_LIBRARY"] == "1" {
                 plan?["days"] = []; plan?["meta"] = "{}"
@@ -974,8 +1002,22 @@ private struct UIFixtureServer {
             response = ["group_id": "synthetic-group", "range": "week", "members": []]
         case ("GET", "/api/groups/synthetic-group/activity"):
             response = ["group_id": "synthetic-group", "days": 371, "server_time": revision, "members": []]
+        case ("GET", "/api/me/thresholds") where ProcessInfo.processInfo.environment["TRESFORT_UI_RUN_EDIT_CONFLICT"] == "1":
+            // Arm only after the day editor has captured its source/version.
+            pendingRunEditConflict = true
+            response = ["thresholds": []]
         case ("GET", "/api/state"):
             stateAttempts += 1
+            if pendingRunEditConflict {
+                pendingRunEditConflict = false
+                var days = plan!["days"] as! [[String: Any]]
+                let index = days.firstIndex { $0["id"] as? String == "created-workout" }!
+                var slots = days[index]["exercises"] as! [[String: Any]]
+                slots[0]["run_steps"] = #"[{"kind":"work","duration_s":2400}]"#
+                days[index]["exercises"] = slots
+                plan?["days"] = days
+                plan?["version"] = (plan?["version"] as? Int ?? 1) + 1
+            }
             if failCreatedWorkoutRefresh {
                 failCreatedWorkoutRefresh = false
                 throw URLError(.notConnectedToInternet)

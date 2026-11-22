@@ -197,6 +197,9 @@ struct DayRunChangeView: View {
     /// (which puts the new run on the date) can't replace what the screen
     /// started from.
     @State private var source: Workout?
+    /// The source is held from first open; its write authority must be too.
+    /// A foreground refresh cannot approve overwriting another client's edit.
+    @State private var reviewedVersion: Int?
     /// Opened from the run's details: offers editing the saved run, for
     /// every day it is used, instead of this day only.
     var offersSavedEdit = false
@@ -226,6 +229,7 @@ struct DayRunChangeView: View {
         self.sync = sync
         self.date = date
         _source = State(initialValue: source)
+        _reviewedVersion = State(initialValue: sync.plan?.version)
         self.offersSavedEdit = offersSavedEdit
         self.onFinished = onFinished
         let start = DayChange.draft(from: source, unit: RunDistanceUnit.preferred())
@@ -449,7 +453,7 @@ struct DayRunChangeView: View {
                 // The create can land while its refresh fails; fetch once more.
                 if PlannedRunCreation.runSlot(in: sync.workout(id: id)) == nil { await sync.load() }
                 guard let slot = PlannedRunCreation.runSlot(in: sync.workout(id: id)),
-                      let version = sync.plan?.version else {
+                      let version = source?.id == id ? reviewedVersion : sync.plan?.version else {
                     if sync.loadError == nil {
                         sync.loadError = "The run is on \(weekday), but its steps didn't save yet. Try again."
                     }

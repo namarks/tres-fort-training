@@ -251,6 +251,36 @@ final class TodayNavigationJourneyTests: XCTestCase {
                       "The saved workout must contain the exact edited target")
     }
 
+    func testExistingOneTimeRunKeepsItsReviewedVersionAfterForegroundRefresh() {
+        let app = XCUIApplication()
+        app.launchEnvironment["TRESFORT_UI_FIXTURE"] = "app-store"
+        app.launchEnvironment["TRESFORT_UI_RUN_EDIT_CONFLICT"] = "1"
+        app.launchEnvironment["TRESFORT_UI_CAPTURE_LINKS"] = "1"
+        app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launch()
+        tap(app.todayChoice("today.viewWorkout"), in: app)
+        tap(app.buttons["workoutDetails.edit"], in: app)
+        tap(app.buttons["dayRun.editSteps"], in: app)
+        tap(app.buttons["30 min"], in: app)
+        tap(app.segmentedControls["runStep.target"].buttons["Heart rate"], in: app)
+        tap(app.buttons["runStep.done"], in: app)
+        tap(app.buttons["runPlan.save"], in: app)
+
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        let refreshed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "2"),
+                                                  object: app.staticTexts["fixture.plan-version"])
+        XCTAssertEqual(XCTWaiter.wait(for: [refreshed], timeout: UITestWait.screen), .completed)
+        tap(app.buttons["dayRun.save"], in: app)
+        XCTAssertTrue(app.staticTexts["dayRun.error"].waitForExistence(timeout: UITestWait.screen))
+        XCTAssertTrue(app.staticTexts["dayRun.error"].label.contains("workout changed"))
+        XCTAssertTrue(app.buttons["dayRun.save"].exists, "A rejected edit must not dismiss as a success")
+        XCTAssertEqual(app.staticTexts["fixture.plan-version"].value as? String, "2",
+                       "The other client's run must remain at its version")
+        XCTAssertEqual(app.staticTexts["fixture.plan-writes"].value as? String, "1",
+                       "Only the explicit Save attempts a write, with the stale reviewed version")
+    }
+
     func testRestDayRunCanOpenRecorderWithoutPlanning() {
         let app = launchRestDay()
         tap(app.buttons["today.activity.run"], in: app)
