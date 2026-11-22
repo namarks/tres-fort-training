@@ -362,7 +362,8 @@ struct WorkoutPrimaryButtonStyle: ButtonStyle {
         configuration.label
             .font(size == .large ? .title3.weight(.bold) : .headline)
             .multilineTextAlignment(.center)
-            .padding(.horizontal, 12)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 12).padding(.vertical, 12)
             .frame(maxWidth: .infinity, minHeight: size == .large ? 58 : 48)
             .foregroundStyle(!isEnabled ? Theme.muted : quiet ? Theme.signal : Theme.onSignal)
             .background(isEnabled && !quiet ? Theme.signalFill : Theme.surface2)

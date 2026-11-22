@@ -1,6 +1,6 @@
 # App design pass
 
-Slug: app-design-pass · Status: active · Updated: 2026-11-21 · Theme: member-experience
+Slug: app-design-pass · Status: active · Updated: 2026-11-22 · Theme: member-experience
 
 ## Goal
 
@@ -794,6 +794,31 @@ line of their own. P30 builds that.
     [Run actions](today-run-intent.png). Device acceptance follows a separately
     authorized client build.
 
+- [ ] **P32 — Large-text layouts for everyday use and coach setup**
+  - On 2026-11-22 the owner requested a large-text design pass after a
+    family member's coach-connection screen became crowded. Essential
+    content and consent follow the selected text size; exceptions are
+    limited to decorative artwork, oversized readouts and compact date grids.
+  - Coach choices reflow into two or one columns; from XXXL the decision
+    follows the disclosure in its scrollable Form. Today, upcoming days,
+    the Plan week and library, Activity and runner controls reflow from XXL.
+    Names and details wrap, and primary buttons have multiline padding.
+    The grid preserves PR #35's three primary choices and keeps direct
+    Codex setup under ChatGPT's Advanced disclosure with separate consent.
+  - The connection artwork is compact and omitted at accessibility sizes.
+    The large rest countdown and weekly total grow through XXXL; workout
+    values, surrounding labels, disclosures and actions retain full scaling.
+    Seven-column calendar labels also stop at XXXL and offer press-and-hold
+    magnification; the month heading and the opened day's agenda scale fully.
+  - `LargeTextJourneyTests` exercises coach choice and explicit permission,
+    Today/calendar/Plan/Activity navigation, load entry, set logging and rest
+    using the simulator's actual content size at ordinary, largest standard
+    and AX5 settings on iPhone SE (3rd generation). The native run results
+    and synthetic screenshot evidence are recorded in
+    [PR #36](https://github.com/namarks/tres-fort-training/pull/36).
+    Exact-head review and required CI remain delivery gates; device
+    acceptance follows a separately authorized build.
+
 ## Execution frontier
 
 - P5
@@ -823,6 +848,7 @@ line of their own. P30 builds that.
 - P29
 - P30
 - P31
+- P32
 
 ## Dependencies
 
@@ -832,10 +858,10 @@ line of their own. P30 builds that.
 
 ## Next step
 
-**Now (@agent):** Complete the exact-head review and CI gate for P31's focused
-PR; the owner merges once Codex is clean and all four checks are green.
-The local build, 33 unit tests and nine UI journeys passed on the same iOS
-source, including P30's day list and the existing run-log and navigation flows.
+**Now (@owner):** Review P32's synthetic captures and merge PR #36 once its
+exact head has a clean Codex review and all four required checks are green.
+PR #35 is merged; its coach choices and Advanced route are reconciled with
+the responsive grid in PR #36. Re-run the exact-head gate after this merge.
 
 **Then (@agent):** Run the release check on P30's branch for the Today
 journeys (Details, Change for today and Not today now open from the

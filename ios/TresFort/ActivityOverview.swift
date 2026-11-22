@@ -5,6 +5,7 @@ import SwiftUI
 /// The Activity tab's page. Everything on it reads the same history entries
 /// as "All history", so a run or a soccer game counts the same everywhere.
 struct ActivityOverview: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ObservedObject var sync: SyncModel
     var weight: BodyWeightModel?
     var onHealthSettings: () -> Void
@@ -14,6 +15,10 @@ struct ActivityOverview: View {
 
     /// How many sessions the Recent section shows before "All history".
     static let recentCount = 3
+    private var headingLayout: AnyLayout {
+        dynamicTypeSize >= .xxLarge ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4))
+                                   : AnyLayout(HStackLayout(alignment: .firstTextBaseline))
+    }
 
     var body: some View {
         let unit = RunDistanceUnit(rawValue: unitRaw) ?? .miles
@@ -74,9 +79,9 @@ struct ActivityOverview: View {
     private func recent(_ history: ActivityHistory, unit: RunDistanceUnit) -> some View {
         let entries = Array(history.entries.prefix(Self.recentCount))
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
+            headingLayout {
                 Text("Recent").font(.title3.bold()).foregroundStyle(Theme.text)
-                Spacer()
+                if dynamicTypeSize < .xxLarge { Spacer() }
                 if !history.entries.isEmpty {
                     NavigationLink(value: ActivityAllHistory()) {
                         Text("All history").font(.subheadline.weight(.semibold)).foregroundStyle(Theme.accent)
@@ -109,10 +114,10 @@ struct ActivityOverview: View {
     private func section<Content: View>(_ title: String, trailing: String? = nil,
                                         @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
+            headingLayout {
                 Text(title).font(.title3.bold()).foregroundStyle(Theme.text)
                     .accessibilityAddTraits(.isHeader)
-                Spacer()
+                if dynamicTypeSize < .xxLarge { Spacer() }
                 if let trailing {
                     Text(trailing).font(.subheadline).foregroundStyle(Theme.muted)
                 }
@@ -162,9 +167,15 @@ struct ActivityWeekCard: View {
                 HStack(alignment: .center) { title; Spacer(minLength: 8); streak }
                 VStack(alignment: .leading, spacing: 8) { title; streak }
             }
-            HStack(alignment: .lastTextBaseline, spacing: 6) {
+            let totalLayout = dynamicTypeSize >= .xxLarge
+                ? AnyLayout(VStackLayout(alignment: .leading, spacing: 0))
+                : AnyLayout(HStackLayout(alignment: .lastTextBaseline, spacing: 6))
+            totalLayout {
                 Text(EnduranceProgress.duration(total))
-                    .font(Theme.display(dynamicTypeSize.isAccessibilitySize ? 44 : 58))
+                    .font(Theme.display(58))
+                    // This headline number is already oversized; leave room
+                    // for the fully scaling labels and stats below it.
+                    .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
                     .foregroundStyle(.white)
                     .lineLimit(1).minimumScaleFactor(0.6)
                 Text("trained").font(Theme.display(24)).foregroundStyle(BrandPalette.fortLabel)
@@ -244,19 +255,26 @@ struct ActivityWeekCard: View {
             items.append(Stat(value: "\(load)", caption: "load", spoken: "Training load \(load)"))
         }
         let shown = items
-        return ViewThatFits(in: .horizontal) {
-            HStack(alignment: .top, spacing: 18) { statViews(shown) }
-            LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading), GridItem(.flexible(), alignment: .leading)],
-                      alignment: .leading, spacing: 10) { statViews(shown) }
+        return Group {
+            if dynamicTypeSize.isAccessibilitySize {
+                VStack(alignment: .leading, spacing: 12) { statViews(shown) }
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: 18) { statViews(shown) }
+                    LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading), GridItem(.flexible(), alignment: .leading)],
+                              alignment: .leading, spacing: 10) { statViews(shown) }
+                }
+            }
         }
     }
 
     private func statViews(_ items: [Stat]) -> some View {
         ForEach(items) { stat in
             VStack(alignment: .leading, spacing: 1) {
-                Text(stat.value).font(Theme.number(17)).foregroundStyle(.white).lineLimit(1)
+                Text(stat.value).font(Theme.number(17)).foregroundStyle(.white)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text(stat.caption).font(.caption2.weight(.medium)).foregroundStyle(BrandPalette.fortLabel)
-                    .lineLimit(1)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(stat.spoken)
@@ -397,33 +415,42 @@ private struct ActivityHighlightsRow: View {
 /// when, its numbers and, for a run, ride or walk with a GPS track, its route
 /// on a small map.
 struct ActivityEntryCard: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let entry: ActivityHistory.Entry
     let today: String
     let routeAccess: ActivityRouteAccess?
     @State private var route: [[CLLocationCoordinate2D]] = []
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: entry.glyph)
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(entry.family.color)
-                .frame(width: 40, height: 40)
-                .background(entry.family.color.opacity(0.15), in: Circle())
-                .accessibilityHidden(true)
+        let layout = dynamicTypeSize >= .xxLarge
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
+            : AnyLayout(HStackLayout(spacing: 12))
+        return layout {
+            if !dynamicTypeSize.isAccessibilitySize {
+                Image(systemName: entry.glyph)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(entry.family.color)
+                    .frame(width: 40, height: 40)
+                    .background(entry.family.color.opacity(0.15), in: Circle())
+                    .accessibilityHidden(true)
+            }
             VStack(alignment: .leading, spacing: 3) {
-                Text(entry.title).font(.headline).foregroundStyle(Theme.text).lineLimit(2)
+                Text(entry.title).font(.headline).foregroundStyle(Theme.text)
+                    .lineLimit(dynamicTypeSize >= .xxLarge ? nil : 2)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text(Self.when(entry.date, today: today)).font(.caption).foregroundStyle(Theme.muted)
                 if !entry.details.isEmpty {
                     Text(entry.details.joined(separator: "  "))
                         .font(Theme.mono(13)).foregroundStyle(Theme.text)
-                        .lineLimit(2)
+                        .lineLimit(dynamicTypeSize >= .xxLarge ? nil : 2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if entry.inProgress {
                     Text("In progress").font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)
                 }
                 SourceAttributionLabel(text: entry.attribution)
             }
-            Spacer(minLength: 0)
+            if dynamicTypeSize < .xxLarge { Spacer(minLength: 0) }
             if !route.isEmpty {
                 ActivityRouteSnapshot(key: entry.id, segments: route, tint: entry.family.color)
             }

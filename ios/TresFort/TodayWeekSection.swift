@@ -19,6 +19,12 @@ struct TodayWeekSection: View {
     @State private var selectedDate: IdentifiedString?
     /// The page on screen; 0 is the week containing today.
     @State private var visibleWeek: Int? = 0
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    private var stacksRows: Bool { dynamicTypeSize >= .xxLarge }
+    private var headingLayout: AnyLayout {
+        stacksRows ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4))
+                   : AnyLayout(HStackLayout(spacing: 8))
+    }
 
     /// This week plus the next seven. Further out belongs to the calendar.
     static let weekCount = 8
@@ -36,7 +42,7 @@ struct TodayWeekSection: View {
         let pageTitle = weeks.isEmpty ? "THIS WEEK" : Self.title(forWeek: page, days: weeks[page])
         let pageDays = weeks.isEmpty ? [] : WeekFort.days(for: weeks[page], sync: sync)
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
+            headingLayout {
                 TodaySectionLabel(text: pageTitle)
                     .accessibilityIdentifier("today.weekTitle")
                 if page > 0 {
@@ -53,7 +59,7 @@ struct TodayWeekSection: View {
                     .accessibilityLabel("Back to this week")
                     .accessibilityIdentifier("today.thisWeek")
                 }
-                Spacer(minLength: 8)
+                if !stacksRows { Spacer(minLength: 8) }
                 weekCount(page: page, title: pageTitle, days: pageDays)
             }
             .frame(minHeight: Self.headingHeight)
@@ -90,9 +96,9 @@ struct TodayWeekSection: View {
             .scrollPosition(id: $visibleWeek)
             .scrollIndicators(.hidden)
             .padding(.top, 8)
-            HStack(spacing: 8) {
+            headingLayout {
                 TodaySectionLabel(text: "COMING UP")
-                Spacer(minLength: 8)
+                if !stacksRows { Spacer(minLength: 8) }
                 Button(action: onOpenCalendar) {
                     HStack(spacing: 4) {
                         Text("Calendar")
@@ -100,7 +106,7 @@ struct TodayWeekSection: View {
                     }
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(Theme.accent)
-                    .frame(minWidth: 44, minHeight: Self.headingHeight, alignment: .trailing)
+                    .frame(minWidth: 44, minHeight: stacksRows ? 44 : Self.headingHeight, alignment: .trailing)
                     .contentShape(Rectangle().inset(by: -Self.headingHitOutset))
                 }
                 .buttonStyle(.plain)
@@ -159,7 +165,7 @@ struct TodayWeekSection: View {
                 }
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(Theme.accent)
-                .frame(minWidth: 44, minHeight: Self.headingHeight, alignment: .trailing)
+                .frame(minWidth: 44, minHeight: stacksRows ? 44 : Self.headingHeight, alignment: .trailing)
                 .contentShape(Rectangle().inset(by: -Self.headingHitOutset))
             }
             .buttonStyle(.plain)
@@ -235,20 +241,26 @@ struct TodayWeekSection: View {
 private struct UpcomingDayRow: View {
     @ObservedObject var sync: SyncModel
     let day: SyncModel.UpcomingDay
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    private var stacksRows: Bool { dynamicTypeSize >= .xxLarge }
     @AppStorage(RunDistanceUnit.preferenceKey) private var runUnitRaw = RunDistanceUnit.miles.rawValue
     private var runUnit: RunDistanceUnit { RunDistanceUnit(rawValue: runUnitRaw) ?? .miles }
 
     var body: some View {
-        HStack(spacing: 12) {
-            VStack(spacing: 1) {
+        let layout = stacksRows ? AnyLayout(VStackLayout(alignment: .leading, spacing: 10))
+                                : AnyLayout(HStackLayout(spacing: 12))
+        let dateLayout = stacksRows ? AnyLayout(HStackLayout(alignment: .firstTextBaseline, spacing: 8))
+                                    : AnyLayout(VStackLayout(spacing: 1))
+        return layout {
+            dateLayout {
                 Text(weekday)
                     .font(Theme.mono(10, .bold)).tracking(1)
                     .foregroundStyle(Theme.muted)
-                    .lineLimit(1).minimumScaleFactor(0.6)
+                    .fixedSize()
                 Text(dayNumber)
                     .font(.body.weight(.semibold).monospacedDigit()).foregroundStyle(Theme.text)
             }
-            .frame(width: 40)
+            .frame(width: stacksRows ? nil : 40, alignment: .leading)
             VStack(alignment: .leading, spacing: 6) {
                 if day.hasWorkout {
                     let isRun = day.workout.map { !$0.exercises.isEmpty && $0.exercises.allSatisfy(\.isOutdoorRun) } ?? false
@@ -272,8 +284,10 @@ private struct UpcomingDayRow: View {
                          leads: !day.hasWorkout && day.extras.isEmpty && index == 0)
                 }
             }
-            Spacer(minLength: 4)
-            Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(Theme.dim)
+            if !stacksRows {
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(Theme.dim)
+            }
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
         .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
@@ -294,15 +308,17 @@ private struct UpcomingDayRow: View {
     private func line(glyph systemName: String, color: Color, title: String, detail: String? = nil,
                       detailLines: Int = 1, leads: Bool) -> some View {
         HStack(alignment: .center, spacing: 10) {
-            glyph(systemName, color: color)
+            if !dynamicTypeSize.isAccessibilitySize { glyph(systemName, color: color) }
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.subheadline.weight(leads ? .semibold : .regular)).foregroundStyle(Theme.text)
-                    .lineLimit(1)
+                    .lineLimit(stacksRows ? nil : 1)
+                    .fixedSize(horizontal: false, vertical: true)
                 if let detail {
                     Text(detail)
                         .font(.footnote).foregroundStyle(Theme.muted)
-                        .lineLimit(detailLines)
+                        .lineLimit(stacksRows ? nil : detailLines)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }

@@ -158,10 +158,16 @@ struct WeekFortView: View {
         }
         .frame(minHeight: 44)
         .contentShape(Rectangle())
+        // Keep the seven-column chart readable; its heading and day details
+        // retain full Dynamic Type, and selectable days support magnification.
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         if let onSelect {
             Button { onSelect(day.ymd) } label: { column }
                 .buttonStyle(.plain)
                 .accessibilityLabel(WeekFort.dayAccessibilityLabel(day))
+                .accessibilityShowsLargeContentViewer {
+                    Label(WeekFort.dayAccessibilityLabel(day), systemImage: "calendar")
+                }
                 .accessibilityIdentifier("today.week.\(day.ymd)")
         } else {
             column

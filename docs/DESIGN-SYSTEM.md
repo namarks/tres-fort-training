@@ -173,8 +173,30 @@ are checked separately.
 ## Accessibility
 
 - Dynamic Type: use text styles or `Theme.mono`, never fixed sizes for body
-  text; switch rows to vertical stacks at accessibility sizes
-  (`dynamicTypeSize.isAccessibilitySize`).
+  text. Dense Today, Plan, Activity and runner rows switch to vertical
+  stacks from XXL (`dynamicTypeSize >= .xxLarge`); do not wait for the
+  accessibility range when the largest standard sizes already crowd a row.
+  Let names, details and button labels wrap, and give multiline buttons
+  vertical padding. Keep navigation and actions reachable by scrolling.
+- Coach setup uses three, two or one app-choice columns as text grows.
+  From XXXL, consent actions follow the disclosure in the same Form instead
+  of reserving the bottom of a small screen. Recipient, sharing details,
+  setup instructions and actions follow the member's full text setting.
+- Scaling exceptions belong to a specific element, never an entire screen:
+  the decorative coach-connection tiles use the default size and disappear
+  at accessibility sizes (the heading repeats both names). The already-large
+  140 pt rest countdown and 58 pt weekly training total grow through XXXL;
+  their surrounding labels and controls still scale fully. Keep native tab
+  and navigation controls on the system's sizing and large-content behavior.
+- Seven-column calendar and week-chart labels also stop at XXXL, so adjacent
+  dates remain distinct. Selectable dates support the system large-content
+  viewer on press-and-hold; opening a date shows its agenda at the full text
+  size. Month headings and navigation actions continue to reflow and scale.
+- Check real simulator content sizes, including system controls and sheets:
+  `LargeTextJourneyTests` with `scripts/verify-ios.sh --content-size large`,
+  `extra-extra-extra-large`, and `accessibility-extra-extra-extra-large` on
+  an iPhone SE (3rd generation). Inspect screenshots as well as reachability;
+  an accessible label alone does not prove its visible text fits.
 - Honor Reduce Motion (`ReduceMotion.swift`): no pulsing or sliding when it
   is on.
 - Every icon-only button has an accessibility label.
