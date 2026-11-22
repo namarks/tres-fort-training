@@ -1,8 +1,9 @@
 import SwiftUI
 
-// Très Fort on Apple Watch (docs/plans/apple-watch P4). The Watch app is
-// the iPhone app's companion: it shows the day the iPhone sends over
-// WatchConnectivity and never signs in or calls the Worker.
+// Très Fort on Apple Watch (docs/plans/apple-watch P4, P5). The Watch app
+// is the iPhone app's companion: it shows the day the iPhone sends over
+// WatchConnectivity and, during a lifting workout, the set the iPhone's
+// runner is on. It never signs in or calls the Worker.
 @main
 struct TresFortWatchApp: App {
     @StateObject private var model = WatchDayModel.shared
@@ -28,10 +29,27 @@ struct TresFortWatchApp: App {
         if WatchComplicationGallery.isRequested() {
             WatchComplicationGallery(complication: WatchComplication(model.screen))
         } else {
-            WatchTodayView(model: model)
+            pages
         }
         #else
-        WatchTodayView(model: model)
+        pages
         #endif
+    }
+
+    /// During a lifting workout the set the iPhone's runner is on comes
+    /// first, with the day a swipe away. Otherwise the day.
+    private var pages: some View {
+        Group {
+            if let workout = model.shownWorkout {
+                TabView {
+                    WatchWorkoutView(model: model, state: workout)
+                    WatchTodayView(model: model)
+                }
+                .tabViewStyle(.page)
+            } else {
+                WatchTodayView(model: model)
+            }
+        }
+        .modifier(WatchNoticeAlert(model: model))
     }
 }

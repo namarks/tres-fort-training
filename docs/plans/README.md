@@ -232,10 +232,12 @@ integration or social breadth.
   the wrist follow: planned runs sent to Apple's Workout app, then a Watch
   recorder with GPS, wrist heart rate and haptic step cues (P1 to P3),
   gated on a member who runs with an Apple Watch. P0's wrist layouts are in
-  the repository. P4, the Watch app with Today on the wrist, the
-  complication and its build in CI, is in review. The Watch app has its own
-  project spec and stays out of TestFlight and App Store builds until the
-  owner says it ships.
+  the repository, and so is P4: the Watch app with Today on the wrist, the
+  complication and its build in CI, and P5: the set on the wrist with Log,
+  the crown and the rest, and Start from the wrist. A lifting workout on a
+  real Watch (P6) waits for a member with one and a TestFlight build. The
+  Watch app has its own project spec and stays out of TestFlight and App
+  Store builds until the owner says it ships.
 - [Capture every sport properly](sport-activities/plan.md) — **active**;
   soccer, tennis, climbing, swims and every other sport land as that sport
   from Apple Health, intervals.icu, `.fit` files or hand entry, with
