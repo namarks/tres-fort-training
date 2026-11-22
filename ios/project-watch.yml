@@ -3,7 +3,9 @@
 #
 # The TestFlight spec (project.yml) and the App Store spec
 # (project-app-store.yml) do not define the Watch app, so neither build
-# carries it until the owner says it ships. This spec adds the Watch app
+# carries it. A TestFlight build carries it only when the owner asks:
+# TESTFLIGHT_WATCH=1 makes scripts/upload-testflight.sh archive this spec.
+# This spec adds the Watch app
 # target and embeds it in the iPhone app; XcodeGen appends these arrays to
 # the ones project.yml declares.
 include: project.yml
