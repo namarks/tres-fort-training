@@ -1,6 +1,6 @@
 # Bring Your Own AI Coach
 
-Slug: bring-your-own-ai-coach · Status: gated · Updated: 2026-11-21 · Theme: coaching
+Slug: bring-your-own-ai-coach · Status: gated · Updated: 2026-11-22 · Theme: coaching
 
 ## Goal
 
@@ -93,6 +93,15 @@ Repository delivery and actual provider connection/release evidence remain disti
     for OpenAI's reviewers.
   - [x] Owner-authorized release of the Worker and website from the Mac
     (2026-11-08).
+  - [x] Owner-approved setup consolidation (2026-11-22): one ChatGPT choice
+    explains the shared plugin for supported ChatGPT/Codex experiences. Direct
+    computer setup moves to **ChatGPT → Advanced → Connect Codex directly**
+    with its own recipient consent. The app, public guide and README match;
+    the existing setup journey covers the hidden advanced route and consent
+    after switching from ChatGPT. This repository slice does not publish the
+    plugin or distribute an iOS build. OpenAI documents shared supported
+    plugins for Dots; Très Fort's full Dots flow remains unverified and is not
+    advertised as certified. Sources and limits are in the connection guide.
   - [ ] Owner adds Très Fort in ChatGPT as a custom MCP server, checks a read and
     a write, and records the demo video. The owner added it on 2026-11-08;
     the demo video is still to record.
@@ -316,12 +325,14 @@ the same ChatGPT session.
 **Also now (@owner):** On TestFlight 83 or later, complete the real-provider
 connection, coaching read, reversible edit, iOS sync and disconnect/reconnect
 checks. Claude's install link and native approval are released, but their full
-physical-iPhone round trip has not been verified. Codex's direct connection still
-uses the desktop setup; a phone-only hosted install requires P4 publication.
+physical-iPhone round trip has not been verified. ChatGPT's custom plugin is the
+shared OpenAI route; direct Codex setup is an optional advanced connection.
+A one-tap directory install still requires P4 publication.
 
-**Also now (@owner):** Muse is verified (see notes). Trying ChatGPT developer
-mode and whether a dot can use that connection is deferred by the owner
-(2026-10-07). The sign-in hardening from
+**Also now (@owner):** Muse is verified (see notes). The shared ChatGPT setup
+direction is approved (2026-11-22); Très Fort's full Dots connection, coaching
+read and reversible write still need verification before a support claim.
+The sign-in hardening from
 PR #239 (accepting
 `offline_access`, path-inserted discovery, recipient naming, logging refused
 OAuth requests for `wrangler tail`) is in the source and in the API released
