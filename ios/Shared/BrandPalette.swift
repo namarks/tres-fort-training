@@ -84,9 +84,14 @@ enum BrandPalette {
     }
 
     static func dynamic(light: UInt32, dark: UInt32) -> Color {
-        Color(UIColor { traits in
+        #if os(watchOS)
+        // watchOS has one appearance, dark, and no dynamic colors.
+        return Color(UIColor(rgb: dark))
+        #else
+        return Color(UIColor { traits in
             UIColor(rgb: traits.userInterfaceStyle == .dark ? dark : light)
         })
+        #endif
     }
 }
 

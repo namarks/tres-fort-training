@@ -102,22 +102,38 @@ recorded on the iPhone.
     planned and unplanned runs with the Watch app (P2), including a pause,
     a recovered session and a run saved while the iPhone was out of range.
 - [ ] **P4 — The Watch app, Today and the complication**
-  - A watchOS app target embedded in the iPhone app in `project.yml` only,
-    built and unit tested on a Watch simulator in the PR's iOS job. The App
-    Store project (`project-app-store.yml`) replaces the app's dependencies,
-    so the Watch app stays out of App Store builds until the owner says it
-    ships.
-  - Today on the wrist: the day's list as the iPhone shows it, finished rows
-    shrunk and the next item on navy with Start, a rest day with what is
-    coming, and a watch face complication and Smart Stack widget for what is
-    next. The iPhone sends the day it already resolved (the
-    `TrainingAgenda` snapshot, extended with times and figures) over
-    WatchConnectivity after each published change and clears it at every
-    account boundary. The Watch never signs in, calls the Worker or decides
-    what a day is, and says when its copy is from an earlier day.
-  - Black background as watchOS expects, the hero navy for the day's key
-    card and orange only for the next action and progress, from
-    `BrandPalette`. The option mocks join the mock kit as Watch screens.
+  - [ ] **(a) The Watch app and Today on the wrist**
+    - A watchOS app target (`ios/TresFortWatch`) in its own project spec,
+      `ios/project-watch.yml`, which includes `project.yml` and embeds the
+      Watch app in the iPhone app. The TestFlight spec (`project.yml`) and
+      the App Store spec (`project-app-store.yml`) don't define it, so
+      neither build carries the Watch app until the owner says so.
+    - Today on the wrist: the day's list as the iPhone shows it, finished
+      rows shrunk and the next item on navy, a rest day with what is coming.
+      The iPhone builds the day from Today's own rows and words
+      (`WatchDayBuilder`, `TodayDayList`) and sends it as WatchConnectivity's
+      application context after each published change, through the same
+      publisher as the Today widget, which also clears it at every account
+      boundary (`TrainingAgendaPublisher`, `WatchDaySender`). The Watch
+      never signs in, calls the Worker or decides what a day is. On a later
+      day it shows the coarse entry the iPhone resolved for that date and
+      says so; past that it asks for the iPhone (`WatchDayPresentation`).
+    - The App Store build never starts the Watch session
+      (`WatchDayLink`). The shared day, what the Watch shows for it and when
+      the iPhone sends it are unit tested in the iOS tests; the Watch target
+      itself is built and run on a Watch simulator on a Mac, with fictional
+      days (`-watch-day-fixture`), until (c).
+    - Black background as watchOS expects, the hero navy for the day's key
+      card and orange only for what is next, from `BrandPalette`'s dark
+      values. The option mocks are in the mock kit
+      (`design/mock-kit/watch.mjs`). The next item's Start arrives with P5.
+  - [ ] **(b) The complication**
+    - A watch face complication and Smart Stack widget for what is next
+      today, from the Watch's own copy of the day, opening the app.
+  - [ ] **(c) The Watch app built in CI**
+    - The PR's iOS checks build the Watch target on a Watch simulator from
+      `project-watch.yml`, with the workflow's contract tests updated and a
+      full run on the branch.
 - [ ] **P5 — Lift from the wrist**
   - Start on a lifting workout opens it on the iPhone runner. The Watch then
     shows the set the runner is on, from the same `WorkoutDisplayState` a
@@ -146,14 +162,16 @@ recorded on the iPhone.
 |---|---|---|---|
 | P1 | coordinates_with | plan:planned-runs | Reads the planned-run step format and marks the slot done through planned-runs P7's path. |
 | P2 | coordinates_with | plan:run-recorder | Moves pure recorder logic into `ios/Shared` and saves Watch runs through the recorder's store and upload. |
-| P4 | coordinates_with | plan:app-store-submission | The Watch app stays out of the App Store project until the owner says it ships; then the project file, privacy answers and review notes change. |
+| P4 | coordinates_with | plan:app-store-submission | The Watch app stays out of the TestFlight and App Store projects until the owner says it ships; then the project files, privacy answers and review notes change. |
 | P5 | coordinates_with | plan:ipad-workout-station | Reuses the Station link's display state and guarded commands over WatchConnectivity. |
 | P1 | gated_by | external:apple-watch-device-verification | Runs on the wrist (P1 to P3) wait for a member who runs with an Apple Watch to test them on an authorized TestFlight build; GPS, wrist heart rate and haptics can't be trusted from the simulator. |
 
 ## Next step
 
-**Now (@agent):** Build P4: the Watch app target, Today on the wrist and the
-complication, checked on a Watch simulator in CI. Then P5, lifting from the
+**Now (@agent):** Finish P4(a): build the Watch target from
+`project-watch.yml` on a Mac, run it on a Watch simulator with the fictional
+days and capture the real screens for the owner. Then P4(b), the
+complication, and P4(c), the Watch build in CI, before P5, lifting from the
 wrist. The owner chose "the whole day, lifting first" on 2026-11-22 from
 three mocked options. Runs on the wrist (P1 to P3) stay gated on a member
 who runs with an Apple Watch, and P2 starts only after the recorder's

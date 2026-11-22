@@ -50,6 +50,18 @@ iPhone 17 Pro) and `board.png` with them side by side, into `out/` unless
 (`npm i -g playwright && npx playwright install chromium`, or any
 `require('playwright')` that resolves).
 
+## Apple Watch screens
+
+`node design/mock-kit/watch.mjs` draws the Watch app's screens at 208 x 248
+points (Apple Watch Series 10, 46 mm) with the same tokens, dark values only
+because watchOS has one appearance: Today on the wrist, lifting from the
+wrist and runs. It writes `watch-options.png` and one PNG per group into
+`out/`. These are the three scopes put to the owner on 2026-11-22
+([apple-watch plan](../../docs/plans/apple-watch/plan.md)); the owner chose
+the whole day, lifting first. Today is built (`WatchTodayView`), without the
+Start button, which arrives with lifting. Lifting and runs are proposals,
+not built.
+
 ## Trying a palette
 
 A palette file overrides any `BrandPalette` token per mode, by its Swift

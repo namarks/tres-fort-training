@@ -512,6 +512,8 @@ final class TrainingAgendaPublisher {
     private let userID: String?
     private let reminders: WorkoutReminderCoordinator
     private let reloadWidgets: () -> Void
+    /// Today on Apple Watch follows the same refreshes and boundary.
+    private let watch: WatchDayPublishing?
     private let now: () -> Date
     private var cancellables: Set<AnyCancellable> = []
     private var lastReminderInput: ReminderInput?
@@ -525,7 +527,9 @@ final class TrainingAgendaPublisher {
              WidgetCenter.shared.reloadTimelines(ofKind: TrainingAgendaStore.widgetKind)
          },
          now: @escaping () -> Date = Date.init,
-         notificationCenter: NotificationCenter = .default) {
+         notificationCenter: NotificationCenter = .default,
+         watch: WatchDayPublishing? = nil) {
+        self.watch = watch ?? WatchDayLink.shared
         self.sync = sync
         self.sharedDefaults = sharedDefaults
         self.settings = settings
@@ -576,6 +580,7 @@ final class TrainingAgendaPublisher {
         else { return }
         let changed = TrainingAgendaStore.save(snapshot, to: sharedDefaults)
         if changed || forceWidgetReload { reloadWidgets() }
+        watch?.publish(sync.watchDaySnapshot(agenda: snapshot))
         let input = ReminderInput(
             snapshot: snapshot,
             enabled: WorkoutReminderSettings.isEnabled(settings, userID: userID),
@@ -613,13 +618,14 @@ final class TrainingAgendaPublisher {
     }
 
     /// The account is leaving: nothing it published may stay on the Home
-    /// Screen, Lock Screen or in pending notifications.
+    /// Screen, Lock Screen, Apple Watch or in pending notifications.
     func retire() {
         guard !isRetired else { return }
         isRetired = true
         cancellables = []
         lastReminderInput = nil
-        Self.clearPublished(sharedDefaults: sharedDefaults, reminders: reminders, reloadWidgets: reloadWidgets)
+        Self.clearPublished(sharedDefaults: sharedDefaults, reminders: reminders, reloadWidgets: reloadWidgets,
+                            watch: watch)
     }
 
     /// Clears what any earlier process published. A launch that is not signed
@@ -629,9 +635,11 @@ final class TrainingAgendaPublisher {
         reminders: WorkoutReminderCoordinator = .shared,
         reloadWidgets: () -> Void = {
             WidgetCenter.shared.reloadTimelines(ofKind: TrainingAgendaStore.widgetKind)
-        }
+        },
+        watch: WatchDayPublishing? = nil
     ) {
         if TrainingAgendaStore.save(nil, to: sharedDefaults) { reloadWidgets() }
+        (watch ?? WatchDayLink.shared)?.publish(nil)
         reminders.clear()
     }
 }
