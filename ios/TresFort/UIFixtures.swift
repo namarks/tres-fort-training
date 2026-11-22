@@ -1015,8 +1015,9 @@ private struct UIFixtureServer {
                 var slots = days[index]["exercises"] as! [[String: Any]]
                 slots[0]["run_steps"] = #"[{"kind":"work","duration_s":2400}]"#
                 days[index]["exercises"] = slots
+                let version = (plan?["version"] as? Int ?? 1) + 1
                 plan?["days"] = days
-                plan?["version"] = (plan?["version"] as? Int ?? 1) + 1
+                plan?["version"] = version
             }
             if failCreatedWorkoutRefresh {
                 failCreatedWorkoutRefresh = false
