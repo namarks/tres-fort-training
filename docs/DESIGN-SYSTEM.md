@@ -178,7 +178,7 @@ are checked separately.
   accessibility range when the largest standard sizes already crowd a row.
   Let names, details and button labels wrap, and give multiline buttons
   vertical padding. Keep navigation and actions reachable by scrolling.
-- Coach setup uses four, two or one app-choice columns as text grows.
+- Coach setup uses three, two or one app-choice columns as text grows.
   From XXXL, consent actions follow the disclosure in the same Form instead
   of reserving the bottom of a small screen. Recipient, sharing details,
   setup instructions and actions follow the member's full text setting.

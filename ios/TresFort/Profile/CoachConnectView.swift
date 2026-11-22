@@ -7,6 +7,10 @@ enum CoachApp: String, CaseIterable, Identifiable {
     case claude, chatgpt, codex, other
     var id: String { rawValue }
 
+    /// Codex normally uses the ChatGPT plugin; a direct connection is an
+    /// optional advanced route with its own recipient disclosure.
+    static let primaryChoices: [CoachApp] = [.claude, .chatgpt, .other]
+
     var name: String {
         switch self {
         case .chatgpt: return "ChatGPT"
@@ -233,6 +237,7 @@ struct CoachConnectView: View {
         let active: Bool
     }
 
+    private static let choicesTopID = "coach.choices-top"
     private static let setupTopID = "coach.setup-top"
     private var connectorURL: String { CoachSetup.serverURL(baseURL: Config.apiBaseURL).absoluteString }
     /// A pinned, multiline decision can consume most of a small phone. Keep
@@ -260,7 +265,9 @@ struct CoachConnectView: View {
                 } else {
                     Section {
                         CoachConnectionHeader(app: selectedApp)
+                            .id(Self.choicesTopID)
                         appChoices
+                        if selectedApp == .chatgpt { chatGPTConnectionInfo }
                     }
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
@@ -284,6 +291,9 @@ struct CoachConnectView: View {
             .onChange(of: consentedApp) { _, app in
                 guard app != nil else { return }
                 DispatchQueue.main.async { proxy.scrollTo(Self.setupTopID, anchor: .top) }
+            }
+            .onChange(of: selectedApp) { _, _ in
+                DispatchQueue.main.async { proxy.scrollTo(Self.choicesTopID, anchor: .top) }
             }
         }
         .safeAreaInset(edge: .bottom) {
@@ -345,7 +355,7 @@ struct CoachConnectView: View {
     /// The AI apps as named tiles. Names only: Anthropic and OpenAI allow
     /// their logos only with permission (see "Brand logos" in DESIGN-SYSTEM.md).
     private var appChoices: some View {
-        let apps = CoachApp.allCases
+        let apps = CoachApp.primaryChoices
         let columns = dynamicTypeSize >= .accessibility3 ? 1 : dynamicTypeSize >= .xLarge ? 2 : apps.count
         return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: columns), spacing: 8) {
             ForEach(apps) { app in
@@ -354,7 +364,7 @@ struct CoachConnectView: View {
                         .font(.subheadline.weight(.semibold))
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
-                        // Four choices fit a small iPhone at ordinary sizes
+                        // The choices fit a small iPhone at ordinary sizes
                         // without spending the label's width on extra padding.
                         .padding(.horizontal, columns == apps.count ? 2 : 8)
                         .padding(.vertical, 8)
@@ -398,6 +408,29 @@ struct CoachConnectView: View {
             .font(.footnote)
             .accessibilityIdentifier("coach.full-details")
             policyLinks
+        }
+        if selectedApp == .chatgpt {
+            Section {
+                advancedSetup
+            }
+        }
+    }
+
+    private var chatGPTConnectionInfo: some View {
+        Text("Use the same Très Fort plugin in ChatGPT and Codex with your OpenAI account. Availability depends on your plan and workspace.")
+            .font(.footnote).foregroundStyle(Theme.muted)
+            .accessibilityIdentifier("coach.chatgpt-shared-connection")
+    }
+
+    /// Selecting the direct route asks for its own consent before revealing
+    /// setup details, including when ChatGPT sharing was already allowed.
+    private var advancedSetup: some View {
+        DisclosureGroup("Advanced") {
+            Text("For a separate connection on the computer running Codex.")
+                .font(.footnote).foregroundStyle(Theme.muted)
+            Button("Connect Codex directly") { selectedApp = .codex }
+                .frame(minHeight: 44)
+                .accessibilityIdentifier("coach.direct-codex")
         }
     }
 
@@ -552,7 +585,7 @@ struct CoachConnectView: View {
                     connectionDetails
                 }
             case .chatgpt:
-                Text("Set this up once in ChatGPT on the web.")
+                Text("If Très Fort is already connected in your ChatGPT plugins, start a new chat and ask it to load your coaching brief. Otherwise, set it up once:")
                     .font(.footnote)
                 VStack(alignment: .leading, spacing: 8) {
                     Text("1. Open chatgpt.com/plugins, choose Add, then Add custom MCP server.")
@@ -564,16 +597,17 @@ struct CoachConnectView: View {
                 .accessibilityIdentifier("coach.chatgpt-steps")
                 connectionDetails
                 Link("Open ChatGPT plugins", destination: AppInformation.chatGPTPluginsURL)
-                Text("OpenAI may limit custom plugins on some ChatGPT plans, for example to reading only.")
-                    .font(.footnote).foregroundStyle(.secondary)
+                advancedSetup
             case .codex:
+                Text("This optional setup creates a separate connection on your computer. Choose ChatGPT above to use the shared plugin instead.")
+                    .font(.footnote).foregroundStyle(Theme.muted)
                 CopyRow(label: "Copy setup for Codex",
                         value: CoachSetup.codexSetupPrompt(baseURL: Config.apiBaseURL),
                         mono: false, hideValue: true)
                     .accessibilityIdentifier("coach.codex-setup")
                 Text("Paste this into Codex and let it set up the connection. Complete the browser sign-in on the computer running Codex; use a connect code below when asked.")
                     .font(.footnote)
-                Text("Codex currently needs a computer for initial setup. Once paired, ChatGPT’s Remote feature lets you use that connection from your phone while the computer stays online.")
+                Text("This direct connection needs a computer for initial setup. ChatGPT’s Remote feature can use it from your phone while that computer stays online.")
                     .font(.footnote).foregroundStyle(.secondary)
                     .accessibilityIdentifier("coach.codex-mobile-limit")
                 Link("Using Codex from your phone", destination: AppInformation.codexRemoteGuideURL)

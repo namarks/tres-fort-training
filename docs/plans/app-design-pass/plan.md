@@ -803,6 +803,8 @@ line of their own. P30 builds that.
     follows the disclosure in its scrollable Form. Today, upcoming days,
     the Plan week and library, Activity and runner controls reflow from XXL.
     Names and details wrap, and primary buttons have multiline padding.
+    The grid preserves PR #35's three primary choices and keeps direct
+    Codex setup under ChatGPT's Advanced disclosure with separate consent.
   - The connection artwork is compact and omitted at accessibility sizes.
     The large rest countdown and weekly total grow through XXXL; workout
     values, surrounding labels, disclosures and actions retain full scaling.
@@ -858,8 +860,8 @@ line of their own. P30 builds that.
 
 **Now (@owner):** Review P32's synthetic captures and merge PR #36 once its
 exact head has a clean Codex review and all four required checks are green.
-If the independent coach-choice PR #35 lands first, reconcile its choices
-with the responsive grid and re-run the current-head gate before merging.
+PR #35 is merged; its coach choices and Advanced route are reconciled with
+the responsive grid in PR #36. Re-run the exact-head gate after this merge.
 
 **Then (@agent):** Run the release check on P30's branch for the Today
 journeys (Details, Change for today and Not today now open from the

@@ -131,18 +131,21 @@ THIRD_PARTY_NOTICES.md third-party artwork, font and dependency notices
 
 ## Connect an AI app (optional)
 
-Open the iOS app → **Profile → Coach → Set up your AI coach**. Choose Codex,
-Claude, or Other compatible app, review the data-sharing disclosure, and generate
-a personal connect code. Enter that code only on the Très Fort consent page.
+Open the iOS app → **Profile → Coach → Set up your AI coach**. Choose Claude,
+ChatGPT, or Other compatible app and review the data-sharing disclosure.
 Every member uses their own account; no operator secret or group membership is needed.
 
-For Codex, add the server through the desktop app's **Settings → Plugins → Add →
-Add MCP server** form (older versions use **Settings → MCP servers**). Choose
-**Streamable HTTP**, enter the URL shown in setup, save and authenticate.
-Terminal commands are optional under **Advanced**. This desktop connection does
-not install a hosted plugin for ChatGPT on iPhone or the web; a full mobile
-install-and-authorize button requires publishing the integration in the provider's
-directory. See the connection guide for that delivery path.
+Choose **ChatGPT** for the shared OpenAI plugin. If Très Fort is already connected
+in that account's plugins, use it in a new ChatGPT or Codex chat where available.
+Otherwise, follow the one-time setup in ChatGPT. Availability depends on the
+OpenAI plan, workspace and surface. Très Fort's Dots flow still needs verification.
+
+For a separate connection on the computer running Codex, choose **ChatGPT →
+Advanced → Connect Codex directly**. Review its sharing disclosure, then copy
+the setup request; manual desktop and command-line instructions remain available.
+Generate a personal connect code only if the sign-in asks for one, and enter it
+only on the Très Fort consent page. Direct setup does not install the shared
+ChatGPT plugin. See the connection guide for the directory publication path.
 
 Claude setup uses its custom-connector settings. Other apps must support remote
 Streamable HTTP MCP, OAuth discovery, Dynamic Client Registration, PKCE S256,
