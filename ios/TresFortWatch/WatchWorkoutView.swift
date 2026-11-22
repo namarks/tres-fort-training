@@ -75,6 +75,8 @@ struct WatchSetView: View {
     }
 
     var body: some View {
+        // The page has about 150 points under the clock on every Watch, so
+        // nothing sits under the button: what stops it is said in its place.
         VStack(alignment: .leading, spacing: 5) {
             header
             HStack(spacing: 6) {
@@ -106,19 +108,15 @@ struct WatchSetView: View {
                         .accessibilityIdentifier("watch.workout.reps")
                 }
             }
-            Button(WatchWorkoutPresentation.title(primary)) {
-                model.send(draft.command(WatchWorkoutPresentation.action(primary), token: state.token, set: set))
-            }
-            .buttonStyle(WatchPrimaryButtonStyle())
-            .disabled(!canSend)
-            .accessibilityIdentifier("watch.workout.primary")
-            if let footer {
-                Text(footer)
-                    .font(.caption2)
-                    .foregroundStyle(WatchTheme.muted)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                    .accessibilityIdentifier("watch.workout.footer")
+            if let blocker {
+                WatchActionNotice(text: blocker)
+            } else {
+                Button(WatchWorkoutPresentation.title(primary)) {
+                    model.send(draft.command(WatchWorkoutPresentation.action(primary), token: state.token, set: set))
+                }
+                .buttonStyle(WatchPrimaryButtonStyle())
+                .disabled(!canSend)
+                .accessibilityIdentifier("watch.workout.primary")
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -130,20 +128,43 @@ struct WatchSetView: View {
     @ViewBuilder private var header: some View {
         if let restEnd {
             WatchLabel(text: "Rest · \(set.position)", color: WatchTheme.signal)
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+            HStack(alignment: .center, spacing: 8) {
                 WatchCountdown(end: restEnd)
-                    .font(WatchTheme.number(30))
+                    .font(WatchTheme.number(26))
                     .foregroundStyle(WatchTheme.text)
+                    .lineLimit(1)
+                    .fixedSize()
                     .accessibilityIdentifier("watch.workout.rest")
-                Text(set.exerciseName)
-                    .font(.footnote)
-                    .foregroundStyle(WatchTheme.muted)
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.8)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(set.exerciseName)
+                        .font(.footnote)
+                        .foregroundStyle(WatchTheme.text)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                    if let effort = set.effort {
+                        Text(effort)
+                            .font(.caption2)
+                            .foregroundStyle(WatchTheme.muted)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                    }
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
-            WatchLabel(text: set.position)
+            // The effort sits beside the set's place where both fit.
+            if let effort = set.effort {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 6) {
+                        WatchLabel(text: set.position)
+                        Spacer(minLength: 0)
+                        WatchLabel(text: effort)
+                    }
+                    WatchLabel(text: set.position)
+                }
+            } else {
+                WatchLabel(text: set.position)
+            }
             Text(set.exerciseName)
                 .font(WatchTheme.display(26))
                 .foregroundStyle(WatchTheme.text)
@@ -154,11 +175,11 @@ struct WatchSetView: View {
         }
     }
 
-    /// One short line under the button.
-    private var footer: String? {
-        if !model.isReachable { return "iPhone out of reach" }
-        if set.showsLoad, draft.weight == nil { return "Turn the crown for the weight" }
-        return set.effort
+    /// Why the button can't act now, shown where the button is.
+    private var blocker: String? {
+        if !model.isReachable { return WatchWorkoutPresentation.outOfReachShort }
+        if primary != .endRest, set.showsLoad, draft.weight == nil { return WatchWorkoutPresentation.chooseWeight }
+        return nil
     }
 
     private func settle() {
@@ -201,17 +222,15 @@ struct WatchTimedSetView: View {
             .minimumScaleFactor(0.6)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             .accessibilityIdentifier("watch.workout.timer")
-            Button(WatchWorkoutPresentation.title(.stopTimer)) {
-                model.send(WatchWorkoutCommand(id: UUID(), action: .stopTimer, token: state.token))
-            }
-            .buttonStyle(WatchPrimaryButtonStyle())
-            .disabled(!model.isReachable || model.isSending)
-            .accessibilityIdentifier("watch.workout.primary")
-            if !model.isReachable {
-                Text("iPhone out of reach")
-                    .font(.caption2)
-                    .foregroundStyle(WatchTheme.muted)
-                    .lineLimit(1)
+            if model.isReachable {
+                Button(WatchWorkoutPresentation.title(.stopTimer)) {
+                    model.send(WatchWorkoutCommand(id: UUID(), action: .stopTimer, token: state.token))
+                }
+                .buttonStyle(WatchPrimaryButtonStyle())
+                .disabled(model.isSending)
+                .accessibilityIdentifier("watch.workout.primary")
+            } else {
+                WatchActionNotice(text: WatchWorkoutPresentation.outOfReachShort)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -278,7 +297,7 @@ struct WatchValueTile: View {
             WatchLabel(text: label)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 5)
+        .padding(.vertical, 4)
         .padding(.horizontal, 4)
         .background(WatchTheme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -328,6 +347,25 @@ struct WatchPrimaryButtonStyle: ButtonStyle {
             .background(WatchTheme.signalFill.opacity(isEnabled ? (configuration.isPressed ? 0.8 : 1) : 0.4),
                         in: Capsule())
             .contentShape(Capsule())
+    }
+}
+
+/// What stops the button, in the button's place: the iPhone is out of
+/// reach, or the set has no load yet.
+struct WatchActionNotice: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(WatchTheme.text)
+            .multilineTextAlignment(.center)
+            .lineLimit(2)
+            .minimumScaleFactor(0.8)
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, minHeight: 40)
+            .background(WatchTheme.surface, in: Capsule())
+            .accessibilityIdentifier("watch.workout.notice")
     }
 }
 

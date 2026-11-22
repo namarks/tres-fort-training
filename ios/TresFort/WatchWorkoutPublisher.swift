@@ -188,6 +188,12 @@ enum WatchWorkoutCommandRunner {
             let action: StationLinkCommand.Action = command.action == .logSet ? .logSet : .startTimer
             if let reason = await station(action, display) { return refused(reason) }
         }
+        // A logged set keeps its slot in flight for one more turn (the
+        // runner's double-tap guard), which projects as blocked. Answer with
+        // what the runner shows once that guard lets go.
+        if let slot = display.currentSlotID {
+            for _ in 0..<10 where sync.setSlotsInFlight.contains(slot) { await Task.yield() }
+        }
         return .accepted(command, state: now())
     }
 

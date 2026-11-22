@@ -195,7 +195,9 @@ enum WatchWorkoutPresentation {
 
     static let outOfReach = "Your iPhone is out of reach. Nothing is logged until it is back."
     static let noAnswer = "Your iPhone didn’t answer. Nothing was logged. Try again."
-    static let chooseWeight = "Turn the crown to choose the weight."
+    /// In the button's place while it can't act.
+    static let outOfReachShort = "iPhone out of reach"
+    static let chooseWeight = "Turn the crown for the weight"
 
     /// The workout to show on `today`, or nil for the day's list: nothing is
     /// running, or what the Watch holds is from another day.
