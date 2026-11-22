@@ -11,20 +11,21 @@ import Foundation
 /// Words the runner's display for the wrist.
 enum WatchWorkoutBuilder {
     private struct Shown: Encodable {
+        let run: String
         let kind: String
         let step: WorkoutDisplayState.Step?
         let slotID: String?
     }
 
     /// Names what a tap acts on: the shown set with its exact values, or the
-    /// place between sets. A rest and the ready set it leads to share one
-    /// token, because the Watch ends a rest on its own clock while the
-    /// iPhone may still be asleep.
-    static func token(for display: WorkoutDisplayState) -> String {
+    /// place between sets, in one run of one workout (`run`). A rest and the
+    /// ready set it leads to share one token, because the Watch ends a rest
+    /// on its own clock while the iPhone may still be asleep.
+    static func token(for display: WorkoutDisplayState, run: String) -> String {
         let kind = display.phase == .ready || display.phase == .rest ? "set" : display.phase.rawValue
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
-        guard let bytes = try? encoder.encode(Shown(kind: kind, step: display.current,
+        guard let bytes = try? encoder.encode(Shown(run: run, kind: kind, step: display.current,
                                                     slotID: display.currentSlotID)) else {
             // Never equal to anything the Watch holds.
             return UUID().uuidString
@@ -32,13 +33,13 @@ enum WatchWorkoutBuilder {
         return SHA256.hash(data: bytes).prefix(12).map { String(format: "%02x", $0) }.joined()
     }
 
-    static func state(_ display: WorkoutDisplayState, date: String) -> WatchWorkoutState {
+    static func state(_ display: WorkoutDisplayState, date: String, run: String) -> WatchWorkoutState {
         let words = betweenSets(display)
         return WatchWorkoutState(
             date: date,
             phase: WatchWorkoutState.Phase(rawValue: display.phase.rawValue) ?? .blocked,
             workoutName: display.workoutName,
-            token: token(for: display),
+            token: token(for: display, run: run),
             set: display.current.map(set),
             restEndDate: display.restEndDate,
             timedEndDate: display.timedEndDate,
@@ -110,7 +111,17 @@ extension SyncModel {
     func watchWorkoutState(displayUnit: WeightUnit) -> WatchWorkoutState? {
         guard running, !isPartnerWorkout, terminalActionTarget != nil else { return nil }
         return WatchWorkoutBuilder.state(WorkoutDisplayState.project(sync: self, displayUnit: displayUnit),
-                                         date: todayString)
+                                         date: todayString, run: watchWorkoutRun)
+    }
+
+    /// Names this run of this workout: its place in the day and when the
+    /// runner started it, which a restored runner keeps. A workout discarded
+    /// and started again, or another workout with the same exercises, is
+    /// another run, so a tap meant for the earlier one is refused.
+    var watchWorkoutRun: String {
+        let scope = currentWorkoutScope
+        let started = workoutStart.map { Int($0.timeIntervalSince1970.rounded(.down)) } ?? 0
+        return "\(scope.date)#\(scope.slot)#\(started)"
     }
 }
 
@@ -142,9 +153,9 @@ enum WatchWorkoutCommandRunner {
             return refused(StationLinkCommandReceipt.openWorkout)
         }
         var display = project()
-        // The Watch showed something else: another set, other values, or a
-        // choice made since on the iPhone.
-        guard command.token == WatchWorkoutBuilder.token(for: display) else {
+        // The Watch showed something else: another set, other values, a
+        // choice made since on the iPhone, or another run of the workout.
+        guard command.token == WatchWorkoutBuilder.token(for: display, run: sync.watchWorkoutRun) else {
             return refused(StationLinkCommandReceipt.movedOn)
         }
 

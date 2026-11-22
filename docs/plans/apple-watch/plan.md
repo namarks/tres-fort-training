@@ -165,8 +165,9 @@ recorded on the iPhone.
       context beside the day (`WatchWorkoutPublisher`, `WatchDaySender`). It
       is withdrawn when the workout closes and at every account boundary,
       and the Watch shows it on the workout's own day only. A tap goes to
-      the iPhone as a message naming exactly what the Watch showed, the set
-      with its values. `WatchWorkoutCommandRunner` applies it through the
+      the iPhone as a message naming exactly what the Watch showed: the set
+      with its values, in that run of the workout, so a tap for a workout
+      since discarded is refused. `WatchWorkoutCommandRunner` applies it through the
       Station link's guarded commands (`StationLinkCommandRunner`), so the
       iPhone acts only while its runner still shows that, logs the set
       through its own outbox, and answers with accepted or the reason, and

@@ -8,6 +8,8 @@ import XCTest
 final class WatchWorkoutTests: XCTestCase {
     private let today = "2026-11-22"
     private let now = Date(timeIntervalSince1970: 2_000_000_000)
+    /// One run of one workout: its place in the day and when it started.
+    private let run = "2026-11-22#0#2000000000"
 
     private func step(set: Int = 2, weight: Double? = 225, reps: Int? = 5, seconds: Int? = nil,
                       unit: WeightUnit = .lb, bodyweight: Bool = false, perHand: Bool = false,
@@ -31,7 +33,7 @@ final class WatchWorkoutTests: XCTestCase {
 
     private func state(_ phase: WorkoutDisplayState.Phase = .ready, _ step: WorkoutDisplayState.Step? = nil,
                        restEnd: Date? = nil) -> WatchWorkoutState {
-        WatchWorkoutBuilder.state(display(phase, step ?? self.step(), restEnd: restEnd), date: today)
+        WatchWorkoutBuilder.state(display(phase, step ?? self.step(), restEnd: restEnd), date: today, run: run)
     }
 
     private func day() -> WatchDaySnapshot {
@@ -83,29 +85,35 @@ final class WatchWorkoutTests: XCTestCase {
 
     func testPlacesBetweenSetsSendTheWearerToTheIPhone() {
         let review = WatchWorkoutBuilder.state(display(.review, nil, message: "Review your sets and finish the workout."),
-                                               date: today)
+                                               date: today, run: run)
         XCTAssertNil(review.set)
         XCTAssertEqual(review.title, "Sets complete")
         XCTAssertEqual(review.message, "Review and finish on your iPhone.")
-        let chosen = WatchWorkoutBuilder.state(display(.exerciseComplete, nil), date: today)
+        let chosen = WatchWorkoutBuilder.state(display(.exerciseComplete, nil), date: today, run: run)
         XCTAssertEqual(chosen.message, "Choose the next exercise on your iPhone.")
         let saving = WatchWorkoutBuilder.state(display(.blocked, nil, message: "Saving workout. Wait before continuing."),
-                                               date: today)
+                                               date: today, run: run)
         XCTAssertEqual(saving.title, "Check your iPhone")
         XCTAssertEqual(saving.message, "Saving workout. Wait before continuing.")
         XCTAssertNil(WatchWorkoutPresentation.primary(review, at: now), "nothing to tap between sets")
     }
 
     func testTheTokenNamesTheSetAndItsValuesAndIsSharedByARestAndItsSet() {
-        let ready = WatchWorkoutBuilder.token(for: display(.ready, step()))
-        XCTAssertEqual(ready, WatchWorkoutBuilder.token(for: display(.ready, step())), "the same set, the same token")
-        XCTAssertEqual(ready, WatchWorkoutBuilder.token(for: display(.rest, step(), restEnd: now)),
+        func token(_ display: WorkoutDisplayState, run: String? = nil) -> String {
+            WatchWorkoutBuilder.token(for: display, run: run ?? self.run)
+        }
+        let ready = token(display(.ready, step()))
+        XCTAssertEqual(ready, token(display(.ready, step())), "the same set, the same token")
+        XCTAssertEqual(ready, token(display(.rest, step(), restEnd: now)),
                        "a rest and the set it leads to are one place")
-        XCTAssertNotEqual(ready, WatchWorkoutBuilder.token(for: display(.ready, step(set: 3))))
-        XCTAssertNotEqual(ready, WatchWorkoutBuilder.token(for: display(.ready, step(weight: 230))))
-        XCTAssertNotEqual(ready, WatchWorkoutBuilder.token(for: display(.ready, step(reps: 6))))
-        XCTAssertNotEqual(ready, WatchWorkoutBuilder.token(for: display(.active, step())),
-                          "a running timer is another place")
+        XCTAssertNotEqual(ready, token(display(.ready, step(set: 3))))
+        XCTAssertNotEqual(ready, token(display(.ready, step(weight: 230))))
+        XCTAssertNotEqual(ready, token(display(.ready, step(reps: 6))))
+        XCTAssertNotEqual(ready, token(display(.active, step())), "a running timer is another place")
+        XCTAssertNotEqual(ready, token(display(.ready, step()), run: "2026-11-22#0#2000000600"),
+                          "the same set of the workout started again is another run")
+        XCTAssertNotEqual(ready, token(display(.ready, step()), run: "2026-11-22#1#2000000000"),
+                          "and so is the same set of another workout on the day")
     }
 
     // MARK: what the Watch shows

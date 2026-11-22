@@ -269,6 +269,28 @@ final class WatchWorkoutCommandTests: XCTestCase {
         XCTAssertEqual(sync.setOutbox.pending.map(\.body.weight), [25])
     }
 
+    func testATapForAnEarlierRunOfTheWorkoutIsRefused() async throws {
+        let sync = runner([slot("squat")])
+        let earlier = try shown(sync)
+        // The member discards the workout on the iPhone and starts it again
+        // a minute later: the same first set with the same values, in
+        // another run. The Watch's tap was for the one that is gone.
+        sync.workoutStart = clock.now.addingTimeInterval(60)
+        let restarted = try shown(sync)
+        XCTAssertEqual(restarted.set, earlier.set)
+        XCTAssertNotEqual(restarted.token, earlier.token)
+
+        let late = await apply(tap(.logSet, on: earlier), to: sync)
+        XCTAssertFalse(late.accepted)
+        XCTAssertEqual(late.message, StationLinkCommandReceipt.movedOn)
+        XCTAssertTrue(sync.setOutbox.pending.isEmpty, "nothing logs into the run the Watch never showed")
+        XCTAssertEqual(late.state?.token, restarted.token, "the refusal brings the new run")
+
+        let current = await apply(tap(.logSet, on: restarted), to: sync)
+        XCTAssertTrue(current.accepted)
+        XCTAssertEqual(sync.setOutbox.pending.count, 1)
+    }
+
     func testASetWhoseLoadIsNotChosenNeedsOneFromTheCrown() async throws {
         let sync = runner([slot("squat")])
         sync.clearWeightChoice()
