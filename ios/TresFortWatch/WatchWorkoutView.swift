@@ -16,11 +16,6 @@ struct WatchWorkoutView: View {
             content(at: timeline.date)
         }
         .tint(WatchTheme.signal)
-        .alert(model.notice ?? "", isPresented: Binding(
-            get: { model.notice != nil },
-            set: { if !$0 { model.clearNotice() } })) {
-            Button("OK") { model.clearNotice() }
-        }
     }
 
     @ViewBuilder private func content(at now: Date) -> some View {
@@ -347,6 +342,19 @@ struct WatchPrimaryButtonStyle: ButtonStyle {
             .background(WatchTheme.signalFill.opacity(isEnabled ? (configuration.isPressed ? 0.8 : 1) : 0.4),
                         in: Capsule())
             .contentShape(Capsule())
+    }
+}
+
+/// Why the iPhone didn't apply the last tap, over whichever page is shown.
+struct WatchNoticeAlert: ViewModifier {
+    @ObservedObject var model: WatchDayModel
+
+    func body(content: Content) -> some View {
+        content.alert(model.notice ?? "", isPresented: Binding(
+            get: { model.notice != nil },
+            set: { if !$0 { model.clearNotice() } })) {
+            Button("OK") { model.clearNotice() }
+        }
     }
 }
 

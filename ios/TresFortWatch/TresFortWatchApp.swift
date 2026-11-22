@@ -38,15 +38,18 @@ struct TresFortWatchApp: App {
 
     /// During a lifting workout the set the iPhone's runner is on comes
     /// first, with the day a swipe away. Otherwise the day.
-    @ViewBuilder private var pages: some View {
-        if let workout = model.shownWorkout {
-            TabView {
-                WatchWorkoutView(model: model, state: workout)
+    private var pages: some View {
+        Group {
+            if let workout = model.shownWorkout {
+                TabView {
+                    WatchWorkoutView(model: model, state: workout)
+                    WatchTodayView(model: model)
+                }
+                .tabViewStyle(.page)
+            } else {
                 WatchTodayView(model: model)
             }
-            .tabViewStyle(.page)
-        } else {
-            WatchTodayView(model: model)
         }
+        .modifier(WatchNoticeAlert(model: model))
     }
 }

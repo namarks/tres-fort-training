@@ -215,7 +215,10 @@ workout the same context carries the set the runner is on
 (`WatchWorkoutPublisher`, `ios/Shared/WatchWorkout.swift`), and a tap on the
 Watch is a request: `WatchWorkoutCommandRunner` applies it through the
 Station link's guarded commands, so the iPhone logs every set and the Watch
-keeps no workout state. See `docs/plans/apple-watch/plan.md`.
+keeps no workout state. Start on the wrist's leading row is such a request
+too: `SyncModel.watchStart` decides it by the rules of Today's own row
+button (`TodayView.rowActions`), so change the two together. See
+`docs/plans/apple-watch/plan.md`.
 
 **Ordered workouts on a date (migration 0073).** Sessions are unique by
 `(user_id, date, slot)`. Slot 0 is the primary workout; additional workouts

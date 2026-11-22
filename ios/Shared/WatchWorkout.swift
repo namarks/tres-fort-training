@@ -67,11 +67,15 @@ struct WatchWorkoutState: Codable, Equatable {
 struct WatchWorkoutCommand: Codable, Equatable {
     enum Action: String, Codable {
         case logSet, endRest, startTimer, stopTimer
+        /// Start on the day's leading row: open that workout on the
+        /// iPhone's runner.
+        case start
     }
 
     let id: UUID
     let action: Action
-    /// The `token` of the state the Watch showed when tapped.
+    /// The `token` of the state the Watch showed when tapped. For `start`,
+    /// the day and row it was tapped on (`WatchWorkoutPresentation.startToken`).
     let token: String
     /// Values changed with the crown, in the units the set was shown in.
     /// nil keeps what the runner holds.
@@ -195,9 +199,24 @@ enum WatchWorkoutPresentation {
 
     static let outOfReach = "Your iPhone is out of reach. Nothing is logged until it is back."
     static let noAnswer = "Your iPhone didn’t answer. Nothing was logged. Try again."
+    static let startOutOfReach = "Your iPhone is out of reach. Start once it is back."
+    static let startNoAnswer = "Your iPhone didn’t answer. The workout hasn’t started. Try again."
+
+    /// Why a tap never reached the iPhone, or came back with no answer.
+    static func outOfReach(_ action: WatchWorkoutCommand.Action) -> String {
+        action == .start ? startOutOfReach : outOfReach
+    }
+
+    static func noAnswer(_ action: WatchWorkoutCommand.Action) -> String {
+        action == .start ? startNoAnswer : noAnswer
+    }
     /// In the button's place while it can't act.
     static let outOfReachShort = "iPhone out of reach"
     static let chooseWeight = "Turn the crown for the weight"
+
+    /// Names the row a Start was tapped on: the day the Watch showed and the
+    /// row's id, so a Start for yesterday's list is never today's.
+    static func startToken(date: String, rowID: String) -> String { "start|\(date)|\(rowID)" }
 
     /// The workout to show on `today`, or nil for the day's list: nothing is
     /// running, or what the Watch holds is from another day.

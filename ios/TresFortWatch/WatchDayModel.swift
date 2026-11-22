@@ -29,6 +29,8 @@ final class WatchDayModel: NSObject, ObservableObject {
     #if DEBUG
     /// A fictional workout answers its own taps; no iPhone is involved.
     private var workoutFixture: WatchWorkoutFixtures?
+    /// A fictional day, whose Start opens the fictional workout.
+    private var isFictional = false
     #endif
 
     private let defaults: UserDefaults
@@ -63,7 +65,11 @@ final class WatchDayModel: NSObject, ObservableObject {
             notice = workoutFixture.notice
         }
         if let fixture = WatchDayFixtures.requested(in: arguments) ?? workoutFixture.map({ _ in WatchDayFixtures.today }) {
-            snapshot = fixture.snapshot(today: today)
+            // Start shows on a day with no workout open, as the iPhone
+            // sends it.
+            snapshot = fixture.snapshot(today: today, offersStart: workoutFixture == nil)
+            isFictional = true
+            if workoutFixture == nil { isReachable = true }
             return
         }
         #endif
@@ -105,7 +111,25 @@ final class WatchDayModel: NSObject, ObservableObject {
     /// shows now.
     func send(_ command: WatchWorkoutCommand) {
         guard !isSending, shownWorkout?.token == command.token else { return }
+        deliver(command)
+    }
+
+    /// Start on the row that leads: ask the iPhone to open that workout on
+    /// its runner. The Watch shows it once the iPhone says it is open.
+    func start(_ row: WatchDayRow) {
+        guard !isSending, row.startTitle != nil, let screen, screen.source == .today else { return }
+        deliver(WatchWorkoutCommand(
+            id: UUID(), action: .start,
+            token: WatchWorkoutPresentation.startToken(date: screen.date, rowID: row.id)))
+    }
+
+    private func deliver(_ command: WatchWorkoutCommand) {
         #if DEBUG
+        if isFictional, command.action == .start {
+            workoutFixture = .ready
+            finish(command, with: .accepted(command, state: WatchWorkoutFixtures.ready.state(today: today, now: Date())))
+            return
+        }
         if let workoutFixture {
             let answer = workoutFixture.answer(command, to: workout, today: today, now: Date())
             finish(command, with: answer)
@@ -115,7 +139,7 @@ final class WatchDayModel: NSObject, ObservableObject {
         guard listens, WCSession.default.activationState == .activated, WCSession.default.isReachable,
               let message = WatchWorkoutMessage.encode(command) else {
             isReachable = false
-            fail(WatchWorkoutPresentation.outOfReach)
+            fail(WatchWorkoutPresentation.outOfReach(command.action))
             return
         }
         isSending = true
@@ -131,7 +155,7 @@ final class WatchDayModel: NSObject, ObservableObject {
     private func finish(_ command: WatchWorkoutCommand, with receipt: WatchWorkoutReceipt?) {
         isSending = false
         guard let receipt, receipt.id == command.id else {
-            fail(WatchWorkoutPresentation.noAnswer)
+            fail(WatchWorkoutPresentation.noAnswer(command.action))
             return
         }
         // The iPhone says what its runner shows after the tap. A refusal
@@ -141,7 +165,7 @@ final class WatchDayModel: NSObject, ObservableObject {
             notice = nil
             WKInterfaceDevice.current().play(command.action == .endRest ? .click : .success)
         } else {
-            fail(receipt.message ?? WatchWorkoutPresentation.noAnswer)
+            fail(receipt.message ?? WatchWorkoutPresentation.noAnswer(command.action))
         }
     }
 

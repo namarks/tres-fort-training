@@ -69,8 +69,9 @@ final class WatchWorkoutCommandTests: XCTestCase {
         return "\(base64URL(header)).\(base64URL(payload)).signature"
     }
 
-    private func slot(_ id: String, order: Int = 0, timed: Bool = false, unit: String = "lb") -> TemplateExercise {
-        TemplateExercise(id: id, exercise_id: "exercise-\(id)", exercise_name: timed ? "Plank" : "Exercise \(id)",
+    private func slot(_ id: String, order: Int = 0, timed: Bool = false, unit: String = "lb",
+                      exerciseID: String? = nil) -> TemplateExercise {
+        TemplateExercise(id: id, exercise_id: exerciseID ?? "exercise-\(id)", exercise_name: timed ? "Plank" : "Exercise \(id)",
             exercise_unit: "lb", order_index: order, target_sets: 3, target_reps: timed ? 30 : 5,
             target_reps_max: nil, target_rpe: nil, rest_seconds: 90, target_weight: timed ? 0 : 20,
             cues: nil, exercise_modality: timed ? "timed" : "barbell", exercise_laterality: "bilateral",
@@ -335,6 +336,78 @@ final class WatchWorkoutCommandTests: XCTestCase {
         let chosen = await apply(tap(.logSet, on: unchosen, weight: 45), to: sync)
         XCTAssertTrue(chosen.accepted)
         XCTAssertEqual(sync.setOutbox.pending.map(\.body.weight), [45])
+    }
+
+    // MARK: Start from the wrist
+
+    /// Today as the Watch shows it.
+    private func day(_ sync: SyncModel) -> WatchDaySnapshot {
+        sync.watchDaySnapshot(agenda: TrainingAgendaSnapshot(days: []))
+    }
+
+    private func start(_ rowID: String, on date: String) -> WatchWorkoutCommand {
+        WatchWorkoutCommand(id: UUID(), action: .start,
+                            token: WatchWorkoutPresentation.startToken(date: date, rowID: rowID))
+    }
+
+    func testStartOnTheWristOpensTheDaysWorkoutOnTheRunner() async throws {
+        let sync = runner([slot("squat")], start: false)
+        let shownDay = day(sync)
+        let lead = try XCTUnwrap(shownDay.rows.first { $0.state == .next })
+        XCTAssertEqual(lead.title, "Strength")
+        XCTAssertNotNil(lead.startTitle, "the leading lifting workout can start from the wrist")
+        XCTAssertFalse(sync.running)
+
+        let receipt = await apply(start(lead.id, on: shownDay.date), to: sync)
+        XCTAssertTrue(receipt.accepted, receipt.message ?? "")
+        XCTAssertTrue(sync.running)
+        let first = try XCTUnwrap(receipt.state, "the answer brings the first set")
+        XCTAssertEqual(first.phase, .ready)
+        XCTAssertEqual(first.set?.exerciseName, "Exercise squat")
+        XCTAssertEqual(first.set?.position, "Set 1 of 3")
+        XCTAssertNil(day(sync).rows.first { $0.state == .next }?.startTitle,
+                     "an open workout offers no Start")
+
+        // The answer was lost and the wearer taps Start again: the runner is
+        // already open, so the Watch gets what it shows and nothing restarts.
+        let started = sync.workoutStart
+        let again = await apply(start(lead.id, on: shownDay.date), to: sync)
+        XCTAssertTrue(again.accepted)
+        XCTAssertEqual(again.state?.token, first.token)
+        XCTAssertEqual(sync.workoutStart, started)
+
+        // The set then logs from the wrist as in any workout.
+        let logged = await apply(tap(.logSet, on: first), to: sync)
+        XCTAssertTrue(logged.accepted)
+        XCTAssertEqual(sync.setOutbox.pending.count, 1)
+    }
+
+    func testStartForADayOrRowTheIPhoneNoLongerShowsIsRefused() async throws {
+        let sync = runner([slot("squat")], start: false)
+        let shownDay = day(sync)
+        let lead = try XCTUnwrap(shownDay.rows.first { $0.state == .next })
+
+        // Yesterday's list, still on the Watch after midnight.
+        let stale = start(lead.id, on: "2000-01-01")
+        let late = await apply(stale, to: sync)
+        XCTAssertEqual(late, .refused(stale, WatchWorkoutCommandRunner.dayChanged))
+
+        let gone = start("session:gone", on: shownDay.date)
+        let missing = await apply(gone, to: sync)
+        XCTAssertEqual(missing, .refused(gone, WatchWorkoutCommandRunner.dayChanged))
+        XCTAssertFalse(sync.running, "a refused Start opens nothing")
+    }
+
+    func testARunOffersNoStartOnTheWristAndIsRefusedIfAsked() async throws {
+        let sync = runner([slot("run", exerciseID: RunPlan.exerciseID)], start: false)
+        let shownDay = day(sync)
+        let lead = try XCTUnwrap(shownDay.rows.first { $0.state == .next })
+        XCTAssertNil(lead.startTitle, "a run starts on the iPhone's recorder")
+
+        let asked = start(lead.id, on: shownDay.date)
+        let refused = await apply(asked, to: sync)
+        XCTAssertEqual(refused, .refused(asked, WatchWorkoutCommandRunner.startOnPhone))
+        XCTAssertFalse(sync.running)
     }
 
     func testAnIPhoneWithoutAnOpenWorkoutShowsNoneAndTakesNoTaps() async {

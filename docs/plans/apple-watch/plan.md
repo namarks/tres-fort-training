@@ -159,6 +159,10 @@ recorded on the iPhone.
       rest counting down above the set it leads to. Tap the load, the reps
       or the time and turn the crown to change it, by the runner's own
       small step; the change stays on the Watch and travels with the tap.
+      The page has about 150 points under the clock on every Watch size, so
+      nothing sits under the button: the effort sits beside the set's place
+      or the rest's countdown, and what stops the button (the iPhone out of
+      reach, a load not chosen) is said in the button's place.
     - The iPhone words its runner's `WorkoutDisplayState`, the one a linked
       iPad shows, for the wrist (`WatchWorkoutBuilder`,
       `ios/Shared/WatchWorkout.swift`) and sends it in the application
@@ -192,6 +196,25 @@ recorded on the iPhone.
       that lifting workout on the iPhone's runner, through the same guarded
       steps as Today's own button. A run still starts on the iPhone until
       P2.
+    - The iPhone says on the day's leading row whether the wrist can start
+      it and what the button reads, "Start" or "Continue"
+      (`WatchDayRow.startTitle`, from `SyncModel.watchStart`, which follows
+      the rules of Today's own row button). A run, an activity, a partner
+      workout and a workout that can't start now carry none, and neither
+      does any row while a workout is open. The tap names the day and the
+      row the Watch showed. `WatchWorkoutCommandRunner.start` finds that row
+      in today's list as it is now and takes the steps Today's button
+      takes: the day's own workout starts or continues, a workout already
+      on the list opens, and one planned beside the day's own starts as a
+      new session. The answer brings the first set, so the Watch turns to
+      it. A Start for yesterday's list, or for a row that has gone, is
+      refused with the reason, and a second Start for a runner already open
+      only shows it.
+    - Starting from the wrist never asks for notification permission, since
+      the iPhone may be locked in a pocket: the rest's notification reaches
+      the wrist only where the member already allowed it on the iPhone.
+    - Unit tested against the iPhone's real runner. In the simulator the
+      fictional day's Start opens the fictional workout.
 - [ ] **P6 — A lifting workout on a real Apple Watch**
   - P4 and P5 pass on paired iPhone and Watch simulators, and a member with
     an Apple Watch runs a lifting workout from the wrist on a TestFlight

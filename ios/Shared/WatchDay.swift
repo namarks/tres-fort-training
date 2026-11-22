@@ -28,6 +28,11 @@ struct WatchDayRow: Codable, Equatable, Identifiable {
     let state: State
     /// SF Symbol for what the row is.
     let glyph: String
+    /// "Start" or "Continue" on the row that leads when the wrist can ask
+    /// the iPhone to open this lifting workout on its runner (P5); nil when
+    /// it starts on the iPhone only: a run, an activity, or nothing to start
+    /// now. An older iPhone sends none.
+    var startTitle: String? = nil
 }
 
 /// A later day, coarse: what the iPhone's projection resolved for it.

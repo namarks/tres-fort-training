@@ -10,7 +10,7 @@ struct WatchTodayView: View {
         NavigationStack {
             ScrollView {
                 if let screen = model.screen {
-                    WatchDayList(screen: screen)
+                    WatchDayList(screen: screen, model: model)
                 } else {
                     WatchWaitingView()
                 }
@@ -24,6 +24,7 @@ struct WatchTodayView: View {
 
 struct WatchDayList: View {
     let screen: WatchDayScreen
+    @ObservedObject var model: WatchDayModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -32,7 +33,8 @@ struct WatchDayList: View {
                 .accessibilityIdentifier("watch.today.date")
             ForEach(screen.rows) { row in
                 if row.state == .next {
-                    WatchNextCard(row: row)
+                    // Start asks the iPhone, which wrote this list today.
+                    WatchNextCard(row: row, start: screen.source == .today ? startAction(row) : nil)
                 } else {
                     WatchRowLine(row: row)
                 }
@@ -57,38 +59,66 @@ struct WatchDayList: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+
+    /// Start or Continue for a lifting workout the iPhone can open.
+    private func startAction(_ row: WatchDayRow) -> WatchNextCard.Start? {
+        guard let title = row.startTitle else { return nil }
+        return WatchNextCard.Start(title: title, isReachable: model.isReachable, isSending: model.isSending) {
+            model.start(row)
+        }
+    }
 }
 
 /// The row that leads, on navy: Up next and its time, the workout's name
-/// and how much it is.
+/// and how much it is, and Start where the wrist can start it.
 struct WatchNextCard: View {
+    struct Start {
+        let title: String
+        let isReachable: Bool
+        let isSending: Bool
+        let action: () -> Void
+    }
+
     let row: WatchDayRow
+    var start: Start?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            if let kicker = row.kicker {
-                WatchLabel(text: kicker, color: WatchTheme.signal)
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 3) {
+                if let kicker = row.kicker {
+                    WatchLabel(text: kicker, color: WatchTheme.signal)
+                }
+                Text(row.title)
+                    .font(WatchTheme.display(30))
+                    .foregroundStyle(WatchTheme.text)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.7)
+                if !row.detail.isEmpty {
+                    Text(row.detail)
+                        .font(.footnote)
+                        .foregroundStyle(WatchTheme.muted)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
-            Text(row.title)
-                .font(WatchTheme.display(30))
-                .foregroundStyle(WatchTheme.text)
-                .lineLimit(2)
-                .minimumScaleFactor(0.7)
-            if !row.detail.isEmpty {
-                Text(row.detail)
-                    .font(.footnote)
-                    .foregroundStyle(WatchTheme.muted)
-                    .lineLimit(3)
-                    .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("watch.today.next")
+            if let start {
+                if start.isReachable {
+                    Button(start.title, action: start.action)
+                        .buttonStyle(WatchPrimaryButtonStyle())
+                        .disabled(start.isSending)
+                        .accessibilityIdentifier("watch.today.start")
+                } else {
+                    WatchActionNotice(text: WatchWorkoutPresentation.outOfReachShort)
+                }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .background(WatchTheme.hero, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(WatchTheme.heroEdge, lineWidth: 1))
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("watch.today.next")
     }
 }
 

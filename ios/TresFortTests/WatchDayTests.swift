@@ -87,6 +87,28 @@ final class WatchDayTests: XCTestCase {
         ])
     }
 
+    func testStartRidesOnTheRowThatLeadsOnly() throws {
+        let lift = workout("kb", name: "Kettlebell A", exercises: ["Swing", "Press"])
+        let lower = workout("lower", name: "Lower Body", exercises: ["Back squat", "Deadlift"])
+        let list = rows(primary: lift, extras: [lower])
+        let agenda = agenda([(today, .workout, "Kettlebell A", ["Swing"])])
+
+        let plain = WatchDayBuilder.snapshot(today: today, rows: list, agenda: agenda, unit: .miles, locale: gb)
+        XCTAssertEqual(plain.rows.map(\.startTitle), [nil, nil], "a row the wrist can't start carries none")
+        let offered = WatchDayBuilder.snapshot(today: today, rows: list, agenda: agenda, unit: .miles, locale: gb,
+                                               startTitle: "Start")
+        XCTAssertEqual(offered.rows.map(\.state), [.next, .open])
+        XCTAssertEqual(offered.rows.map(\.startTitle), ["Start", nil])
+
+        // A day with no Start is the bytes an earlier build sent, and a day
+        // from an iPhone that sends none still reads.
+        let bytes = try XCTUnwrap(WatchDayMessage.encode(plain))
+        XCTAssertFalse(try XCTUnwrap(String(data: bytes, encoding: .utf8)).contains("startTitle"))
+        XCTAssertEqual(try JSONDecoder().decode(WatchDaySnapshot.self, from: bytes), plain)
+        XCTAssertEqual(WatchDayMessage.decode(WatchDayMessage.context(day: try XCTUnwrap(WatchDayMessage.encode(offered)))),
+                       .day(offered))
+    }
+
     func testAnEmptyDaySaysWhatItIs() {
         let rest = WatchDayBuilder.snapshot(today: today, rows: [], agenda: agenda([(today, .rest, nil, [])]),
                                             unit: .miles)

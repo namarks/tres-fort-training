@@ -131,10 +131,98 @@ extension SyncModel {
     }
 }
 
+/// What the wrist's Start does for a row of Today's list.
+enum WatchDayStart: Equatable {
+    /// The day's own workout: start it, or continue the one under way.
+    case primary
+    /// A workout beside the day's own that is already on today's list.
+    case listed(sessionID: String)
+    /// A workout planned beside the day's own and not begun: it starts as
+    /// a new session.
+    case scheduled(workoutID: String)
+}
+
+@MainActor
+extension SyncModel {
+    /// The Start the wrist may ask for on a row of Today's list, by the
+    /// rules of Today's own button (`TodayView.rowActions`); nil when the
+    /// row has nothing to start now, or starts on the iPhone only: an
+    /// activity is logged there, and a run opens the iPhone's recorder
+    /// until the Watch records runs (apple-watch P2).
+    func watchStart(for item: DailyWorkoutAgenda.Item) -> WatchDayStart? {
+        guard !running, !isPartnerWorkout, !partnerReserved,
+              !item.isDone, item.status != "skipped", !item.isActivity else { return nil }
+        if let workout = item.workout, workout.exercises.count == 1, workout.exercises[0].isOutdoorRun {
+            return nil
+        }
+        if let session = item.session, (session.slot ?? 0) > 0 {
+            return canSwitchWorkout ? .listed(sessionID: session.id) : nil
+        }
+        guard let workout = item.workout, !workout.exercises.isEmpty else { return nil }
+        if item.source == .primary {
+            let blocked = currentWorkoutScope.slot == 0 && blocksNewWorkoutStart && !hasResumableWorkout
+            return blocked ? nil : .primary
+        }
+        return canAddAnotherWorkout ? .scheduled(workoutID: workout.id) : nil
+    }
+
+    /// Starts what the wrist asked for through the steps Today's own button
+    /// takes (`TodayView.startPrimary`, `startListed`, and a planned add-on's
+    /// `addAnotherWorkout`). It never asks for notification permission: the
+    /// iPhone may be locked in a pocket. Returns whether this account's
+    /// runner is open.
+    func performWatchStart(_ start: WatchDayStart) async -> Bool {
+        guard !running else { return false }
+        switch start {
+        case .primary:
+            if currentWorkoutScope.slot != 0, !selectPrimaryWorkout() { return false }
+            guard !(blocksNewWorkoutStart && !hasResumableWorkout) else { return false }
+            if hasResumableWorkout { resumeWorkout() } else { startToday() }
+        case .listed(let sessionID):
+            guard let session = sessions(on: todayString).first(where: { $0.id == sessionID }) else { return false }
+            _ = startListedSession(session)
+        case .scheduled(let workoutID):
+            _ = await addAnotherWorkout(workoutID)
+        }
+        return running && !isPartnerWorkout
+    }
+}
+
 /// Applies a tap from the Watch to the iPhone's runner.
 @MainActor
 enum WatchWorkoutCommandRunner {
     static let chooseWeight = "Choose a weight for this set first."
+    static let openApp = "Open Très Fort on your iPhone, then try again."
+    static let dayChanged = "Your day changed on your iPhone. Check Today, then try again."
+    static let startOnPhone = "This workout can’t start from your Watch now. Start it on your iPhone."
+
+    /// What the Watch is told when no signed-in account can take its tap.
+    static func noAccount(_ command: WatchWorkoutCommand) -> String {
+        command.action == .start ? openApp : StationLinkCommandReceipt.openWorkout
+    }
+
+    /// Start on the wrist's leading row: opens that workout on the runner,
+    /// or says why not. A Start for a runner already open (the Watch's day
+    /// was behind, or its first Start's answer was lost) answers with what
+    /// the runner shows.
+    static func start(_ command: WatchWorkoutCommand, to sync: SyncModel,
+                      displayUnit: WeightUnit) async -> WatchWorkoutReceipt {
+        if sync.running {
+            guard let state = sync.watchWorkoutState(displayUnit: displayUnit) else {
+                return .refused(command, StationLinkCommandReceipt.openWorkout)
+            }
+            return .accepted(command, state: state)
+        }
+        let today = sync.todayString
+        // The row the Watch showed, as Today lists it now.
+        guard let item = TodayDayList.rows(sync.dailyWorkoutAgenda).first(where: {
+            WatchWorkoutPresentation.startToken(date: today, rowID: $0.id) == command.token
+        }) else { return .refused(command, dayChanged) }
+        guard let start = sync.watchStart(for: item), await sync.performWatchStart(start),
+              let state = sync.watchWorkoutState(displayUnit: displayUnit)
+        else { return .refused(command, startOnPhone) }
+        return .accepted(command, state: state)
+    }
 
     /// The unit the iPhone shows loads in, which the Watch shows too.
     static func displayUnit(_ settings: UserDefaults = .standard) -> WeightUnit {
@@ -155,6 +243,7 @@ enum WatchWorkoutCommandRunner {
             return receipt.accepted ? nil : receipt.message ?? StationLinkCommandReceipt.movedOn
         }
 
+        if command.action == .start { return await start(command, to: sync, displayUnit: displayUnit) }
         guard sync.running, !sync.isPartnerWorkout, sync.terminalActionTarget != nil else {
             return refused(StationLinkCommandReceipt.openWorkout)
         }
@@ -166,6 +255,9 @@ enum WatchWorkoutCommandRunner {
         }
 
         switch command.action {
+        case .start:
+            // Answered above.
+            return refused(StationLinkCommandReceipt.movedOn)
         case .endRest:
             if let reason = await station(.endRest, display) { return refused(reason) }
         case .stopTimer:
@@ -255,7 +347,7 @@ final class WatchWorkoutPublisher {
             .store(in: &cancellables)
         watch.onWorkoutCommand = { [weak self] command in
             guard let self, !self.isRetired, let sync = self.sync else {
-                return .refused(command, StationLinkCommandReceipt.openWorkout)
+                return .refused(command, WatchWorkoutCommandRunner.noAccount(command))
             }
             let receipt = await WatchWorkoutCommandRunner.apply(
                 command, to: sync, displayUnit: WatchWorkoutCommandRunner.displayUnit(self.settings))

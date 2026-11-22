@@ -17,7 +17,7 @@ enum WatchDayFixtures: String {
         return WatchDayFixtures(rawValue: arguments[index + 1])
     }
 
-    func snapshot(today: String) -> WatchDaySnapshot? {
+    func snapshot(today: String, offersStart: Bool = true) -> WatchDaySnapshot? {
         let calendar = TrainingAgendaCalendar.calendar()
         func day(_ offset: Int) -> String {
             guard let start = TrainingAgendaCalendar.date(from: today, calendar: calendar),
@@ -33,7 +33,8 @@ enum WatchDayFixtures: String {
             return WatchDaySnapshot(date: today, rows: [
                 WatchDayRow(id: "run", title: "Easy run", detail: "Done", kicker: nil, state: .done, glyph: "figure.run"),
                 WatchDayRow(id: "lift", title: "Lower Body", detail: "Back squat, Deadlift, Split squat +2",
-                            kicker: "Up next · 5:30 PM", state: .next, glyph: "dumbbell"),
+                            kicker: "Up next · 5:30 PM", state: .next, glyph: "dumbbell",
+                            startTitle: offersStart ? "Start" : nil),
                 WatchDayRow(id: "core", title: "Core", detail: "Plank, Dead bug", kicker: nil, state: .open,
                             glyph: "figure.core.training"),
             ], emptyTitle: "Rest day", emptyDetail: "Nothing planned today.", upcoming: later)

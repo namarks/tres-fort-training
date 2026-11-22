@@ -14,8 +14,11 @@ enum WatchDayBuilder {
     /// Later days the Watch can fall back on before the iPhone writes again.
     static let upcomingDayCount = 6
 
+    /// `startTitle` is what Start reads on the row that leads when the wrist
+    /// can start it ("Start", "Continue"); nil when it can't.
     static func snapshot(today: String, rows: [DailyWorkoutAgenda.Item], agenda: TrainingAgendaSnapshot,
-                         unit: RunDistanceUnit, locale: Locale = .current) -> WatchDaySnapshot {
+                         unit: RunDistanceUnit, locale: Locale = .current,
+                         startTitle: String? = nil) -> WatchDaySnapshot {
         let nextID = TodayDayList.nextID(rows)
         let dayRows = rows.map { item -> WatchDayRow in
             let leads = item.id == nextID
@@ -28,7 +31,8 @@ enum WatchDayBuilder {
                 kicker: leads ? TodayDayList.nextKicker(item, locale: locale) : nil,
                 state: state,
                 glyph: item.workout.map(PlanItemSummary.glyph)
-                    ?? (item.session?.isFreestyle == true ? "figure.strengthtraining.traditional" : "list.bullet.clipboard"))
+                    ?? (item.session?.isFreestyle == true ? "figure.strengthtraining.traditional" : "list.bullet.clipboard"),
+                startTitle: leads ? startTitle : nil)
         }
         let empty = emptyDay(agenda.day(for: today)?.status)
         let upcoming = agenda.days.filter { $0.date > today }.prefix(upcomingDayCount).map(upcomingDay)
@@ -66,8 +70,13 @@ enum WatchDayBuilder {
 extension SyncModel {
     /// Today as the Watch shows it, beside the agenda the widget reads.
     func watchDaySnapshot(agenda: TrainingAgendaSnapshot) -> WatchDaySnapshot {
-        WatchDayBuilder.snapshot(today: todayString, rows: TodayDayList.rows(dailyWorkoutAgenda),
-                                 agenda: agenda, unit: RunDistanceUnit.preferred())
+        let rows = TodayDayList.rows(dailyWorkoutAgenda)
+        // Start on the wrist, where the row that leads is a lifting workout
+        // this iPhone can open now (`watchStart`).
+        let leading = TodayDayList.nextID(rows).flatMap { id in rows.first { $0.id == id } }
+        let startTitle = leading.flatMap { watchStart(for: $0) == nil ? nil : TodayDayList.actionTitle($0) }
+        return WatchDayBuilder.snapshot(today: todayString, rows: rows, agenda: agenda,
+                                        unit: RunDistanceUnit.preferred(), startTitle: startTitle)
     }
 }
 
@@ -185,7 +194,7 @@ final class WatchDaySender: WatchDayPublishing, WatchWorkoutPublishing {
     private func answer(_ message: Data) async -> Data? {
         guard let command = WatchWorkoutMessage.command(from: message) else { return nil }
         let receipt = await onWorkoutCommand?(command)
-            ?? .refused(command, StationLinkCommandReceipt.openWorkout)
+            ?? .refused(command, WatchWorkoutCommandRunner.noAccount(command))
         return WatchWorkoutMessage.encode(receipt)
     }
 }
