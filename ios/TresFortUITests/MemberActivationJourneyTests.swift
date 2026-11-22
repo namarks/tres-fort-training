@@ -475,8 +475,11 @@ final class MemberActivationJourneyTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["coach.connection-title"].label.contains("is connected"))
         let connectedImage = XCTAttachment(screenshot: app.screenshot())
         connectedImage.name = "coach-claude-connected"; connectedImage.lifetime = .keepAlways; add(connectedImage)
-        // A spent or refused link falls back to the approval Claude sends back,
-        // which replaces setup through the real intent/presentation path.
+        // A spent or refused link falls back to the approval Claude sends back
+        // through the real intent/presentation path. Close the connected setup
+        // first: the simulated return sits underneath it. Approval replacing an
+        // open setup is covered by the return-with-setup-open journey.
+        tap(app.navigationBars["Connect your coach"].buttons["Done"], in: app)
         tap(app.buttons["fixture.coach-return"], in: app)
         XCTAssertTrue(app.staticTexts["Review AI access"].waitForExistence(timeout: UITestWait.screen))
         XCTAssertFalse(app.buttons["coach-approval.continue"].exists)
