@@ -8,7 +8,7 @@ API usage, API-key entry, embedded chat, or automatic model selection.
 ## Setup
 
 In Très Fort, open **Profile → Coach → Set up your AI coach** (or **Connect
-another AI app**). Choose Claude, Codex, or another compatible app. Setup is
+another AI app**). Choose Claude, ChatGPT, or another compatible app. Setup is
 available immediately; generating a connect code is not a prerequisite.
 Each app can have its own connection to the same training account.
 The status at the top means an AI app has access, not that the selected
@@ -90,7 +90,39 @@ resets to asking
 ([anthropics/claude-ai-mcp#493](https://github.com/anthropics/claude-ai-mcp/issues/493)).
 The [website guide](../website/connect.mjs) has the member-facing steps.
 
-### Codex
+### ChatGPT and Codex through the shared plugin
+
+Choose **ChatGPT** for OpenAI's shared plugin connection. If Très Fort is already
+connected in that account's plugins, start a new chat and ask it to load the
+coaching brief. There is no second direct Codex setup to complete for that route.
+
+Until the directory listing exists, a member adds Très Fort at
+`chatgpt.com/plugins` → **Add → Add custom MCP server**, with the connector URL
+and OAuth (seen on the owner's account 2026-11-08; steps in
+`https://tresfort.app/connect#chatgpt`). ChatGPT registers a per-connection
+`chatgpt.com/connector/oauth/...` callback through dynamic registration, and the
+consent page names "ChatGPT, operated by OpenAI". The directory listing (plan P4,
+submission worksheet (private maintainer record)) remains the route to a one-tap
+install; the setup screen does not imply that publication is complete.
+
+[OpenAI's plugin guide](https://learn.chatgpt.com/docs/plugins), checked
+2026-11-22, describes using installed plugins in ChatGPT Chat/Work and Codex in
+the ChatGPT desktop app. Availability depends on the member's plan, workspace,
+plugin and surface; the IDE extension does not support plugins. This is distinct
+from manually configuring a direct MCP connection on a computer.
+
+[OpenAI's Dots guide](https://learn.chatgpt.com/docs/dots/computers-and-apps#connect-apps)
+says a dot can use supported plugins installed and enabled for the same account,
+with existing app permissions. Très Fort's full Dots flow, including use of its
+custom plugin and a reversible write, has not been verified. Keep that check
+open rather than advertising Dots as certified in the setup screen.
+
+### Advanced: connect Codex directly
+
+Under **ChatGPT**, expand **Advanced → Connect Codex directly** only for a
+separate connection on the computer running Codex. This asks for its own
+data-sharing consent, including any other model provider configured in Codex.
+Allowing ChatGPT sharing does not skip that disclosure.
 
 Tap **Copy setup for Codex** and paste the request into Codex. It asks Codex to
 add the environment's remote MCP endpoint with OAuth, preserve existing
@@ -185,20 +217,6 @@ review, the server answers 409 `account_changed`, decides nothing and the
 member reviews again. Otherwise the browser follows the callback back to the
 AI app. Loopback callbacks (Codex) and hosted browsers
 keep the connect code.
-
-### ChatGPT developer mode and Dots
-
-Until the directory listing exists, a member adds Très Fort at
-`chatgpt.com/plugins` → **Add → Add custom MCP server**, with the connector URL
-and OAuth (seen on the owner's account 2026-11-08; ChatGPT now calls apps
-"plugins"; steps in `https://tresfort.app/connect#chatgpt`).
-ChatGPT registers a per-connection `chatgpt.com/connector/oauth/...` callback
-through dynamic registration, and the consent page names "ChatGPT, operated by
-OpenAI". Not yet verified on the owner's account: OpenAI's pages disagree on
-whether Plus and Pro developer-mode apps can run write tools, and whether a dot
-can use a developer-mode app. The directory listing (plan P4,
-submission worksheet (private maintainer record)) is the route to a
-one-tap install.
 
 ## Shared behavior and compatibility
 

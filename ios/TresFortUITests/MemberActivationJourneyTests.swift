@@ -438,7 +438,7 @@ final class MemberActivationJourneyTests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Connect your coach"].waitForExistence(timeout: UITestWait.screen))
     }
 
-    func testCoachSetupOffersClaudeChatGPTCodexAndOtherApps() {
+    func testCoachSetupConnectsClaudeAndReturnsToApproval() {
         let app = launch("activation-manual", captureLinks: true)
         tap(app.buttons["Sign in with Apple"], in: app)
         onboard(app)
@@ -488,12 +488,43 @@ final class MemberActivationJourneyTests: XCTestCase {
         // Allowing returns to the AI app without another tap.
         XCTAssertTrue(app.staticTexts["fixture.opened-url"].label.hasPrefix("https://client.example/callback"))
         tap(app.buttons["Done"], in: app)
-        tap(app.tabBars.buttons["Today"], in: app)
+    }
+
+    func testCoachSetupSharesChatGPTAndKeepsDirectCodexAdvanced() {
+        let app = launch("activation-manual")
+        tap(app.buttons["Sign in with Apple"], in: app)
+        onboard(app)
         tap(app.buttons["Set up my coach"], in: app)
+        XCTAssertTrue(app.buttons["coach.app.claude"].exists)
+        XCTAssertTrue(app.buttons["coach.app.chatgpt"].exists)
+        XCTAssertTrue(app.buttons["coach.app.other"].exists)
+        XCTAssertFalse(app.buttons["coach.app.codex"].exists)
 
         tap(app.buttons["coach.app.other"], in: app)
         XCTAssertTrue(app.staticTexts["coach.data-sharing"].label.contains("configured model provider"))
-        tap(app.buttons["coach.app.codex"], in: app)
+        tap(app.buttons["coach.app.chatgpt"], in: app)
+        XCTAssertTrue(app.staticTexts["coach.connection-title"].label.contains("ChatGPT"))
+        XCTAssertTrue(app.staticTexts["coach.chatgpt-shared-connection"].label.contains("ChatGPT and Codex"))
+        XCTAssertTrue(app.staticTexts["coach.data-sharing"].label.contains("OpenAI"))
+        let chatGPTImage = XCTAttachment(screenshot: app.screenshot())
+        chatGPTImage.name = "coach-shared-chatgpt-connection"; chatGPTImage.lifetime = .keepAlways; add(chatGPTImage)
+        // ChatGPT setup stays behind consent. The direct connection is hidden
+        // until Advanced is expanded, even after sharing is allowed.
+        let chatGPTSteps = app.descendants(matching: .any).matching(identifier: "coach.chatgpt-steps").firstMatch
+        XCTAssertFalse(chatGPTSteps.exists)
+        XCTAssertFalse(app.buttons["coach.direct-codex"].exists)
+        scrollAndTap(app.buttons["coach.consent-allow"], in: app)
+        XCTAssertTrue(chatGPTSteps.waitForExistence(timeout: UITestWait.screen))
+        XCTAssertTrue(chatGPTSteps.label.contains("Continue with Apple"))
+        XCTAssertFalse(app.buttons["coach.direct-codex"].exists)
+        scrollAndTap(app.buttons["Advanced"], in: app)
+        scrollAndTap(app.buttons["coach.direct-codex"], in: app)
+        // ChatGPT consent must not authorize a separately configured model
+        // provider in the direct Codex route.
+        let codexDisclosure = app.staticTexts["coach.data-sharing"]
+        XCTAssertTrue(codexDisclosure.waitForExistence(timeout: UITestWait.screen))
+        XCTAssertTrue(codexDisclosure.label.contains("other model provider"))
+        XCTAssertTrue(app.buttons["coach.consent-allow"].isHittable)
         XCTAssertFalse(app.buttons["coach.codex-setup"].exists)
         scrollAndTap(app.buttons["coach.consent-allow"], in: app)
         XCTAssertFalse(app.buttons["coach.generate-code"].exists)
@@ -510,8 +541,7 @@ final class MemberActivationJourneyTests: XCTestCase {
         scrollAndTap(app.buttons.containing(.staticText, identifier: "Sign in").firstMatch, in: app)
         XCTAssertTrue(app.staticTexts["codex mcp login tres-fort"].exists)
 
-        // Start ChatGPT from a freshly opened setup screen, with the app
-        // tiles at the top.
+        // The normal setup still presents one ChatGPT choice on reopening.
         tap(app.navigationBars["Connect your coach"].buttons["Done"], in: app)
         tap(app.tabBars.buttons["Today"], in: app)
         tap(app.buttons["Set up my coach"], in: app)
@@ -520,9 +550,7 @@ final class MemberActivationJourneyTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["coach.connection-title"].label.contains("ChatGPT"))
         XCTAssertTrue(app.staticTexts["coach.data-sharing"].waitForExistence(timeout: UITestWait.screen))
         XCTAssertTrue(app.staticTexts["coach.data-sharing"].label.contains("OpenAI"))
-        // The steps combine several texts into one element; match it by
-        // identifier whatever type the combined element reports.
-        let chatGPTSteps = app.descendants(matching: .any).matching(identifier: "coach.chatgpt-steps").firstMatch
+        XCTAssertFalse(app.buttons["coach.app.codex"].exists)
         XCTAssertFalse(chatGPTSteps.exists)
         scrollAndTap(app.buttons["coach.consent-allow"], in: app)
         XCTAssertTrue(chatGPTSteps.waitForExistence(timeout: UITestWait.screen))
