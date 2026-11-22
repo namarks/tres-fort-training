@@ -20,10 +20,11 @@ import { programmingDraftJourney } from './web-programming-drafts-journey.mjs';
 import { manualProgressionJourney } from './web-manual-progression-journey.mjs';
 import { blockBesideWeekJourney } from './web-block-journey.mjs';
 import { addToDayJourney } from './web-add-to-day-journey.mjs';
+import { setupJourney } from './web-setup-journey.mjs';
 
 // Optional exact journey names keep a diagnosed failure's rerun focused.
 // With no arguments the standard command still runs every journey.
-const journeyNames = [1280, 800, 'account-switch', 'conflict-refresh', 'one-date-edit', 'one-date-account', 'one-date-removed', 'lifting-prescriptions', 'lifting-creation', 'lifting-creation-mobile', 'workout-feedback', 'workout-feedback-mobile', 'strength-review', 'strength-review-mobile', 'group-maintenance', 'group-maintenance-mobile', 'programming-drafts', 'programming-drafts-mobile', 'manual-progression', 'manual-progression-mobile', 'block-beside-week', 'block-beside-week-mobile', 'add-to-day', 'add-to-day-mobile'];
+const journeyNames = [1280, 800, 'account-switch', 'conflict-refresh', 'one-date-edit', 'one-date-account', 'one-date-removed', 'lifting-prescriptions', 'lifting-creation', 'lifting-creation-mobile', 'workout-feedback', 'workout-feedback-mobile', 'strength-review', 'strength-review-mobile', 'group-maintenance', 'group-maintenance-mobile', 'programming-drafts', 'programming-drafts-mobile', 'manual-progression', 'manual-progression-mobile', 'block-beside-week', 'block-beside-week-mobile', 'add-to-day', 'add-to-day-mobile', 'setup', 'setup-mobile'];
 const requested = new Set(process.argv.slice(2));
 const known = new Set([...journeyNames.map(String), 'signed-out-1280', 'signed-out-390']);
 assert([...requested].every(name => known.has(name)), 'Unknown browser journey name.');
@@ -104,7 +105,7 @@ try {
   await writeFile(webConfig, JSON.stringify({ name: `onboarding-web-${process.pid}`, main: path.join(root, 'web/worker/index.ts'),
     compatibility_date: '2026-09-01',
     assets: { directory: path.join(root, 'web/dist'), binding: 'ASSETS', not_found_handling: 'single-page-application',
-      run_worker_first: ['/api/*', '/auth/*', '/maps/*'] },
+      run_worker_first: ['/api/*', '/auth/*', '/maps/*', '/connect/*'] },
     services: [{ binding: 'API', service: apiName }],
     vars: { APPLE_WEB_SERVICES_ID: 'synthetic.web.onboarding', WEB_ORIGIN: webOrigin },
   }));
@@ -163,7 +164,10 @@ try {
         assert(response.ok, `${method} ${pathname}: ${response.status} ${await response.clone().text()}`);
         return response.json();
       };
-      if (width === 'add-to-day' || width === 'add-to-day-mobile') {
+      if (width === 'setup' || width === 'setup-mobile') {
+        await setupJourney({ page, origin: webOrigin, apiCall, width: width.endsWith('-mobile') ? 390 : 1280 });
+        console.log('PASS: a new member opens a three-step setup that saves a weekly run and an event as they are made, returns to its step after a provider, finishes into block setup, and finds Connections and AI coach in Settings.');
+      } else if (width === 'add-to-day' || width === 'add-to-day-mobile') {
         await addToDayJourney({ page, origin: webOrigin, apiCall, width: width.endsWith('-mobile') ? 390 : 1280 });
         console.log('PASS: an empty date opens its Add box; a run, a ride, an activity and a saved workout are added by type to a date or to every week without copies; a block for an event starts on the Block tab and a changed rule refills its weeks on save.');
       } else if (width === 'block-beside-week' || width === 'block-beside-week-mobile') {

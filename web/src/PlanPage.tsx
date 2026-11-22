@@ -227,7 +227,10 @@ export function PlanPage({ state, write, busy, onEditWorkout, scheduleWorkoutId,
         <h1>Plan your week</h1>
         {dateEditPanel}
         <p className="muted">Create a run, a timed routine or your own workout, then choose its days and times. You can put core alongside a run and complete each separately in the iPhone app.</p>
-        <button type="button" onClick={() => onEditWorkout(null)}>Create your first workout</button>
+        <div className="plan-first-actions">
+          <a className="button-primary-link" href="#setup">Set up my week</a>
+          <button type="button" className="ghost" onClick={() => onEditWorkout(null)}>Create a workout</button>
+        </div>
       </main>
     );
   }

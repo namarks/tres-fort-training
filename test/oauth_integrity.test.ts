@@ -325,8 +325,10 @@ describe('OAuth grant families and caller revocation', () => {
       headers: { Authorization: `Bearer ${jwt}` },
     });
     expect(listed.status).toBe(200);
-    const body = await listed.json<{ grants: Array<{ id: string }> }>();
+    const body = await listed.json<{ grants: Array<{ id: string; client_name: string | null }> }>();
     expect(body.grants).toHaveLength(1);
+    // An unregistered client has no name; the web shows a generic label.
+    expect(body.grants[0]!.client_name).toBeNull();
     expect(JSON.stringify(body)).not.toContain(caller.access);
     expect(JSON.stringify(body)).not.toContain(caller.refresh);
     expect(JSON.stringify(body)).not.toContain(other.refresh);
@@ -339,6 +341,18 @@ describe('OAuth grant families and caller revocation', () => {
     expect((await remove()).status).toBe(200);
     expect(await validateBearer(env, caller.access)).toBeNull();
     expect(await validateBearer(env, other.access)).toBe(other.userId);
+  });
+
+  it('names each grant by the name its AI app registered with', async () => {
+    const grant = await seedRefresh();
+    await env.DB.prepare(
+      `INSERT INTO oauth_clients (client_id, client_secret, redirect_uris, client_name, created_at)
+       VALUES (?1, NULL, 'none', 'Synthetic AI app', ?2)`,
+    ).bind(grant.clientId, Date.now()).run();
+    const jwt = await issueAppJwt(grant.userId, 'test-secret');
+    const listed = await SELF.fetch(`${BASE}/api/me/coach-grants`, { headers: { Authorization: `Bearer ${jwt}` } });
+    const body = await listed.json<{ grants: Array<{ client_name: string | null }> }>();
+    expect(body.grants.map((row) => row.client_name)).toEqual(['Synthetic AI app']);
   });
 
   it('adopts a grant_id-null row inserted after migration and disconnects it', async () => {

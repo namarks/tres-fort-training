@@ -3,6 +3,7 @@ import {
   fetchExercises,
   fetchMe,
   fetchState,
+  connectionWrites,
   isVersionConflict,
   ApiError,
   AccountChangedError,
@@ -28,6 +29,18 @@ import type { SessionRow } from '../../src/types';
 import { editorDraftStore } from './editorDrafts';
 import { applyFeedbackReceipt } from './workoutFeedback';
 import { StateReadOrder } from './stateReadOrder';
+import { SettingsPage, type SettingsSection } from './SettingsPage';
+import { SetupFlow, type SetupExit } from './SetupFlow';
+import {
+  APP_STORE_URL,
+  connectErrorText,
+  connectReturnFrom,
+  opensSetup,
+  PROVIDER_NAMES,
+  safeStore,
+  setupInProgress,
+  type ConnectReturn,
+} from './connections';
 
 type Load =
   | { kind: 'loading' }
@@ -115,12 +128,14 @@ export function App() {
 
 type View =
   | { kind: 'plan'; scheduleWorkoutId?: string | null }
-  | { kind: 'block' }
+  | { kind: 'block'; start?: boolean }
   | { kind: 'activity'; entryKey: string | null }
   | { kind: 'analysis'; page: AnalysisPageKey; section: MethodSection | null }
   | { kind: 'workouts'; workoutId: string | null }
   | { kind: 'diagnostics' }
-  | { kind: 'members' };
+  | { kind: 'members' }
+  | { kind: 'setup' }
+  | { kind: 'settings'; section: SettingsSection };
 
 /** `#plan` (and the older `#calendar`) opens the Plan page,
  * `#plan/schedule/<id>` with a workout to add to the usual week, `#block`
@@ -129,14 +144,20 @@ type View =
  * `#activity/<entry key>` the Activity page, `#analysis` the Analysis
  * overview, `#analysis/event` its Event page and
  * `#analysis/methodology[/<section>]` its Methodology page, `#diagnostics`
- * the owner's Diagnostics page, `#members` the owner's Members page;
- * anything else the Plan page. */
+ * the owner's Diagnostics page, `#members` the owner's Members page,
+ * `#setup` the first-run setup, `#settings[/connections|/coach]` Settings
+ * (a provider's return query after it is ignored), `#block/start` block
+ * setup; anything else the Plan page. */
 export function viewFromHash(hash: string): View {
   const schedule = /^#(?:plan|calendar)\/schedule\/([^/]+)$/.exec(hash);
   if (schedule) return { kind: 'plan', scheduleWorkoutId: safeDecode(schedule[1]!) };
   if (hash === '#diagnostics') return { kind: 'diagnostics' };
   if (hash === '#members') return { kind: 'members' };
   if (hash === '#block') return { kind: 'block' };
+  if (hash === '#block/start') return { kind: 'block', start: true };
+  if (hash === '#setup') return { kind: 'setup' };
+  const settings = /^#settings(?:\/(connections|coach))?(?:\?.*)?$/.exec(hash);
+  if (settings) return { kind: 'settings', section: settings[1] === 'coach' ? 'coach' : 'connections' };
   if (hash === '#analysis') return { kind: 'analysis', page: 'overview', section: null };
   if (hash === '#analysis/strength') return { kind: 'analysis', page: 'strength', section: null };
   if (hash === '#analysis/event') return { kind: 'analysis', page: 'event', section: null };
@@ -153,7 +174,9 @@ export function hashFor(view: View): string {
   if (view.kind === 'plan') {
     return view.scheduleWorkoutId ? `#plan/schedule/${encodeURIComponent(view.scheduleWorkoutId)}` : '#plan';
   }
-  if (view.kind === 'block') return '#block';
+  if (view.kind === 'block') return view.start ? '#block/start' : '#block';
+  if (view.kind === 'setup') return '#setup';
+  if (view.kind === 'settings') return `#settings/${view.section}`;
   if (view.kind === 'diagnostics') return '#diagnostics';
   if (view.kind === 'members') return '#members';
   if (view.kind === 'analysis') {
@@ -170,7 +193,23 @@ function safeDecode(text: string): string | null {
   try { return decodeURIComponent(text); } catch { return null; }
 }
 
-type Notice = { kind: 'conflict' | 'error'; text: string; refresh?: boolean };
+type Notice = { kind: 'conflict' | 'error' | 'done'; text: string; refresh?: boolean; link?: { href: string; label: string } };
+
+/** Connections finished in this page load, so a re-render never finishes one twice. */
+const finishing = new Set<string>();
+
+/**
+ * A provider's sign-in comes back to `#settings/connections?…`. The page
+ * takes the completion out of the address at once, and goes back to the
+ * setup step or to Settings.
+ */
+function takeConnectReturn(accountId: string): ConnectReturn | null {
+  const arrival = connectReturnFrom(window.location.hash);
+  if (!arrival) return null;
+  const back = setupInProgress(safeStore('session'), accountId) ? '#setup' : '#settings/connections';
+  window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}${back}`);
+  return arrival;
+}
 
 const CONFLICT_TEXT = 'Your plan changed in the app or with your coach. Your target drafts, edits to existing groups, and block drafts are kept. Review the latest saved values before saving again.';
 
@@ -212,9 +251,19 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
   onSignedOut: (error?: unknown) => void;
   onFeedbackSaved: (session: SessionRow, reviewed: SessionRow) => void;
 }) {
-  const [view, setView] = useState<View>(() => viewFromHash(window.location.hash));
+  const [arrival] = useState(() => takeConnectReturn(me.id));
+  const [view, setView] = useState<View>(() => {
+    const opening = opensSetup({ hash: window.location.hash, hasPlan: !!state.plan, local: safeStore('local'), session: safeStore('session'), accountId: me.id });
+    if (opening && window.location.hash !== '#setup') {
+      window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#setup`);
+    }
+    return opening ? { kind: 'setup' } : viewFromHash(window.location.hash);
+  });
   const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<Notice | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(() => arrival && 'error' in arrival
+    ? { kind: 'error', text: connectErrorText(arrival.provider, arrival.error) } : null);
+  // Bumped when a connection finishes, so connection statuses are read again.
+  const [connections, setConnections] = useState(0);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const isOwner = me.coach?.is_owner === true;
   useEffect(() => {
@@ -231,10 +280,24 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
+  useEffect(() => {
+    if (!arrival || !('completion' in arrival) || finishing.has(arrival.completion)) return;
+    finishing.add(arrival.completion);
+    const name = PROVIDER_NAMES[arrival.provider];
+    connectionWrites.finish(arrival.provider, arrival.completion, me.id)
+      .then(() => setNotice({ kind: 'done', text: `${name} is connected. Your workouts from it will show up shortly.` }))
+      .catch((error: unknown) => {
+        if (error instanceof SignedOutError) { onSignedOut(error); return; }
+        const code = error instanceof ApiError ? (error.body as { error?: unknown } | null)?.error : null;
+        setNotice({ kind: 'error', text: connectErrorText(arrival.provider, typeof code === 'string' ? code : 'failed') });
+      })
+      .finally(() => setConnections((value) => value + 1));
+  }, [arrival, me.id, onSignedOut]);
+
   // The exercise list names exercises for editing, for adding a lift to a
   // day and on the Activity page, so it loads with any of those views.
   useEffect(() => {
-    if ((view.kind === 'analysis' && view.page !== 'strength') || view.kind === 'diagnostics' || view.kind === 'members' || catalog) return;
+    if ((view.kind === 'analysis' && view.page !== 'strength') || view.kind === 'diagnostics' || view.kind === 'members' || view.kind === 'settings' || catalog) return;
     setCatalog({ kind: 'loading' });
     fetchExercises()
       .then((exercises) => setCatalog({ kind: 'ready', exercises }))
@@ -248,6 +311,15 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
     window.location.hash = hashFor(next);
     setView(next);
   }
+
+  const leaveSetup = ({ hash, finished }: SetupExit) => {
+    window.location.hash = hash;
+    setView(viewFromHash(hash));
+    if (finished) {
+      setNotice({ kind: 'done', text: 'You’re set up. Follow your workouts, use timers and record runs in the iPhone app.',
+        link: { href: APP_STORE_URL, label: 'Get the iPhone app' } });
+    }
+  };
 
   const write: Write = async (action) => {
     const plan = state.plan;
@@ -297,6 +369,7 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
           <a href="#plan" aria-current={view.kind === 'plan' || view.kind === 'block' || view.kind === 'workouts' ? 'page' : undefined}>Plan</a>
           <a href="#activity" aria-current={view.kind === 'activity' ? 'page' : undefined}>Activity</a>
           <a href="#analysis" aria-current={view.kind === 'analysis' ? 'page' : undefined}>Analysis</a>
+          <a href="#settings/connections" aria-current={view.kind === 'settings' ? 'page' : undefined}>Settings</a>
           {isOwner && <a href="#members" aria-current={view.kind === 'members' ? 'page' : undefined}>Members</a>}
           {isOwner && <a href="#diagnostics" aria-current={view.kind === 'diagnostics' ? 'page' : undefined}>Diagnostics</a>}
         </nav>
@@ -309,8 +382,8 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
         </div>
       </header>
       {notice && (
-        <div className={`notice ${notice.kind}`} role="alert">
-          <p>{notice.text}</p>
+        <div className={`notice ${notice.kind}`} role={notice.kind === 'done' ? 'status' : 'alert'}>
+          <p>{notice.text}{notice.link && <> <a href={notice.link.href} target="_blank" rel="noopener noreferrer">{notice.link.label}</a></>}</p>
           {notice.refresh && <button type="button" className="ghost small" disabled={busy} onClick={async () => {
             setBusy(true);
             try { await reload(); setNotice(null); }
@@ -323,7 +396,12 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
           <button type="button" className="ghost small" onClick={() => setNotice(null)}>Dismiss</button>
         </div>
       )}
-      {view.kind === 'diagnostics' && isOwner ? (
+      {view.kind === 'setup' ? (
+        <SetupFlow accountId={me.id} state={state} write={write} busy={busy} catalog={catalog ?? { kind: 'loading' }}
+          miles={prefersMiles()} refresh={connections} onSignedOut={onSignedOut} onExit={leaveSetup} />
+      ) : view.kind === 'settings' ? (
+        <SettingsPage accountId={me.id} section={view.section} refresh={connections} onSignedOut={onSignedOut} />
+      ) : view.kind === 'diagnostics' && isOwner ? (
         <DiagnosticsPage onSignedOut={onSignedOut} />
       ) : view.kind === 'members' && isOwner ? (
         <MembersPage onSignedOut={onSignedOut} />
@@ -345,7 +423,7 @@ function Planner({ me, state, reload, onSignedOut, onFeedbackSaved }: {
           miles={prefersMiles()}
         /></>
       ) : view.kind === 'block' ? (
-        <><PlanTabs current="block" /><BlockPage key={`${me.id}:${state.plan?.id ?? 'none'}`} state={state} write={write} busy={busy}
+        <><PlanTabs current="block" /><BlockPage key={`${me.id}:${state.plan?.id ?? 'none'}${view.start ? ':start' : ''}`} initialStarting={view.start} state={state} write={write} busy={busy}
           accountId={me.id} catalog={catalog ?? { kind: 'loading' }} miles={prefersMiles()}
           onEditWorkout={(workoutId) => go({ kind: 'workouts', workoutId })} /></>
       ) : view.kind === 'activity' ? (

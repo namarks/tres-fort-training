@@ -5,9 +5,15 @@ React single-page app in `src/`, served by the `tres-fort-web` Worker, whose
 same-origin gateway (`worker/gateway.ts`) finishes Sign in with Apple, keeps
 the app JWT in an `HttpOnly` cookie and forwards `/api/*` to the API Worker.
 Reads pass for any API path except the iPad Station link key; writes pass only
-for the plan edits listed in `WRITE_ROUTES`, plus allowing or denying an AI
-app's connection request on `/coach/authorize` (`CoachApprovalPage.tsx`).
-Sign in with Apple returns to that page when it started there.
+for the plan edits and Settings changes listed in `WRITE_ROUTES` (connection
+sync and disconnect, Apple Health group sharing, removing AI apps' access),
+plus allowing or denying an AI app's connection request on `/coach/authorize`
+(`CoachApprovalPage.tsx`). Sign in with Apple returns to that page when it
+started there. `POST /connect/{intervals,whoop}/{start,finish}` starts and
+finishes a provider connection through the API's `/auth/...` routes; the
+provider returns to `#settings/connections` with a completion secret in the
+fragment that only this web session can use (`src/connections.ts`).
+A new account opening the site gets the first-run setup (`SetupFlow.tsx`).
 
 ## Checks
 
@@ -25,7 +31,8 @@ and a disposable migrated D1. Synthetic members create a run and timed core,
 save separate weekday times, recover lost acknowledgements, failed reads,
 schedule failures and version conflicts, then refresh and reach the iPhone
 handoff. Separate journeys check account switching in another tab and a
-rejected creation followed by a failed refresh. No provider credentials are
+rejected creation followed by a failed refresh. `setup` and `setup-mobile`
+walk the first-run setup and Settings. No provider credentials are
 needed. Run after `npm test` has finished its web dependency installation.
 The script removes its local
 Workers and temporary database when it exits.

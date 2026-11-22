@@ -1,0 +1,84 @@
+/* Settings → Connections and AI coach, and the connection rows the first-run
+   setup shares. Tokens only (docs/DESIGN-SYSTEM.md): navy marks where you
+   are, orange stays on the one next action. */
+.settings-page {
+  display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 28px;
+  padding: 24px; max-width: 1080px; margin: 0 auto;
+}
+.settings-nav { display: flex; flex-direction: column; gap: 2px; }
+.settings-nav .kicker { padding: 0 0.7rem 6px; }
+.settings-nav a {
+  padding: 0.55rem 0.7rem; border-radius: 8px; color: var(--text); text-decoration: none; min-height: 44px;
+  display: flex; align-items: center;
+}
+.settings-nav a:hover { background: var(--surface); }
+.settings-nav a[aria-current='page'] { background: var(--surface); box-shadow: inset 3px 0 0 var(--accent); font-weight: 650; }
+.settings-body { min-width: 0; max-width: 760px; }
+.settings-body h1 { margin-bottom: 0.35rem; }
+.settings-body > section > .muted { max-width: 65ch; }
+
+.connection-rows { display: grid; gap: 10px; margin-top: 1rem; }
+.connection-row {
+  display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 14px; align-items: center;
+  border: 1px solid var(--line); border-radius: var(--radius); padding: 0.8rem 0.95rem; background: var(--surface);
+}
+.connection-row.phone { background: color-mix(in srgb, var(--surface-2) 40%, var(--surface)); }
+.connection-logo {
+  width: 44px; height: 44px; border-radius: 10px; display: grid; place-items: center;
+  font-family: Bebas, 'Arial Narrow', sans-serif; font-size: 1.15rem;
+}
+.connection-logo.intervals { background: var(--accent); color: var(--on-accent); }
+.connection-logo.whoop { background: var(--hero); color: var(--fort-text); }
+.connection-logo.health { background: var(--danger); color: var(--surface); }
+.connection-logo.coach { background: var(--surface-2); color: var(--accent); }
+.connection-text { min-width: 0; }
+.connection-text strong { display: block; font-weight: 650; font-size: 1.02rem; }
+.connection-text small { display: block; color: var(--muted); font-size: 0.875rem; }
+.connection-text small.connection-connected, .connection-text small.connection-pending { color: var(--done); }
+.connection-text small.connection-reconnect { color: var(--danger); }
+.connection-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.connection-actions button, .connection-actions a { min-height: 44px; }
+.connection-done { color: var(--done); font-weight: 650; font-size: 0.875rem; white-space: nowrap; }
+.connection-confirm { display: inline-flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.connection-confirm .fine { margin: 0; }
+.settings-switch { margin: 0.5rem 0 0; }
+.settings-switch input { width: 1.1rem; height: 1.1rem; }
+.button-link, a.ghost.button-link { display: inline-flex; align-items: center; color: var(--text); text-decoration: none; white-space: nowrap; }
+/* Connecting is a choice, not the step's next action, so it stays navy. */
+.connection-actions .ghost.connect { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.settings-more summary, .settings-shared summary { cursor: pointer; font-weight: 650; padding: 0.65rem 0; }
+.settings-more p { margin: 0.5rem 0 0; color: var(--muted); }
+.settings-more p strong { color: var(--text); }
+
+.settings-panel { background: var(--surface); }
+.settings-panel > .kicker { margin-bottom: 0.25rem; }
+.grant-list { list-style: none; margin: 0; padding: 0; }
+.grant-list li {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 0.65rem 0; border-top: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+}
+.grant-list li:first-child { border-top: 0; }
+.grant-list li > div { min-width: 0; flex: 1 1 16rem; }
+.grant-list strong { display: block; font-weight: 650; }
+.grant-list small { display: block; font-size: 0.85rem; }
+.grant-list button, .grant-list a { min-height: 44px; }
+.url-copy { display: flex; gap: 8px; align-items: center; margin-top: 0.25rem; }
+.url-copy code {
+  flex: 1; min-width: 0; overflow-wrap: anywhere; font-family: JetBrains, monospace; font-size: 0.85rem;
+  border: 1px solid var(--line); border-radius: 8px; padding: 0.5rem 0.6rem; background: var(--bg);
+}
+.url-copy button { min-height: 44px; }
+.settings-shared { margin-top: 0.75rem; }
+.settings-shared ul { margin: 0.25rem 0 0; padding-left: 1.2rem; color: var(--muted); }
+.settings-shared .fine { margin-top: 0.5rem; }
+.notice.done { border-color: var(--done); }
+
+@media (max-width: 760px) {
+  .settings-page { grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 16px; }
+  .settings-nav { flex-direction: row; flex-wrap: wrap; gap: 4px; }
+  .settings-nav .kicker { width: 100%; padding: 0 0 4px; }
+  .settings-nav a[aria-current='page'] { box-shadow: inset 0 -3px 0 var(--accent); }
+  .connection-row { grid-template-columns: 36px minmax(0, 1fr); }
+  .connection-logo { width: 36px; height: 36px; font-size: 0.95rem; }
+  .connection-actions { grid-column: 1 / -1; justify-content: flex-start; }
+}
