@@ -58,15 +58,17 @@ struct AppleHealthSettingsView: View {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Connected").font(.headline)
-                        // The first connect kicks a full historical backfill that
-                        // can run for a while — say so explicitly so it doesn't
-                        // read as a stuck/failed connect.
                         if health.isSyncing {
-                            Text("Syncing your workouts…")
+                            Text(health.syncStatus)
                                 .font(.footnote).foregroundStyle(.secondary)
                         } else if let t = health.lastSyncedAt {
                             Text("Last synced \(RelativeTimeFormat.short(t))")
                                 .font(.footnote).foregroundStyle(.secondary)
+                        }
+                        if let count = health.workoutsSyncedThisAttempt {
+                            Text(count == 1 ? "1 workout saved this attempt" : "\(count) workouts saved this attempt")
+                                .font(.footnote).foregroundStyle(.secondary)
+                                .monospacedDigit()
                         }
                     }
                 }

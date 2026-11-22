@@ -53,6 +53,10 @@ final class HealthKitSyncModel: ObservableObject {
     private(set) var syncGeneration: UInt64 = 0
 
     @Published private(set) var isSyncing = false
+    @Published private(set) var syncStatus = "Reading workout history…"
+    /// Counts successful history uploads in this attempt. Detail passes can
+    /// revisit the same workouts, so they report their progress separately.
+    @Published private(set) var workoutsSyncedThisAttempt: Int?
     @Published private(set) var lastSyncedAt: Date?
     @Published var lastError: String?
 
@@ -184,6 +188,7 @@ final class HealthKitSyncModel: ObservableObject {
               defaults.recoveryGeneration == storageGeneration else { return }
         syncGeneration &+= 1
         enabled = false
+        workoutsSyncedThisAttempt = nil
         defaults.set(false, forKey: Self.enabledKey(userID: accountID))
         anchorResetPending = true
         defaults.set(true, forKey: AccountLocalState.healthResetPendingKey(userID: accountID))
@@ -251,6 +256,8 @@ final class HealthKitSyncModel: ObservableObject {
     func sync() async {
         guard enabled, !anchorResetPending, isAvailable, let jwt = currentJWT, !isSyncing else { return }
         let generation = syncGeneration
+        workoutsSyncedThisAttempt = 0
+        lastError = nil
         isSyncing = true
         var persistedAny = false
         defer {
@@ -277,6 +284,7 @@ final class HealthKitSyncModel: ObservableObject {
         do {
             while true {
                 guard isCurrentSync(using: jwt, generation: generation) else { return }
+                syncStatus = "Reading workout history…"
                 let (workouts, newAnchor) =
                     try await fetchNewWorkouts(anchor: anchor, limit: Self.pageLimit)
                 guard isCurrentSync(using: jwt, generation: generation) else { return }
@@ -294,11 +302,14 @@ final class HealthKitSyncModel: ObservableObject {
                     }
                     break
                 }
+                syncStatus = "Syncing workout history…"
                 for w in workouts {
                     let body = await buildPush(for: w)
                     guard isCurrentSync(using: jwt, generation: generation) else { return }
                     _ = try await api.pushHealthKitActivity(body, jwt: jwt)
                     persistedAny = true
+                    guard isCurrentSync(using: jwt, generation: generation) else { return }
+                    workoutsSyncedThisAttempt = (workoutsSyncedThisAttempt ?? 0) + 1
                     if body.missedDetail { missedStreams = true }
                 }
                 // Whole page pushed — checkpoint the anchor before the next page.
@@ -380,21 +391,29 @@ final class HealthKitSyncModel: ObservableObject {
             passes.append((key: AccountLocalState.healthEffortBackfillKey(userID: accountID), includes: { _ in true }))
         }
         var pushed = false
+        var detailUpdatesSaved = 0
         var recent: [HKWorkout]?
         for pass in passes where !defaults.bool(forKey: pass.key) {
             var complete = true
             if !fullImport {
                 if recent == nil {
+                    syncStatus = "Checking workout details…"
                     let since = Calendar.current.date(
                         byAdding: .day, value: -Self.streamsBackfillDays, to: Date()) ?? Date()
                     recent = try await fetchWorkouts(since: since)
                 }
                 for w in recent ?? [] where pass.includes(w) {
                     guard isCurrentSync(using: jwt, generation: generation) else { return pushed }
+                    if detailUpdatesSaved == 0 {
+                        syncStatus = "Updating workout details…"
+                    }
                     let body = await buildPush(for: w)
                     guard isCurrentSync(using: jwt, generation: generation) else { return pushed }
                     _ = try await api.pushHealthKitActivity(body, jwt: jwt)
                     pushed = true
+                    guard isCurrentSync(using: jwt, generation: generation) else { return pushed }
+                    detailUpdatesSaved += 1
+                    syncStatus = "Updating workout details · \(detailUpdatesSaved) saved"
                     if body.missedDetail { complete = false }
                 }
             }
@@ -425,6 +444,7 @@ final class HealthKitSyncModel: ObservableObject {
         let now = Date()
         let since = Calendar.current.date(byAdding: .day, value: -Self.routesLookbackDays, to: now) ?? now
         ledger.prune(before: since)
+        syncStatus = "Looking for workout routes…"
         // Open-water swims draw their track too (sport-activities P4); a pool
         // swim has none.
         let runs = try await fetchWorkouts(since: since).filter { w in
@@ -442,14 +462,17 @@ final class HealthKitSyncModel: ObservableObject {
         }
         remember(nil)
         var sent = false
-        for w in runs where !ledger.contains(w.uuid) {
+        let remaining = runs.filter { !ledger.contains($0.uuid) }
+        for (index, w) in remaining.enumerated() {
             guard isCurrentSync(using: jwt, generation: generation) else { return sent }
+            syncStatus = "Checking route \(index + 1) of \(remaining.count)…"
             guard let routes = await HealthWorkoutRoute.read(for: w, store: store) else { continue }
             guard let route = HealthWorkoutRoute.encode(routes) else {
                 if now.timeIntervalSince(w.endDate) > Self.routeGraceSeconds { remember(w) }
                 continue
             }
             guard isCurrentSync(using: jwt, generation: generation) else { return sent }
+            syncStatus = "Uploading route \(index + 1) of \(remaining.count)…"
             do {
                 try await api.putHealthKitRoute(workoutID: w.uuid, route: route, jwt: jwt)
                 sent = true
