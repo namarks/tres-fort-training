@@ -47,6 +47,12 @@ private final class ReminderCenterStub: WorkoutReminderCenter {
 }
 
 @MainActor
+private final class WatchDayRecorder: WatchDayPublishing {
+    private(set) var published: [WatchDaySnapshot?] = []
+    func publish(_ snapshot: WatchDaySnapshot?) { published.append(snapshot) }
+}
+
+@MainActor
 final class TrainingAgendaTests: XCTestCase {
     private let fixedDate = Date(timeIntervalSince1970: 2_000_000_000)
     private var retained: [AnyObject] = []
@@ -658,6 +664,45 @@ final class TrainingAgendaTests: XCTestCase {
 
         publisher.refresh()
         XCTAssertNil(TrainingAgendaStore.load(from: shared), "a retired publisher never writes again")
+    }
+
+    // MARK: Today on Apple Watch (apple-watch P4)
+
+    func testTheWatchGetsTheDayAndLosesItAtSignOut() async throws {
+        let model = model()
+        let watch = WatchDayRecorder()
+        let coordinator = WorkoutReminderCoordinator(center: ReminderCenterStub())
+        let publisher = TrainingAgendaPublisher(
+            sync: model, auth: retained.compactMap { $0 as? AuthModel }.last!,
+            sharedDefaults: userDefaults(), settings: userDefaults(), reminders: coordinator,
+            reloadWidgets: {}, now: { .distantPast }, notificationCenter: NotificationCenter(),
+            watch: watch)
+
+        publisher.refresh()
+        let day = try XCTUnwrap(watch.published.last ?? nil)
+        XCTAssertEqual(day.date, model.todayString)
+        XCTAssertEqual(day.rows.map(\.title), ["Upper"], "the day is Today's own list")
+        XCTAssertEqual(day.rows.first?.state, .next)
+        let agenda = try XCTUnwrap(model.trainingAgendaSnapshot())
+        XCTAssertEqual(day, model.watchDaySnapshot(agenda: agenda))
+
+        let auth = try XCTUnwrap(retained.compactMap { $0 as? AuthModel }.last)
+        auth.signOut()
+        await coordinator.waitForTests()
+        XCTAssertTrue(publisher.isRetired)
+        XCTAssertEqual(watch.published.last, .some(nil), "nothing the account published stays on the wrist")
+
+        let count = watch.published.count
+        publisher.refresh()
+        XCTAssertEqual(watch.published.count, count, "a retired publisher never sends again")
+    }
+
+    func testSignedOutLaunchClearsTheWatch() {
+        let watch = WatchDayRecorder()
+        TrainingAgendaPublisher.clearPublished(
+            sharedDefaults: userDefaults(), reminders: WorkoutReminderCoordinator(center: ReminderCenterStub()),
+            reloadWidgets: {}, watch: watch)
+        XCTAssertEqual(watch.published, [nil])
     }
 
     // MARK: still to do (app-design-pass P22)

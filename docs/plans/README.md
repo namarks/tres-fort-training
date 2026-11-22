@@ -226,12 +226,16 @@ integration or social breadth.
   1.2 (83). P10, changing a day's run from its details, merged on
   2026-11-18 and needs the next TestFlight build; P4 is the owner's
   interval runs.
-- [Runs on Apple Watch](apple-watch/plan.md) — **paused**; the rest timer
-  and run stats laid out for the Watch, planned runs sent to Apple's Workout
-  app and brought back as recorded runs, then a Tres Fort Watch app that
-  records runs with GPS, wrist heart rate and haptic step cues and saves them
-  through the iPhone. P0's wrist layouts are in the repository. Paused
-  until a member who runs with an Apple Watch can test P1 onward.
+- [Tres Fort on Apple Watch](apple-watch/plan.md) — **active**; a Watch
+  app with Today and a complication (P4), then lifting from the wrist: the
+  Watch drives the iPhone's runner the way a linked iPad does (P5). Runs on
+  the wrist follow: planned runs sent to Apple's Workout app, then a Watch
+  recorder with GPS, wrist heart rate and haptic step cues (P1 to P3),
+  gated on a member who runs with an Apple Watch. P0's wrist layouts are in
+  the repository. P4, the Watch app with Today on the wrist, the
+  complication and its build in CI, is in review. The Watch app has its own
+  project spec and stays out of TestFlight and App Store builds until the
+  owner says it ships.
 - [Capture every sport properly](sport-activities/plan.md) — **active**;
   soccer, tennis, climbing, swims and every other sport land as that sport
   from Apple Health, intervals.icu, `.fit` files or hand entry, with
@@ -391,9 +395,6 @@ status or phase checkboxes.
 
 The following remain candidates or design references, not current plans:
 
-- **Lifting on Apple Watch** — logging sets from the wrist and a Today
-  complication, after [runs on Apple Watch](apple-watch/plan.md). Promote
-  when a member trains with an Apple Watch and wants it.
 - **Custom exercises** — promote when catalog gaps create observed workout
   failures that aliases or the existing catalog cannot solve. The
   gymnastic-strength seed in `bodyweight-training-support#P0` is the first

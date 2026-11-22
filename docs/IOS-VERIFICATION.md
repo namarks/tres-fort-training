@@ -61,6 +61,15 @@ journey still runs in the release check below. Building the UI test bundle on
 PRs keeps a compile break in UI test code from first surfacing at night. A
 script check enforces that smoke selects exactly the unit target.
 
+The Apple Watch app and its complication exist only in
+`ios/project-watch.yml`, so the iPhone build never compiles them. The same
+job (the smoke job, and shard 1 of a full run) then runs
+`npm run ios:verify-watch`, which builds the **TresFortWatch** scheme
+unsigned for a Watch simulator and fails if the built Watch app doesn't
+contain its complication. It creates no simulator and runs nothing: what
+the Watch decides is covered by `TresFortTests`, and how it looks is checked
+on a Mac with the fictional days (`-watch-day-fixture`).
+
 ## Release check
 
 The full run is the release check. It runs the six full UI shards plus the

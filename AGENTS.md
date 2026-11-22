@@ -54,6 +54,7 @@ npm run db:migrate:remote      # guarded; use the authorized migration runbook
 npm run deploy                 # deploy only, separate production authority required
 npm run release                # guarded; deployment needs separate authority
 npm run test:workout-rollout    # migration integrity and canonical contract tests
+npm run ios:verify-watch       # unsigned build of the Apple Watch app and its complication
 npm run ios:testflight         # build, upload, then give the build to external testers
 npm run testflight:external    # give a build to external TestFlight groups (--list-groups is read-only)
 npm run beta:feedback:list     # read-only: recent TestFlight feedback (--save keeps screenshots)
@@ -69,6 +70,11 @@ open ios/TresFort.xcodeproj
 
 Build/run with the **TresFort** scheme, never the widget-extension scheme.
 The `.xcodeproj` is generated; treat `project.yml` as the source of truth.
+The Apple Watch app (`ios/TresFortWatch`) is only in `project-watch.yml`,
+which includes `project.yml`: generate with
+`xcodegen generate --spec project-watch.yml` and run the **TresFortWatch**
+scheme on a Watch simulator (`-watch-day-fixture today` shows a fictional
+day). TestFlight (`project.yml`) and App Store builds don't carry it.
 
 ## Workout contract
 
@@ -195,6 +201,16 @@ start/resume requires a complete, intact, previously live-certified plan and
 known matching session attempt (or no observed session). Pending UUIDs and
 prescriptions stay fixed; cached rows never acknowledge them. Missing, legacy,
 invalidated or competing-attempt caches require live validation.
+
+**Apple Watch.** The Watch app only shows what the iPhone sends: it never
+signs in or calls the Worker. `TrainingAgendaPublisher` hands Today's own
+rows (`WatchDayBuilder`, worded by `TodayDayList`) to `WatchDaySender`, which
+sends them as WatchConnectivity's application context and clears them at
+every account boundary, like the Today widget. `ios/Shared/WatchDay.swift`
+holds the format and what the Watch shows for a day; keep day rules on the
+iPhone. The complication (`ios/TresFortWatchWidgets`) reads the Watch app's
+stored copy of that day from the Watch's App Group. See
+`docs/plans/apple-watch/plan.md`.
 
 **Ordered workouts on a date (migration 0073).** Sessions are unique by
 `(user_id, date, slot)`. Slot 0 is the primary workout; additional workouts

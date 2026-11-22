@@ -30,6 +30,7 @@
     "beta:feedback:list": "NODE_USE_ENV_PROXY=1 node scripts/testflight-feedback.mjs",
     "testflight:external": "NODE_USE_ENV_PROXY=1 node scripts/testflight-distribute.mjs",
     "ios:verify": "bash scripts/verify-ios.sh",
+    "ios:verify-watch": "bash scripts/verify-watch.sh",
     "plans:check": "node scripts/vendor/planning/plan-graph.mjs check",
     "test:workout-rollout": "vitest run test/workout_schema.test.ts test/workout_wire.test.ts",
     "deploy:website": "npm --prefix website run deploy --",

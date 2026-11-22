@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- App Group shared by the Watch app and its complication: the app
+       keeps the day the iPhone sent (Shared/WatchDay.swift) and the
+       complication reads it. The group is the Watch's own storage; nothing
+       crosses to the iPhone through it. -->
+  <key>com.apple.security.application-groups</key>
+  <array>
+    <string>group.com.nmarkspdx.tresfort</string>
+  </array>
+</dict>
+</plist>

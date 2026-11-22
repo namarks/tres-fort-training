@@ -1,0 +1,78 @@
+# iPhone + iPad + Apple Watch development spec (docs/plans/apple-watch).
+# Generate it explicitly: cd ios && xcodegen generate --spec project-watch.yml
+#
+# The TestFlight spec (project.yml) and the App Store spec
+# (project-app-store.yml) do not define the Watch app, so neither build
+# carries it until the owner says it ships. This spec adds the Watch app
+# target and embeds it in the iPhone app; XcodeGen appends these arrays to
+# the ones project.yml declares.
+include: project.yml
+options:
+  deploymentTarget:
+    watchOS: "10.0"
+targets:
+  TresFort:
+    dependencies:
+      - target: TresFortWatch   # embedded as the iPhone app's Watch content
+  TresFortWatch:
+    type: application
+    platform: watchOS
+    sources:
+      - TresFortWatch
+      # The day the iPhone sends, its civil-date rule and the color tokens:
+      # the same files the iPhone app compiles.
+      - path: Shared/WatchDay.swift
+      - path: Shared/TrainingAgenda.swift
+      - path: Shared/BrandPalette.swift
+      - path: TresFort/Fonts/BebasNeue-Regular.ttf
+        buildPhase: resources
+      - path: TresFort/Fonts/JetBrainsMono-Bold.ttf
+        buildPhase: resources
+      - path: TresFort/Fonts/OFL-BebasNeue.txt
+        buildPhase: resources
+      - path: TresFort/Fonts/OFL-JetBrainsMono.txt
+        buildPhase: resources
+    dependencies:
+      - target: TresFortWatchWidgets   # the complication, inside the Watch app
+    settings:
+      base:
+        # A companion Watch app's identifier starts with the iPhone app's.
+        PRODUCT_BUNDLE_IDENTIFIER: com.nmarkspdx.tresfort.watchkitapp
+        INFOPLIST_FILE: TresFortWatch/Info.plist
+        # App Group shared with the complication for the day it shows.
+        CODE_SIGN_ENTITLEMENTS: TresFortWatch/TresFortWatch.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        SKIP_INSTALL: YES
+        ENABLE_PREVIEWS: YES
+
+  # The watch face complication and Smart Stack widget. Like the iPhone's
+  # widget extension it has no scheme of its own: it is built and embedded
+  # through the Watch app.
+  TresFortWatchWidgets:
+    type: app-extension
+    platform: watchOS
+    sources:
+      - TresFortWatchWidgets
+      - path: TresFortWatch/WatchComplicationView.swift
+      - path: Shared/WatchDay.swift
+      - path: Shared/TrainingAgenda.swift
+      - path: Shared/BrandPalette.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nmarkspdx.tresfort.watchkitapp.widgets
+        INFOPLIST_FILE: TresFortWatchWidgets/Info.plist
+        CODE_SIGN_ENTITLEMENTS: TresFortWatchWidgets/TresFortWatchWidgets.entitlements
+        SKIP_INSTALL: YES
+
+# Build and run the Watch app on a Watch simulator with this scheme. The
+# TresFort scheme builds the iPhone app with the Watch app inside it.
+schemes:
+  TresFortWatch:
+    build:
+      targets:
+        TresFortWatch: all
+    run:
+      config: Debug
+    archive:
+      config: Release
