@@ -20,6 +20,28 @@ struct RunPlanEditorView: View {
     var onFinished: (() -> Void)? = nil
 
     @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        RunPlanStepsEditor(plan: slot.runPlan,
+                           unreadable: slot.run_steps != nil && slot.runPlan == nil,
+                           error: sync.loadError,
+                           cancelTitle: onFinished == nil ? "Cancel" : "Not now",
+                           onCancel: finish) { plan in
+            if await sync.updateRunSteps(dayID: dayID, teID: slot.id, steps: plan,
+                                         expectedVersion: expectedVersion) {
+                finish()
+            }
+        }
+    }
+
+    private func finish() {
+        if let onFinished { onFinished() } else { dismiss() }
+    }
+}
+
+/// Edits a local copy of the steps. The caller decides whether accepting
+/// them updates a draft or saves an existing workout.
+struct RunPlanStepsEditor: View {
     @State private var draft: RunPlanDraft
     @State private var editing: EditingRunStep?
     @State private var working = false
@@ -27,18 +49,23 @@ struct RunPlanEditorView: View {
     /// The slot has steps in a format this app can't read, such as one a
     /// newer server added; editing would lose them, so only clearing is offered.
     private let unreadable: Bool
+    let error: String?
+    let cancelTitle: String
+    let saveTitle: String
+    let onCancel: () -> Void
+    let onSave: (RunPlan?) async -> Void
     private let unit = RunDistanceUnit.preferred()
 
-    init(sync: SyncModel, dayID: String, slot: TemplateExercise, expectedVersion: Int,
-         onFinished: (() -> Void)? = nil) {
-        _sync = ObservedObject(wrappedValue: sync)
-        self.dayID = dayID
-        self.slot = slot
-        self.expectedVersion = expectedVersion
-        self.onFinished = onFinished
-        let plan = slot.runPlan
+    init(plan: RunPlan?, unreadable: Bool = false, error: String? = nil,
+         cancelTitle: String = "Cancel", saveTitle: String = "Save",
+         onCancel: @escaping () -> Void, onSave: @escaping (RunPlan?) async -> Void) {
         original = plan
-        unreadable = slot.run_steps != nil && plan == nil
+        self.unreadable = unreadable
+        self.error = error
+        self.cancelTitle = cancelTitle
+        self.saveTitle = saveTitle
+        self.onCancel = onCancel
+        self.onSave = onSave
         _draft = State(initialValue: RunPlanDraft(plan: plan))
     }
 
@@ -82,10 +109,10 @@ struct RunPlanEditorView: View {
             if let problem = draft.problem, !unreadable {
                 Section { Text(problem).foregroundStyle(Theme.danger) }
             }
-            if let error = sync.loadError {
+            if let error {
                 Section { Text(error).foregroundStyle(Theme.danger) }
             }
-            if slot.run_steps != nil {
+            if original != nil || unreadable {
                 Section {
                     Button("Remove all steps", role: .destructive) { save(nil) }
                         .disabled(working)
@@ -101,14 +128,14 @@ struct RunPlanEditorView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
-                Button(onFinished == nil ? "Cancel" : "Not now") { finish() }
+                Button(cancelTitle, action: onCancel)
                     .foregroundStyle(Theme.muted)
                     .disabled(working)
                     .accessibilityIdentifier("runPlan.cancel")
             }
             if !unreadable {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button(working ? "Saving…" : "Save") { save(draft.plan) }
+                    Button(working ? "Saving…" : saveTitle) { save(draft.plan) }
                         .disabled(working || !changed || draft.problem != nil)
                         .accessibilityIdentifier("runPlan.save")
                 }
@@ -196,15 +223,9 @@ struct RunPlanEditorView: View {
     private func save(_ plan: RunPlan?) {
         working = true
         Task {
-            let saved = await sync.updateRunSteps(dayID: dayID, teID: slot.id, steps: plan,
-                                                  expectedVersion: expectedVersion)
+            await onSave(plan)
             working = false
-            if saved { finish() }
         }
-    }
-
-    private func finish() {
-        if let onFinished { onFinished() } else { dismiss() }
     }
 }
 

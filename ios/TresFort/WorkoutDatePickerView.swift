@@ -197,6 +197,9 @@ struct DayRunChangeView: View {
     /// (which puts the new run on the date) can't replace what the screen
     /// started from.
     @State private var source: Workout?
+    /// The source is held from first open; its write authority must be too.
+    /// A foreground refresh cannot approve overwriting another client's edit.
+    @State private var reviewedVersion: Int?
     /// Opened from the run's details: offers editing the saved run, for
     /// every day it is used, instead of this day only.
     var offersSavedEdit = false
@@ -212,16 +215,21 @@ struct DayRunChangeView: View {
     /// The run an earlier try made, so Try again doesn't make another.
     @State private var createdID: String?
     @State private var stepsSaved = false
-    @State private var planning: Planning?
+    @State private var editingSteps: StepDraft?
     private let unit = RunDistanceUnit.preferred()
 
-    private struct Planning { let workoutID: String; let slot: TemplateExercise; let version: Int }
+    private struct StepDraft: Identifiable {
+        let id = UUID()
+        let plan: RunPlan?
+        let unreadable: Bool
+    }
 
     init(sync: SyncModel, date: String, source: Workout?, offersSavedEdit: Bool = false,
          onFinished: @escaping () -> Void) {
         self.sync = sync
         self.date = date
         _source = State(initialValue: source)
+        _reviewedVersion = State(initialValue: sync.plan?.version)
         self.offersSavedEdit = offersSavedEdit
         self.onFinished = onFinished
         let start = DayChange.draft(from: source, unit: RunDistanceUnit.preferred())
@@ -246,13 +254,15 @@ struct DayRunChangeView: View {
     }
 
     var body: some View {
-        Group {
-            if let planning {
-                RunPlanEditorView(sync: sync, dayID: planning.workoutID, slot: planning.slot,
-                                  expectedVersion: planning.version, onFinished: onFinished)
-                    .navigationBarBackButtonHidden(true)
-            } else {
-                form
+        form
+        .sheet(item: $editingSteps) { steps in
+            NavigationStack {
+                RunPlanStepsEditor(plan: steps.plan, unreadable: steps.unreadable,
+                                   saveTitle: "Done", onCancel: { editingSteps = nil }) { plan in
+                    draft.steps = .custom(plan)
+                    savedID = nil
+                    editingSteps = nil
+                }
             }
         }
         .task { thresholds = await sync.planningThresholds() }
@@ -266,20 +276,33 @@ struct DayRunChangeView: View {
                 Text("Kind of run")
             }
             Section {
-                amountRow
+                if draft.hasCustomSteps {
+                    Text(draft.plan(targets: targets, unit: unit)
+                        .flatMap { RunPlanFormat.total($0, unit: unit) } ?? "At your own pace")
+                        .font(Theme.mono(22, .bold)).foregroundStyle(Theme.text)
+                        .accessibilityIdentifier("dayRun.customAmount")
+                } else {
+                    amountRow
+                }
             } header: {
-                Text(draft.measure == .time ? "How long" : "How far")
+                Text(draft.hasCustomSteps ? "Your steps" : draft.measure == .time ? "How long" : "How far")
             } footer: {
                 Text(DayChange.summary(draft, targets: targets, unit: unit))
                     .accessibilityIdentifier("dayRun.summary")
             }
             Section {
                 Button("Edit steps") {
-                    savedID = nil
-                    save(thenEditSteps: true)
+                    // Capture exactly what opens, even if thresholds finish
+                    // loading while the member is editing. No write or refresh.
+                    if draft == initial, let slot = PlannedRunCreation.runSlot(in: source) {
+                        editingSteps = StepDraft(plan: slot.runPlan,
+                                                 unreadable: slot.run_steps != nil && slot.runPlan == nil)
+                    } else {
+                        editingSteps = StepDraft(plan: draft.plan(targets: targets, unit: unit), unreadable: false)
+                    }
                 }
                     .frame(minHeight: 44)
-                    .disabled(busy)
+                    .disabled(busy || createdID != nil)
                     .accessibilityIdentifier("dayRun.editSteps")
             } footer: {
                 Text("Plan each warm-up, interval and recovery with its own pace or heart rate.")
@@ -354,7 +377,7 @@ struct DayRunChangeView: View {
             Spacer()
             stepButton("plus", label: "More") { draft.step(by: 1, unit: unit) }
         }
-        .disabled(busy)
+        .disabled(busy || createdID != nil)
     }
 
     private func stepButton(_ glyph: String, label: String, action: @escaping () -> Void) -> some View {
@@ -376,7 +399,7 @@ struct DayRunChangeView: View {
                     .accessibilityIdentifier("dayRun.error")
             }
             Button(saving ? "Saving…" : createdID != nil && !stepsSaved ? "Try again" : "Save for \(weekday)") {
-                save(thenEditSteps: false)
+                save()
             }
             .buttonStyle(WorkoutPrimaryButtonStyle())
             .disabled(busy || !changed)
@@ -398,23 +421,16 @@ struct DayRunChangeView: View {
         .background(Theme.background)
     }
 
-    private func save(thenEditSteps: Bool) {
+    private func save() {
         guard !busy else { return }
         saving = true
         Task {
             defer { saving = false }
-            if let savedID, !thenEditSteps, createdID == nil {
+            if let savedID, createdID == nil {
                 if await sync.setCalendarOverride(date: date, dayID: savedID) { onFinished() }
                 return
             }
-            // Steps opened with nothing changed start from the day's own run.
-            if thenEditSteps, !changed, let source, createdID == nil {
-                let id = source.isOneTime ? source.id : await sync.makeOneTimeWorkout(date: date, from: source)
-                guard let id else { return }
-                openSteps(id)
-                return
-            }
-            let plan = DayChange.runPlan(draft, targets: targets, unit: unit)
+            let plan = draft.plan(targets: targets, unit: unit)
             let id: String
             if let createdID {
                 id = createdID
@@ -423,6 +439,10 @@ struct DayRunChangeView: View {
                 // rather than leave it behind for another.
                 createdID = source.id
                 id = source.id
+            } else if let source, draft.hasCustomSteps, draft.kind == initial.kind {
+                guard let made = await sync.makeOneTimeWorkout(date: date, from: source) else { return }
+                createdID = made
+                id = made
             } else {
                 guard let made = await sync.makeOneTimeWorkout(
                     date: date, name: draft.kind.runName, exerciseIDs: [RunPlan.exerciseID]) else { return }
@@ -433,7 +453,7 @@ struct DayRunChangeView: View {
                 // The create can land while its refresh fails; fetch once more.
                 if PlannedRunCreation.runSlot(in: sync.workout(id: id)) == nil { await sync.load() }
                 guard let slot = PlannedRunCreation.runSlot(in: sync.workout(id: id)),
-                      let version = sync.plan?.version else {
+                      let version = source?.id == id ? reviewedVersion : sync.plan?.version else {
                     if sync.loadError == nil {
                         sync.loadError = "The run is on \(weekday), but its steps didn't save yet. Try again."
                     }
@@ -447,17 +467,8 @@ struct DayRunChangeView: View {
                     await sync.renameWorkoutDay(dayID: id, name: draft.kind.runName)
                 }
             }
-            if thenEditSteps { openSteps(id) } else { onFinished() }
-        }
-    }
-
-    private func openSteps(_ workoutID: String) {
-        guard let slot = PlannedRunCreation.runSlot(in: sync.workout(id: workoutID)),
-              let version = sync.plan?.version else {
             onFinished()
-            return
         }
-        planning = Planning(workoutID: workoutID, slot: slot, version: version)
     }
 }
 
