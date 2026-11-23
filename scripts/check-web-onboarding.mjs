@@ -166,7 +166,7 @@ try {
       };
       if (width === 'setup' || width === 'setup-mobile') {
         await setupJourney({ page, origin: webOrigin, apiCall, width: width.endsWith('-mobile') ? 390 : 1280 });
-        console.log('PASS: a new member opens a three-step setup that saves a weekly run and an event as they are made, returns to its step after a provider, finishes into block setup, and finds Connections and AI coach in Settings.');
+        console.log('PASS: a new member opens a three-step setup that saves a weekly run and an event as they are made, focuses its workout editor on mobile, returns to its step after a provider, finishes on the plan without starting a block, and finds Connections and AI coach in Settings.');
       } else if (width === 'add-to-day' || width === 'add-to-day-mobile') {
         await addToDayJourney({ page, origin: webOrigin, apiCall, width: width.endsWith('-mobile') ? 390 : 1280 });
         console.log('PASS: an empty date opens its Add box; a run, a ride, an activity and a saved workout are added by type to a date or to every week without copies; a block for an event starts on the Block tab and a changed rule refills its weeks on save.');

@@ -223,14 +223,13 @@ function SignIn() {
         <img src="/assets/app-icon.png" alt="" width={72} height={72} />
         <h1 className="wordmark">Très Fort</h1>
         <p className="lede">Everything you train. One plan.</p>
-        <p className="muted">Build your week with runs, lifts and timed routines. Schedule core separately from a run, with its own days and time.</p>
-        <p className="muted">New here? Sign in to create your account. Already use Très Fort? Use the same Apple account to open your plan.</p>
-        {opensBlock && <p className="muted">Your training block will open after sign-in. You can start one there if you do not have one yet.</p>}
+        <p className="muted">Plan your week here. Follow workouts and record runs in the iPhone app.</p>
+        {opensBlock && <p className="muted">Continue to open or create a training block.</p>}
         {problem && SIGNIN_PROBLEMS[problem] && <p role="alert" className="problem">{SIGNIN_PROBLEMS[problem]}</p>}
         <a className="apple-button" href={signInHref}>
-          <AppleLogo /> Sign in with Apple
+          <AppleLogo /> Continue with Apple
         </a>
-        <p className="fine">Follow workouts, use work and rest timers, and record runs in the iPhone app.</p>
+        <p className="fine">Create an account or sign in. Already use Très Fort? Use the same Apple account.</p>
       </div>
     </main>
   );

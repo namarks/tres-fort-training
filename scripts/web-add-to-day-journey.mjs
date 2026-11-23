@@ -37,13 +37,14 @@ export async function addToDayJourney({ page, origin, apiCall, width = 1280 }) {
   await cell('sat').click();
   await box.getByRole('group', { name: 'What to add', exact: true }).waitFor();
   assert.deepEqual(await box.getByRole('group', { name: 'What to add', exact: true }).getByRole('button').allInnerTexts(),
-    ['Run', 'Ride', 'Swim', 'Lift', 'At home', 'Other', 'Saved']);
+    ['Run', 'Ride', 'Swim', 'Lift', 'At home', 'Other']);
+  assert.equal(await box.getByRole('button', { name: 'My workouts', exact: true }).count(), 1);
   await box.getByRole('button', { name: 'Run', exact: true }).click();
   await box.getByRole('button', { name: 'Tempo', exact: true }).click();
   await box.getByRole('combobox', { name: 'Keep it at (optional)', exact: true }).selectOption('heart_rate');
   await box.getByRole('textbox', { name: 'Lowest heart rate', exact: true }).fill('155');
   await box.getByRole('textbox', { name: 'Highest heart rate', exact: true }).fill('165');
-  assert.match(await box.innerText(), /Saved to Workouts as “Tempo run · 20 min”/);
+  assert.match(await box.innerText(), /Workout name: “Tempo run · 20 min”/);
   assert.equal((await apiCall('GET', '/api/state')).plan.workouts.length, 1, 'Shaping a run saves nothing.');
   await fits('The Add box');
   await box.getByRole('button', { name: /^Add to Sat, / }).click();
@@ -103,9 +104,9 @@ export async function addToDayJourney({ page, origin, apiCall, width = 1280 }) {
   assert(ride && ride.exercises.length === 0);
   assert.equal((await onDate('thu'))?.workout_id, ride.id);
 
-  // Saved workouts are one of the types.
+  // Reusing a saved workout is separate from choosing a new workout type.
   await cell('wed').click();
-  await box.getByRole('button', { name: 'Saved', exact: true }).click();
+  await box.getByRole('button', { name: 'My workouts', exact: true }).click();
   await box.getByRole('button', { name: /^Add to Wed, .*: Strength A$/ }).click();
   await detail.getByRole('button', { name: 'Change workout', exact: true }).waitFor();
   assert.equal((await onDate('wed'))?.workout_id, made.id);
@@ -159,7 +160,7 @@ export async function addToDayJourney({ page, origin, apiCall, width = 1280 }) {
   await box.getByRole('button', { name: 'Lift', exact: true }).click();
   await box.getByRole('searchbox', { name: 'Add an exercise', exact: true }).fill('squat');
   await box.locator('.matches button').first().click();
-  await box.getByText(/Saved to Workouts as “Lifting workout”/).waitFor();
+  await box.getByText(/Workout name: “Lifting workout”/).waitFor();
   await page.route('**/api/plan/schedule', async route => {
     await elsewhere('18:00');
     await route.continue();
@@ -261,7 +262,7 @@ export async function addToDayJourney({ page, origin, apiCall, width = 1280 }) {
   await page.goto(`${origin}/#plan`);
   await page.getByRole('heading', { name: 'Your plan', exact: true }).waitFor();
   await cell('tue').dblclick();
-  await box.getByRole('button', { name: 'Saved', exact: true }).click();
+  await box.getByRole('button', { name: 'My workouts', exact: true }).click();
   assert.equal(await box.getByRole('button', { name: /^Add to Tue, .*: Strength A$/ }).isDisabled(), false, 'One date can take a block workout.');
   await box.getByRole('radio', { name: /^Every Tuesday/ }).check();
   const blockOwned = box.getByRole('button', { name: 'Add to every Tuesday: Strength A', exact: true });
