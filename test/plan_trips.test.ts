@@ -51,10 +51,20 @@ async function storedTrips(planId: string): Promise<TripRow[]> {
 }
 
 describe('away dates over REST', () => {
-  it('adds, edits and removes a trip with version checks and an ios audit row', async () => {
-    const H = auth(await devJwt());
-    const plan = await freshPlan(H);
+  // isolatedStorage rolls each case back to this seed and version. Keep
+  // setup and independent request chains out of the same per-test budget.
+  let H: Record<string, string>;
+  let plan: { id: string; version: number };
+  const post = (body: Record<string, unknown>) => SELF.fetch(`${BASE}/api/plan/trips`, {
+    method: 'POST', headers: H, body: JSON.stringify(body),
+  });
 
+  beforeAll(async () => {
+    H = auth(await devJwt());
+    plan = await freshPlan(H);
+  });
+
+  it('adds, edits and removes a trip with version checks and an ios audit row', async () => {
     const added = await SELF.fetch(`${BASE}/api/plan/trips`, {
       method: 'POST', headers: H,
       body: JSON.stringify({
@@ -107,13 +117,7 @@ describe('away dates over REST', () => {
     expect(audits.results.map((row) => row.tool).sort()).toEqual(['add_trip', 'remove_trip', 'update_trip']);
   });
 
-  it('defaults the type to travel and rejects bad input without a write', async () => {
-    const H = auth(await devJwt());
-    const plan = await freshPlan(H);
-    const post = (body: Record<string, unknown>) => SELF.fetch(`${BASE}/api/plan/trips`, {
-      method: 'POST', headers: H, body: JSON.stringify(body),
-    });
-
+  it('rejects invalid trip creation without a write', async () => {
     const missingVersion = await post({ start: '2026-12-01', end: '2026-12-02' });
     expect(missingVersion.status).toBe(400);
     expect(await missingVersion.json()).toEqual({ error: 'invalid_fields', fields: ['expected_version'] });
@@ -139,7 +143,9 @@ describe('away dates over REST', () => {
       .json<{ version: number }>();
     expect(active.version).toBe(plan.version);
     expect(await storedTrips(plan.id)).toEqual([]);
+  });
 
+  it('defaults the type to travel and rejects invalid edits and deletes', async () => {
     const plain = await post({ start: '2026-12-01', end: '2026-12-01', expected_version: plan.version });
     expect(plain.status).toBe(200);
     const plainBody = await plain.json<{ id: string; version: number; trips: TripRow[] }>();

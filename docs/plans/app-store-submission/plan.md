@@ -170,7 +170,11 @@ needs these changes in the App Store build:
   hierarchies show the coach row behind Go to Today, and the retry's day rows
   behind the enlarged error footer; the latter also intercepted the scrolling
   gestures. The two journeys now bound scrolling above those fixed controls,
-  retaining the handoff and same-workout retry assertions. The next TestFlight
+  retaining the handoff and same-workout retry assertions. Qualification on
+  merged `4306841` then hit the REST trip test's five-second deadline, followed
+  by D1 cleanup errors. That suite now seeds one isolated plan and gives creation
+  validation and edit/delete checks separate test budgets, keeping every assertion.
+  The next TestFlight
   upload waits for a clean full release check on the exact merged commit;
   local focused checks and PR build/unit checks do not replace it.
 - **Still open:** run the waived device checks on the live build.
