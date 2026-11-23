@@ -23,17 +23,18 @@ export async function signedOutJourney({ page, origin, width }) {
     ['unrecognized-provider-message', null],
   ]) {
     await page.goto(`${origin}/${problem ? `?signin=${problem}` : ''}`);
-    const signIn = page.getByRole('link', { name: 'Sign in with Apple', exact: true });
+    const signIn = page.getByRole('link', { name: 'Continue with Apple', exact: true });
     await signIn.waitFor();
     assert.equal(await signIn.getAttribute('href'), '/auth/apple/start');
     await signIn.click({ trial: true });
     await signIn.focus();
     assert(await signIn.evaluate(element => element === document.activeElement), 'Apple sign-in remains keyboard reachable.');
     const card = page.locator('.signin-card');
-    assert.match(await card.innerText(), /Schedule core separately from a run/);
-    assert.match(await card.innerText(), /Sign in to create your account/);
+    assert.match(await card.innerText(), /Plan your week here/);
+    assert.doesNotMatch(await card.innerText(), /Schedule core separately/);
+    assert.match(await card.innerText(), /Create an account or sign in/);
     assert.match(await card.innerText(), /same Apple account/);
-    assert.match(await card.innerText(), /timers, and record runs in the iPhone app/);
+    assert.match(await card.innerText(), /Follow workouts and record runs in the iPhone app/);
     const alert = page.getByRole('alert');
     if (message) assert.equal(await alert.innerText(), message);
     else assert.equal(await alert.count(), 0, 'Unknown provider errors are not displayed as arbitrary text.');
@@ -45,11 +46,11 @@ export async function signedOutJourney({ page, origin, width }) {
   }
   for (const problem of ['', 'cancelled', 'failed', 'unavailable']) {
     await page.goto(`${origin}/${problem ? `?signin=${problem}` : ''}#block`);
-    const signIn = page.getByRole('link', { name: 'Sign in with Apple', exact: true });
+    const signIn = page.getByRole('link', { name: 'Continue with Apple', exact: true });
     await signIn.waitFor();
     assert.equal(await signIn.getAttribute('href'), '/auth/apple/start?return=%2F%23block');
     await signIn.click({ trial: true });
-    assert.match(await page.locator('.signin-card').innerText(), /Your training block will open after sign-in\. You can start one there if you do not have one yet\./);
+    assert.match(await page.locator('.signin-card').innerText(), /Continue to open or create a training block\./);
     assert.match(await page.locator('.signin-card').innerText(), /same Apple account/);
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), `${width}px block handoff sign-in stays within the viewport.`);
   }
@@ -292,7 +293,7 @@ export async function mixedWeekJourney({ page, origin, width, apiCall }) {
   };
   // A new member opens the first-run setup; skipping it leaves the empty Plan page.
   await page.goto(origin);
-  await page.getByRole('heading', { name: 'What does your usual week look like?', exact: true }).waitFor();
+  await page.getByRole('heading', { name: 'Set up your week', exact: true }).waitFor();
   await click(page.getByRole('button', { name: 'Skip setup', exact: true }));
   await page.getByRole('heading', { name: 'Plan your week', exact: true }).waitFor();
   await click(page.getByRole('button', { name: 'Create a workout', exact: true }));

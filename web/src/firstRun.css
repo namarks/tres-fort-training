@@ -26,7 +26,7 @@
 .first-run-entry small { display: block; color: var(--muted); font-size: 0.75rem; }
 .first-run-entry button.icon { min-width: 28px; min-height: 28px; padding: 0; line-height: 1; }
 .first-run-add { margin-top: auto; min-height: 44px; }
-.first-run-adder { margin-top: 1rem; max-width: 640px; }
+.first-run-adder { margin-top: 1rem; max-width: 640px; scroll-margin-top: 16px; }
 
 .first-run-panel { background: var(--surface); max-width: 760px; }
 .first-run-block { margin: 0.75rem 0 0; }

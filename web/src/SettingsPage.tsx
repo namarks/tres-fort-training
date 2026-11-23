@@ -83,7 +83,7 @@ function ConnectionsSettings({ accountId, refresh, onSignedOut }: { accountId: s
   return (
     <section aria-labelledby="connections-title">
       <h1 id="connections-title">Connections</h1>
-      <p className="muted">Where your workouts come from. Every connection is optional: you can plan here and record workouts in the iPhone app without one.</p>
+      <p className="muted">Import workouts from other apps. All connections are optional.</p>
       <ConnectionRows status={status} onSignedOut={onSignedOut} detailed />
       <details className="panel settings-more">
         <summary>Other apps and devices</summary>
@@ -154,7 +154,11 @@ export function ConnectionRows({ status, onSignedOut, detailed = false, onLeavin
           onDisconnect={() => run('whoop-disconnect', () => connectionWrites.disconnectWhoop(accountId), 'WHOOP couldn’t be disconnected. Try again.')} />}
       </ConnectionRow>
       <ConnectionRow logo="♥" tone="health" name="Apple Health" phone
-        line={{ state: 'unavailable', text: 'Connects on iPhone only, because a browser can’t read Apple Health. Open Très Fort on your iPhone, then Profile → Connections → Apple Health.' }}>
+        line={{ state: 'unavailable', text: 'Connect in the iPhone app.' }}
+        help={<details className="settings-shared">
+          <summary>How to connect</summary>
+          <p className="fine">Open Très Fort on your iPhone, then Profile → Connections → Apple Health.</p>
+        </details>}>
         <a className="ghost small button-link" href={APP_STORE_URL} target="_blank" rel="noopener noreferrer">Get the iPhone app</a>
       </ConnectionRow>
       {detailed && me.kind === 'ready' && (
@@ -169,8 +173,8 @@ export function ConnectionRows({ status, onSignedOut, detailed = false, onLeavin
   );
 }
 
-function ConnectionRow({ logo, tone, name, line, phone, children }: {
-  logo: string; tone: string; name: string; line: ConnectionLine | null; phone?: boolean; children?: React.ReactNode;
+function ConnectionRow({ logo, tone, name, line, phone, help, children }: {
+  logo: string; tone: string; name: string; line: ConnectionLine | null; phone?: boolean; help?: React.ReactNode; children?: React.ReactNode;
 }) {
   return (
     <div className={`connection-row${phone ? ' phone' : ''}`} role="group" aria-label={name}>
@@ -178,6 +182,7 @@ function ConnectionRow({ logo, tone, name, line, phone, children }: {
       <div className="connection-text">
         <strong>{name}</strong>
         <small className={line ? `connection-${line.state}` : undefined}>{line ? line.text : 'Checking…'}</small>
+        {help}
       </div>
       <div className="connection-actions">{children}</div>
     </div>
@@ -254,7 +259,7 @@ function CoachSettings({ accountId, onSignedOut }: { accountId: string; onSigned
   return (
     <section aria-labelledby="coach-title">
       <h1 id="coach-title">AI coach</h1>
-      <p className="muted">Optional. An AI app you already use, such as Claude or ChatGPT, can read your training and change your plan when you ask. Everything in Très Fort works without one.</p>
+      <p className="muted">Connect an AI app to review your training and update your plan when you ask. This is optional.</p>
 
       <div className="panel settings-panel">
         <p className="kicker">Connected apps</p>

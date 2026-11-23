@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { WEEKDAYS, type RaceGoal, type Weekday } from '../../src/types';
 import { AddWorkout } from './AddWorkout';
 import { planWrites, type StateResponse } from './api';
-import { markSetupDone, rememberSetupBlock, rememberSetupStep, safeStore, setupInProgress, setupWantsBlock, type SetupStep } from './connections';
+import { markSetupDone, rememberSetupStep, safeStore, setupInProgress, type SetupStep } from './connections';
 import { EventForm } from './EventPage';
 import { workoutSummary } from './EveryWeek';
 import { WEEKDAY_LABELS, type Workout } from './model';
@@ -42,9 +42,7 @@ export function SetupFlow({ accountId, state, write, busy, catalog, miles, refre
   const session = useMemo(() => safeStore('session'), []);
   const local = useMemo(() => safeStore('local'), []);
   const [step, setStep] = useState<SetupStep>(() => setupInProgress(session, accountId) ?? 1);
-  const [buildBlock, setBuildBlock] = useState(() => setupWantsBlock(session, accountId));
   useEffect(() => { rememberSetupStep(session, accountId, step); }, [session, accountId, step]);
-  useEffect(() => { rememberSetupBlock(session, accountId, buildBlock); }, [session, accountId, buildBlock]);
 
   const leave = (hash: string, finished: boolean) => {
     markSetupDone(local, accountId);
@@ -63,12 +61,10 @@ export function SetupFlow({ accountId, state, write, busy, catalog, miles, refre
       </div>
       {step === 1 && <WeekStep state={state} write={write} busy={busy} catalog={catalog} miles={miles} accountId={accountId}
         onNext={() => setStep(2)} />}
-      {step === 2 && <GoalStep state={state} write={write} busy={busy} miles={miles} buildBlock={buildBlock}
-        onBuildBlock={setBuildBlock} onBack={() => setStep(1)} onNext={() => setStep(3)} />}
+      {step === 2 && <GoalStep state={state} write={write} busy={busy} miles={miles} onBack={() => setStep(1)} onNext={() => setStep(3)} />}
       {step === 3 && <ConnectStep accountId={accountId} refresh={refresh} onSignedOut={onSignedOut} onBack={() => setStep(2)}
         onLeaving={() => rememberSetupStep(session, accountId, 3)}
-        onCoach={() => leave('#settings/coach', true)}
-        onFinish={() => leave(buildBlock && state.plan?.race ? '#block/start' : '#plan', true)} />}
+        onFinish={() => leave('#plan', true)} />}
     </main>
   );
 }
@@ -79,7 +75,23 @@ function WeekStep({ state, write, busy, catalog, miles, accountId, onNext }: {
   state: StateResponse; write: Write; busy: boolean; catalog: Catalog; miles: boolean; accountId: string; onNext: () => void;
 }) {
   const [adding, setAdding] = useState<Weekday | null>(null);
+  const editor = useRef<HTMLDivElement>(null);
+  const dayButtons = useRef<Partial<Record<Weekday, HTMLButtonElement | null>>>({});
+  const lastDay = useRef<Weekday | null>(null);
   const plan = state.plan;
+  const editing = adding !== null && plan !== null;
+  useEffect(() => {
+    if (adding && editor.current) {
+      lastDay.current = adding;
+      editor.current.focus({ preventScroll: true });
+      editor.current.scrollIntoView({ block: 'start', behavior: 'instant' });
+    } else if (!adding && lastDay.current) {
+      const button = dayButtons.current[lastDay.current];
+      if (button?.disabled) button.closest<HTMLElement>('[role="listitem"]')?.focus();
+      else button?.focus();
+      lastDay.current = null;
+    }
+  }, [adding, plan?.id]);
   const schedule = plan?.schedule ?? EMPTY_WEEK;
   const workouts = useMemo(() => choosableWorkouts((plan?.workouts ?? []) as Workout[]), [plan]);
   const nameOf = (id: string) => workouts.find((workout) => workout.id === id)?.name ?? 'Unavailable workout';
@@ -99,15 +111,15 @@ function WeekStep({ state, write, busy, catalog, miles, accountId, onNext }: {
 
   return (
     <section className="first-run-step" aria-labelledby="setup-title">
-      <h1 id="setup-title">What does your usual week look like?</h1>
-      <p className="muted first-run-lead">Add what you do on each day: a run, a ride, lifting, a class, soccer. It repeats every week, and you can change any single date later. Days you leave empty are rest days.</p>
-      <div className="first-run-week" role="list" aria-label="Your usual week">
+      <h1 id="setup-title">Set up your week</h1>
+      <p className="muted first-run-lead">Add workouts to your weekly routine. It repeats each week; empty days are rest days.</p>
+      {!editing && <div className="first-run-week" role="list" aria-label="Your usual week">
         {WEEKDAYS.map((day) => {
           const draft = routineDay(schedule, day);
           const ids = [...(draft.primary ? [draft.primary] : []), ...draft.extras];
           const name = WEEKDAY_LABELS[day];
           return (
-            <div key={day} role="listitem" className={`first-run-day${adding === day ? ' on' : ''}`} aria-label={name}>
+            <div key={day} role="listitem" tabIndex={-1} className={`first-run-day${adding === day ? ' on' : ''}`} aria-label={name}>
               <strong className="first-run-dayname">{name.slice(0, 3)}</strong>
               {ids.length === 0 && <span className="first-run-rest">Rest</span>}
               {ids.map((id) => {
@@ -119,14 +131,14 @@ function WeekStep({ state, write, busy, catalog, miles, accountId, onNext }: {
                   </span>
                 );
               })}
-              <button type="button" className="ghost small first-run-add" disabled={busy || routineDayFull(draft)}
+              <button type="button" className="ghost small first-run-add" ref={(button) => { dayButtons.current[day] = button; }} disabled={busy || routineDayFull(draft)}
                 aria-label={`Add to ${name}`} onClick={() => open(day)}>+ Add</button>
             </div>
           );
         })}
-      </div>
+      </div>}
       {adding && plan && (
-        <div className="first-run-adder">
+        <div className="first-run-adder" ref={editor} tabIndex={-1} role="region" aria-label={`Add to every ${WEEKDAY_LABELS[adding]}`}>
           <AddWorkout key={adding} title={`Add to every ${WEEKDAY_LABELS[adding]}`} action={`Add to every ${WEEKDAY_LABELS[adding]}`}
             state={state} accountId={accountId} catalog={catalog} miles={miles} write={write} busy={busy}
             unavailable={(workout) => routineAddProblem(schedule, adding, workout.id)}
@@ -142,40 +154,32 @@ function WeekStep({ state, write, busy, catalog, miles, accountId, onNext }: {
             onCancel={() => setAdding(null)} />
         </div>
       )}
-      <div className="first-run-foot">
-        <button type="button" className="primary big" disabled={busy} onClick={onNext}>{empty ? 'Next, plan later' : 'Next'}</button>
-        <span className="first-run-tail">{empty ? 'You can fill in your week on the Plan page any time.' : 'Saved. Times and reminders are on the Plan page.'}</span>
-      </div>
+      {!editing && <div className="first-run-foot">
+        <button type="button" className="primary big" disabled={busy} onClick={onNext}>{empty ? 'Skip for now' : 'Next'}</button>
+      </div>}
     </section>
   );
 }
 
 // ---- Step 2: a goal event -----------------------------------------------------
 
-function GoalStep({ state, write, busy, miles, buildBlock, onBuildBlock, onBack, onNext }: {
+function GoalStep({ state, write, busy, miles, onBack, onNext }: {
   state: StateResponse; write: Write; busy: boolean; miles: boolean;
-  buildBlock: boolean; onBuildBlock: (on: boolean) => void; onBack: () => void; onNext: () => void;
+  onBack: () => void; onNext: () => void;
 }) {
   const race = state.plan?.race ?? null;
   const [choosing, setChoosing] = useState(false);
   const save = async (next: RaceGoal) => {
     if (await write((at) => planWrites.setEvent(next, at))) onNext();
   };
-  const blockChoice = (
-    <label className="check first-run-block">
-      <input type="checkbox" checked={buildBlock} onChange={(event) => onBuildBlock(event.target.checked)} />
-      Build up to it with a training block (you’ll set it up after this)
-    </label>
-  );
 
   return (
     <section className="first-run-step" aria-labelledby="setup-title">
-      <h1 id="setup-title">Working toward something?</h1>
-      <p className="muted first-run-lead">A race, a long ride, a swim, a trip or any day you’re training for. It’s optional: your usual week works on its own.</p>
+      <h1 id="setup-title">Add an event goal?</h1>
+      <p className="muted first-run-lead">Add a race or event to your plan, or skip for now.</p>
       {race && !choosing ? (
         <div className="panel first-run-panel">
           <p><strong>{race.name}</strong>{race.date ? ` · ${race.date}` : ''}</p>
-          {blockChoice}
           <div className="first-run-foot">
             <button type="button" className="ghost" onClick={onBack}>Back</button>
             <button type="button" className="primary big" onClick={onNext}>Next</button>
@@ -185,15 +189,13 @@ function GoalStep({ state, write, busy, miles, buildBlock, onBuildBlock, onBack,
       ) : choosing || race ? (
         <div className="panel first-run-panel">
           <EventForm race={race} miles={miles} busy={busy} onSave={save} submitLabel="Save and continue"
-            cancelLabel="Not now" onCancel={() => { setChoosing(false); if (!race) onBuildBlock(false); }}>
-            {blockChoice}
-          </EventForm>
+            cancelLabel="Cancel" onCancel={() => setChoosing(false)} />
         </div>
       ) : (
         <div className="first-run-foot">
           <button type="button" className="ghost" onClick={onBack}>Back</button>
-          <button type="button" className="primary big" onClick={() => { setChoosing(true); onBuildBlock(true); }}>Yes, add an event</button>
-          <button type="button" className="ghost" onClick={() => { onBuildBlock(false); onNext(); }}>Not right now</button>
+          <button type="button" className="primary big" onClick={() => setChoosing(true)}>Add event</button>
+          <button type="button" className="ghost" onClick={onNext}>Skip for now</button>
         </div>
       )}
     </section>
@@ -202,30 +204,19 @@ function GoalStep({ state, write, busy, miles, buildBlock, onBuildBlock, onBack,
 
 // ---- Step 3: connect apps -----------------------------------------------------
 
-function ConnectStep({ accountId, refresh, onSignedOut, onBack, onLeaving, onCoach, onFinish }: {
+function ConnectStep({ accountId, refresh, onSignedOut, onBack, onLeaving, onFinish }: {
   accountId: string; refresh: number; onSignedOut: (error?: unknown) => void; onBack: () => void;
-  onLeaving: () => void; onCoach: () => void; onFinish: () => void;
+  onLeaving: () => void; onFinish: () => void;
 }) {
   const status = useConnectionStatus(accountId, refresh, onSignedOut);
   return (
     <section className="first-run-step" aria-labelledby="setup-title">
-      <h1 id="setup-title">Bring in your workouts</h1>
-      <p className="muted first-run-lead">Connect where your rides, runs and other workouts are recorded, so they land on your plan. Every one is optional, and you can change them later in Settings.</p>
+      <h1 id="setup-title">Connect your apps</h1>
+      <p className="muted first-run-lead">Optional. Sync completed workouts from your apps and devices.</p>
       <ConnectionRows status={status} onSignedOut={onSignedOut} onLeaving={onLeaving} />
-      <div className="connection-rows">
-        <span className="kicker">Optional</span>
-        <div className="connection-row" role="group" aria-label="AI coach">
-          <span className="connection-logo coach" aria-hidden="true">AI</span>
-          <div className="connection-text">
-            <strong>AI coach</strong>
-            <small>Let Claude, ChatGPT or another AI app read your training and adjust your plan when you ask. Everything works without one.</small>
-          </div>
-          <div className="connection-actions"><button type="button" className="ghost" onClick={onCoach}>Set up</button></div>
-        </div>
-      </div>
       <div className="first-run-foot">
         <button type="button" className="ghost" onClick={onBack}>Back</button>
-        <button type="button" className="primary big" onClick={onFinish}>Finish</button>
+        <button type="button" className="primary big" onClick={onFinish}>View my plan</button>
       </div>
     </section>
   );

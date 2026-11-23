@@ -54,8 +54,8 @@ let kept: { key: string; held: Unplaced; choices: Choices } | null = null;
 /**
  * The Add box (owner, 2026-11-17: "on this day I want to do a run, and then
  * tweak the details"). Pick what it is, shape it, and one button saves it
- * as a workout and places it. Saved workouts are one of the types. Where it
- * goes is the caller's: a date, a weekday, or a week of a new block.
+ * as a workout and places it. Saved workouts have a separate reuse action.
+ * Where it goes is the caller's: a date, a weekday, or a week of a new block.
  */
 export function AddWorkout(props: {
   title: string;
@@ -235,7 +235,7 @@ export function AddWorkout(props: {
 
   const strip = (
     <div className="add-kinds" role="group" aria-label="What to add">
-      {ADD_KINDS.map((entry) => (
+      {ADD_KINDS.filter((entry) => entry.kind !== 'saved').map((entry) => (
         <button key={entry.kind} type="button" className={kind === entry.kind ? 'add-kind on' : 'add-kind'}
           aria-pressed={kind === entry.kind} disabled={busy} onClick={() => choose(entry.kind)}>{entry.label}</button>
       ))}
@@ -254,7 +254,7 @@ export function AddWorkout(props: {
     </p>
   ) : preview?.ok && kind !== 'other' && kind !== 'saved' && (
     <p className="add-name fine">
-      {preview.creation.kind === 'existing' ? preview.note : <>Saved to Workouts as “{preview.name}”.{preview.note ? ` ${preview.note}` : ''}</>}
+      {preview.creation.kind === 'existing' ? preview.note : <>Workout name: “{preview.name}”.{preview.note ? ` ${preview.note}` : ''}</>}
       {' '}{!renaming && preview.creation.kind !== 'existing' && (
         <button type="button" className="link" onClick={() => { setRenaming(true); setTyped(typed || preview.name); }}>Rename</button>
       )}
@@ -271,7 +271,13 @@ export function AddWorkout(props: {
     <section className="add-box" aria-labelledby={`${ids}-title`}>
       <h3 id={`${ids}-title`}>{props.title}</h3>
       {strip}
-      {kind === null && <p className="fine muted">Pick what it is, then set its details. Saved has the workouts you already made.</p>}
+      {saved.length > 0 && (
+        <div className="form-actions">
+          <button type="button" className={kind === 'saved' ? 'add-chip on' : 'add-chip'} aria-pressed={kind === 'saved'}
+            aria-controls={kind === 'saved' ? `${ids}-saved-list` : undefined}
+            disabled={busy} onClick={() => choose('saved')}>My workouts</button>
+        </div>
+      )}
       {blocked && kind !== null && <p className="problem" role="status">{blocked}</p>}
 
       {kind === 'run' && !editingSteps && (
@@ -298,7 +304,7 @@ export function AddWorkout(props: {
                 aria-pressed={typed.trim().toLowerCase() === name.toLowerCase()} onClick={() => setTyped(name)}>{name}</button>
             ))}
           </div>
-          <p className="fine muted">An activity has no sets to log. On the day, the iPhone app offers to log it, or counts a synced one.</p>
+          <p className="fine muted">Log it in the iPhone app or sync it that day. No sets to log.</p>
           {!unfinished && preview?.ok && preview.note && <p className="fine">{preview.note}</p>}
         </div>
       )}
@@ -385,7 +391,7 @@ export function AddWorkout(props: {
       )}
 
       {kind === 'saved' && (
-        <div className="add-fields">
+        <div className="add-fields" id={`${ids}-saved-list`}>
           {props.children}
           {saved.length === 0 ? <p className="muted">You have no saved workouts yet. Pick a type above to make one.</p> : (
             <>
