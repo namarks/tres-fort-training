@@ -46,8 +46,9 @@ final class MemberActivationJourneyTests: XCTestCase {
     // Short drags, not swipes: a fling can carry a mid-form row such as
     // "Manage AI access" past the visible area between two checks.
     private func scrollAndTap(_ element: XCUIElement, in app: XCUIApplication,
+                              above bottomBar: XCUIElement? = nil,
                               file: StaticString = #filePath, line: UInt = #line) {
-        guard app.scroll(toReveal: element) else {
+        guard app.scroll(toReveal: element, above: bottomBar) else {
             XCTFail("Control is not reachable after scrolling: \(element.description)", file: file, line: line)
             return
         }
@@ -304,7 +305,9 @@ final class MemberActivationJourneyTests: XCTestCase {
         tap(app.buttons["Sign in with Apple"], in: app)
         tap(app.buttons["Get started"], in: app)
         tap(app.buttons["setup.next"], in: app)
-        scrollAndTap(app.buttons["setup.coach"], in: app)
+        // The Form can report this row as hittable behind the fixed footer.
+        // Reveal it above Go to Today before testing the coach handoff.
+        scrollAndTap(app.buttons["setup.coach"], in: app, above: app.buttons["setup.done"])
         XCTAssertTrue(app.navigationBars["Connect your coach"].waitForExistence(timeout: UITestWait.screen))
         XCTAssertFalse(app.staticTexts["Connect your apps"].exists)
         tap(app.navigationBars["Connect your coach"].buttons["Done"], in: app)

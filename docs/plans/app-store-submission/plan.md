@@ -1,6 +1,6 @@
 # First App Store Submission
 
-Slug: app-store-submission · Status: active · Updated: 2026-11-21 · Theme: release
+Slug: app-store-submission · Status: active · Updated: 2026-11-23 · Theme: release
 
 ## Goal
 
@@ -165,8 +165,14 @@ needs these changes in the App Store build:
   every bar, the pinned action and the keyboard, taking 5 to 9 seconds on the
   hosted runner, so two matching polls could not fit in 15 seconds. The wait
   now reads the switch from one snapshot per poll and measures the visible band
-  once. Build 85 waits for a clean full run on the merged commit. Confirm the
-  check on the exact commit before every upload.
+  once. The 2026-11-23 nightly on `1c2e4a8` failed shard 4 on the coach-from-setup
+  handoff and the core schedule retry, both twice. Its screenshots and UI
+  hierarchies show the coach row behind Go to Today, and the retry's day rows
+  behind the enlarged error footer; the latter also intercepted the scrolling
+  gestures. The two journeys now bound scrolling above those fixed controls,
+  retaining the handoff and same-workout retry assertions. The next TestFlight
+  upload waits for a clean full release check on the exact merged commit;
+  local focused checks and PR build/unit checks do not replace it.
 - **Still open:** run the waived device checks on the live build.
 
 **Backend constraint:** the live 1.1 (70) client, and 1.0 (55) until users update, must
