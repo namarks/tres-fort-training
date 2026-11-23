@@ -61,17 +61,20 @@ final class MixedWeekSetupJourneyTests: XCTestCase {
         let save = app.buttons["composer.save"]
         XCTAssertEqual(save.label, "Add to Tuesdays")
         save.tapWhenReady()
-        XCTAssertTrue(app.staticTexts["composer.error"].waitForExistence(timeout: UITestWait.screen))
+        let error = app.staticTexts["composer.error"]
+        XCTAssertTrue(error.waitForExistence(timeout: UITestWait.screen))
         XCTAssertFalse(app.navigationBars["Review workout"].exists)
         XCTAssertFalse(app.navigationBars["Edit Core routine"].exists)
         XCTAssertFalse(app.navigationBars["Core routine"].exists)
         let retry = app.buttons["composer.save"]
         XCTAssertEqual(retry.label, "Try again")
         app.openComposerWhen()
-        XCTAssertTrue(app.scroll(toReveal: app.buttons["composer.day.tue"]))
+        // The failure makes the fixed footer taller. Keep both the revealed
+        // rows and scrolling gestures above its error, not just Try again.
+        XCTAssertTrue(app.scroll(toReveal: app.buttons["composer.day.tue"], above: error))
         XCTAssertTrue(app.buttons["composer.day.tue"].isSelected)
         XCTAssertFalse(app.buttons["composer.day.thu"].isSelected)
-        XCTAssertTrue(app.scroll(toReveal: app.switches["composer.alongside"]))
+        XCTAssertTrue(app.scroll(toReveal: app.switches["composer.alongside"], above: error))
         XCTAssertEqual(app.switches["composer.alongside"].value as? String, "1")
         assertCounts(in: app, workouts: 2, schedules: 2)
 
