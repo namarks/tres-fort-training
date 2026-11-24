@@ -1,10 +1,10 @@
 # iPhone + iPad + Apple Watch development spec (docs/plans/apple-watch).
 # Generate it explicitly: cd ios && xcodegen generate --spec project-watch.yml
 #
-# The TestFlight spec (project.yml) and the App Store spec
-# (project-app-store.yml) do not define the Watch app, so neither build
-# carries it. A TestFlight build carries it only when the owner asks:
-# TESTFLIGHT_WATCH=1 makes scripts/upload-testflight.sh archive this spec.
+# The iPhone spec (project.yml) and the App Store spec
+# (project-app-store.yml) do not define the Watch app. A TestFlight build
+# carries it: scripts/upload-testflight.sh archives this spec unless
+# TESTFLIGHT_WATCH=0, and the App Store candidate never does.
 # This spec adds the Watch app
 # target and embeds it in the iPhone app; XcodeGen appends these arrays to
 # the ones project.yml declares.

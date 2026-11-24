@@ -115,7 +115,12 @@ PY
     '#!/usr/bin/env bash' \
     'printf "%s\n" "$@" >> "${STUB_XCODEBUILD_LOG}"' \
     'if [ "${STUB_ARCHIVE_SDK}" = 1 ]; then mkdir -p build/TresFort.xcarchive/Products/Applications/TresFort.app; touch build/TresFort.xcarchive/Products/Applications/TresFort.app/pose_landmarker_full.task; fi' \
-    'case "${STUB_ARCHIVE_WATCH}" in' \
+    'archive_watch="${STUB_ARCHIVE_WATCH}"' \
+    'if [ "${archive_watch}" = spec ]; then' \
+    '  archive_watch=none' \
+    '  if grep -qx "generate --spec project-watch.yml" "${STUB_XCODEGEN_LOG}"; then archive_watch=full; fi' \
+    'fi' \
+    'case "${archive_watch}" in' \
     '  app) mkdir -p build/TresFort.xcarchive/Products/Applications/TresFort.app/Watch/TresFortWatch.app ;;' \
     '  full) mkdir -p build/TresFort.xcarchive/Products/Applications/TresFort.app/Watch/TresFortWatch.app/PlugIns/TresFortWatchWidgets.appex ;;' \
     'esac' \
@@ -191,7 +196,7 @@ PY
     STUB_XCODEGEN_LOG="${xcodegen_log}" \
     STUB_PROJECT_CONTENTS="${CASE_PROJECT_CONTENTS-${public_project_contents}}" \
     STUB_ARCHIVE_SDK="${CASE_ARCHIVE_SDK:-0}" \
-    STUB_ARCHIVE_WATCH="${CASE_ARCHIVE_WATCH:-none}" \
+    STUB_ARCHIVE_WATCH="${CASE_ARCHIVE_WATCH:-spec}" \
     STUB_WATCH_BUILD="${CASE_WATCH_BUILD-30}" \
     STUB_COMPLICATION_BUILD="${CASE_COMPLICATION_BUILD-30}" \
     STUB_WATCH_VERSION="${CASE_WATCH_VERSION-0.1.0}" \
@@ -293,8 +298,8 @@ run_case \
   "UPLOAD SUCCEEDED with no errors"
 assert_status 0
 grep -q 'TARGETED_DEVICE_FAMILY' "${xcodebuild_log}" && fail "default archive overrode the device family"
-grep -qx 'generate --spec project.yml' "${xcodegen_log}" || fail "default archive selected the wrong spec"
-[ -s "${plutil_log}" ] && fail "default archive ran the public packaging check"
+grep -qx 'generate --spec project-watch.yml' "${xcodegen_log}" || fail "default archive selected the wrong spec"
+grep -q 'UIDeviceFamily' "${plutil_log}" && fail "default archive ran the public packaging check"
 
 case_number=$((case_number + 1))
 CASE_APP_STORE_BUILD=0 run_case \
@@ -302,8 +307,8 @@ CASE_APP_STORE_BUILD=0 run_case \
   0 \
   "UPLOAD SUCCEEDED with no errors"
 assert_status 0
-grep -qx 'generate --spec project.yml' "${xcodegen_log}" || fail "beta archive selected the wrong spec"
-[ -s "${plutil_log}" ] && fail "beta archive ran the public packaging check"
+grep -qx 'generate --spec project-watch.yml' "${xcodegen_log}" || fail "beta archive selected the wrong spec"
+grep -q 'UIDeviceFamily' "${plutil_log}" && fail "beta archive ran the public packaging check"
 
 case_number=$((case_number + 1))
 CASE_APP_STORE_BUILD=1 run_case \
@@ -315,6 +320,8 @@ assert_contains "Uploaded 0.1.0 (30)."
 grep -qx 'generate --spec project-app-store.yml' "${xcodegen_log}" || fail "missing App Store spec selection"
 grep -q 'TresFort.app/Info.plist' "${plutil_log}" || fail "app bundle not verified"
 grep -q 'TresFortWidgets.appex/Info.plist' "${plutil_log}" || fail "widget bundle not verified"
+grep -q 'Watch/TresFortWatch.app' "${plutil_log}" && fail "App Store candidate looked for a Watch app"
+assert_not_contains "Apple Watch app"
 
 case_number=$((case_number + 1))
 CASE_APP_STORE_BUILD=1 CASE_APP_DEVICE_FAMILY='[1]' run_case \
@@ -491,8 +498,20 @@ assert_contains "TESTFLIGHT_EXTERNAL must be 0 or 1"
 assert_no_build_activity
 
 case_number=$((case_number + 1))
+run_case \
+  "default TestFlight build archives the Watch spec and verifies the Watch app and its complication" \
+  0 \
+  "UPLOAD SUCCEEDED with no errors"
+assert_status 0
+assert_contains "Archiving the TestFlight build with the Apple Watch app"
+assert_contains "Uploaded 0.1.0 (30)."
+grep -qx 'generate --spec project-watch.yml' "${xcodegen_log}" || fail "default build selected the wrong spec"
+grep -q 'CFBundleVersion.*Watch/TresFortWatch.app/Info.plist' "${plutil_log}" || fail "Watch app version not verified"
+grep -q 'CFBundleVersion.*TresFortWatchWidgets.appex/Info.plist' "${plutil_log}" || fail "complication version not verified"
+
+case_number=$((case_number + 1))
 CASE_WATCH=1 CASE_ARCHIVE_WATCH=full run_case \
-  "Watch build archives the Watch spec and verifies the Watch app and its complication" \
+  "explicit Watch build archives the Watch spec and verifies the Watch app and its complication" \
   0 \
   "UPLOAD SUCCEEDED with no errors"
 assert_status 0
@@ -506,16 +525,28 @@ grep -qx '../scripts/testflight-distribute.mjs --build 30 --wait 45' "${node_log
 
 case_number=$((case_number + 1))
 CASE_WATCH=0 run_case \
-  "explicit build without the Watch app keeps the default project" \
+  "explicit build without the Watch app archives the iPhone-only project" \
   0 \
   "UPLOAD SUCCEEDED with no errors"
 assert_status 0
+assert_contains "TESTFLIGHT_WATCH=0: archiving the TestFlight build without the Apple Watch app"
+assert_not_contains "with the Apple Watch app"
 grep -qx 'generate --spec project.yml' "${xcodegen_log}" || fail "build without the Watch app selected the wrong spec"
 [ -s "${plutil_log}" ] && fail "build without the Watch app inspected Watch bundles"
 
 case_number=$((case_number + 1))
-CASE_WATCH=1 run_case \
-  "Watch build whose archive has no Watch app fails before export" \
+CASE_ARCHIVE_WATCH=none run_case \
+  "default build whose archive has no Watch app fails before export" \
+  0 \
+  "UPLOAD SUCCEEDED with no errors"
+assert_status 1
+assert_contains "the archive has no"
+assert_contains "Watch/TresFortWatch.app"
+assert_no_export
+
+case_number=$((case_number + 1))
+CASE_WATCH=1 CASE_ARCHIVE_WATCH=none run_case \
+  "explicit Watch build whose archive has no Watch app fails before export" \
   0 \
   "UPLOAD SUCCEEDED with no errors"
 assert_status 1
@@ -562,12 +593,12 @@ assert_contains "Expected version 0.1.0 (30)"
 assert_no_export
 
 case_number=$((case_number + 1))
-CASE_ARCHIVE_WATCH=full run_case \
-  "default build whose archive carries a Watch app fails before export" \
+CASE_WATCH=0 CASE_ARCHIVE_WATCH=full run_case \
+  "build without the Watch app whose archive carries one fails before export" \
   0 \
   "UPLOAD SUCCEEDED with no errors"
 assert_status 1
-assert_contains "carries an Apple Watch app that was not asked for"
+assert_contains "carries an Apple Watch app this build must not hold"
 assert_no_export
 
 case_number=$((case_number + 1))
@@ -576,8 +607,17 @@ CASE_APP_STORE_BUILD=1 CASE_ARCHIVE_WATCH=full run_case \
   0 \
   "UPLOAD SUCCEEDED with no errors"
 assert_status 1
-assert_contains "carries an Apple Watch app that was not asked for"
+assert_contains "carries an Apple Watch app this build must not hold"
 assert_no_export
+
+case_number=$((case_number + 1))
+CASE_WATCH=0 CASE_APP_STORE_BUILD=1 run_case \
+  "App Store candidate accepts an explicit build without the Watch app" \
+  0 \
+  "UPLOAD SUCCEEDED with no errors"
+assert_status 0
+assert_not_contains "Apple Watch app"
+grep -qx 'generate --spec project-app-store.yml' "${xcodegen_log}" || fail "App Store candidate selected the wrong spec"
 
 case_number=$((case_number + 1))
 CASE_WATCH=1 CASE_APP_STORE_BUILD=1 CASE_LOCAL_BUILD=1 run_case \

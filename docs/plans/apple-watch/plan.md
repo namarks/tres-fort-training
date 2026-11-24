@@ -107,8 +107,8 @@ recorded on the iPhone.
       `ios/project-watch.yml`, which includes `project.yml` and embeds the
       Watch app in the iPhone app. The TestFlight spec (`project.yml`) and
       the App Store spec (`project-app-store.yml`) don't define it, so
-      neither build carries the Watch app until the owner says so (P6's
-      opt-in).
+      neither carries the Watch app; a TestFlight build archives
+      `project-watch.yml` (P6).
     - Today on the wrist: the day's list as the iPhone shows it, finished
       rows shrunk and the next item on navy, a rest day with what is coming.
       The iPhone builds the day from Today's own rows and words
@@ -231,16 +231,25 @@ recorded on the iPhone.
     The iPhone stays locked in a pocket for it, so the check covers a tap
     that wakes the iPhone app in the background, and the rest's
     notification on the wrist.
-  - The TestFlight script can build it when asked: `TESTFLIGHT_WATCH=1 npm
-    run ios:testflight` archives `project-watch.yml`, and refuses to export
-    unless the archive holds the Watch app and its complication at the
-    build's own version. A build that didn't ask must hold no Watch app,
-    and the App Store candidate can't be combined with it
-    (`test/upload-testflight.test.sh`). Not yet done: a signed archive.
-    Signing needs two new identifiers in the owner's Apple developer
-    account, the Watch app and its complication, which Xcode registers on
-    the first signed archive, so that run waits for the owner's go-ahead
-    like the upload itself.
+  - The TestFlight script builds it: `npm run ios:testflight` archives
+    `project-watch.yml`, and refuses to export unless the archive holds the
+    Watch app and its complication at the build's own version.
+    `TESTFLIGHT_WATCH=0` leaves the Watch app out, and that build and the
+    App Store candidate must hold none; asking for the Watch app on the App
+    Store candidate is refused (`test/upload-testflight.test.sh`). The
+    Watch app was opt-in for build 87 and became the default on 2026-11-24,
+    the owner's choice, so a tester's Watch keeps the app from build to
+    build.
+  - Done on 2026-11-24 with the owner's go-ahead: TestFlight build 1.2 (87)
+    carries the Watch app and its complication, built from `5774ba0` after
+    the release check passed on that commit, and Apple approved it for
+    external testers. The two identifiers, the Watch app and its
+    complication, are registered with the App Group the iPhone app uses.
+    The command-line build could not register them: it found no Apple
+    account, as it has before whenever signing needed something new, so
+    the Xcode app registered them from its Signing & Capabilities pane and
+    the same command then archived, exported and uploaded.
+  - Still open, and the reason P6 is: nobody has run it on a real Watch.
 
 ## Execution frontier
 
@@ -252,27 +261,28 @@ recorded on the iPhone.
 |---|---|---|---|
 | P1 | coordinates_with | plan:planned-runs | Reads the planned-run step format and marks the slot done through planned-runs P7's path. |
 | P2 | coordinates_with | plan:run-recorder | Moves pure recorder logic into `ios/Shared` and saves Watch runs through the recorder's store and upload. |
-| P4 | coordinates_with | plan:app-store-submission | The Watch app stays out of the TestFlight and App Store projects until the owner says it ships; then the project files, privacy answers and review notes change. |
+| P4 | coordinates_with | plan:app-store-submission | TestFlight builds carry the Watch app; it stays out of the App Store project until the owner says it ships, and then the project files, privacy answers and review notes change. |
 | P5 | coordinates_with | plan:ipad-workout-station | Reuses the Station link's display state and guarded commands over WatchConnectivity. |
-| P6 | gated_by | external:apple-watch-lifting-device-verification | Needs a member with an Apple Watch and a TestFlight build that carries the Watch app, which the owner has to authorize: the script can build one when asked, but signing for the two Watch bundle ids is not set up, and the owner has no Watch. |
+| P6 | gated_by | external:apple-watch-lifting-device-verification | Needs a member with an Apple Watch to run a lifting workout from the wrist on TestFlight build 1.2 (87) or later, which carries the Watch app; the owner has no Watch. |
 | P1 | gated_by | external:apple-watch-device-verification | Runs on the wrist (P1 to P3) wait for a member who runs with an Apple Watch to test them on an authorized TestFlight build; GPS, wrist heart rate and haptics can't be trusted from the simulator. |
 
 ## Next step
 
-**Now (@owner):** Choose when the Watch app goes to TestFlight and who
-with an Apple Watch tries it: that is P6. P4 and P5 are in the repository:
-Today on the wrist with its complication, the set the iPhone's runner is on
-with one tap to log it, and Start on the day's leading row. All of it was
-built on a Mac on 2026-11-22 and ran on 40 mm and 46 mm Watch simulators
-with the fictional day and workout; every tap and Start is tested against
-the iPhone's real runner in the iOS tests. No real Watch has run any of it,
-and no TestFlight or App Store build carries the Watch app. The upload
-script builds one only when asked (`TESTFLIGHT_WATCH=1`); the first signed
-archive, which registers the Watch app and its complication with Apple, and
-the upload both wait for the owner's go-ahead. The owner chose "the whole day, lifting
-first" on 2026-11-22 from three mocked options. Runs on the wrist (P1 to
-P3) stay gated on a member who runs with an Apple Watch, and P2 starts only
-after the recorder's device checks for version 1.2.
+**Now (@owner):** Ask a member with an Apple Watch to install TestFlight
+build 1.2 (87) and run a lifting workout from the wrist: that is P6. P4 and
+P5 are in the repository: Today on the wrist with its complication, the set
+the iPhone's runner is on with one tap to log it, and Start on the day's
+leading row. All of it was built on a Mac on 2026-11-22 and ran on 40 mm
+and 46 mm Watch simulators with the fictional day and workout; every tap
+and Start is tested against the iPhone's real runner in the iOS tests.
+Build 87, uploaded on 2026-11-24, is the first build that carries the Watch
+app, and it is with internal and external testers. No real Watch has run
+any of it. Every TestFlight build carries the Watch app from now on, the
+owner's choice on 2026-11-24 (`TESTFLIGHT_WATCH=0` leaves it out), and App
+Store builds never do. The owner chose "the
+whole day, lifting first" on 2026-11-22 from three mocked options. Runs on
+the wrist (P1 to P3) stay gated on a member who runs with an Apple Watch,
+and P2 starts only after the recorder's device checks for version 1.2.
 
 ## Notes / open questions
 
@@ -289,13 +299,20 @@ after the recorder's device checks for version 1.2.
   and offline rules) is not planned.
 - The owner has no Apple Watch. P6 and P3 need a member who has one; until
   then the simulator is the evidence, and the plan says so.
-- A TestFlight build with the Watch app comes from
-  `TESTFLIGHT_WATCH=1 scripts/upload-testflight.sh`, which archives
-  `project-watch.yml`. It still needs signing for two new identifiers, the
-  Watch app and its complication, each with the App Group the iPhone app
-  already uses. That is the owner's call. Every TestFlight build goes to
-  external testers by default, so the first Watch build also goes through
-  Apple's beta review unless it is kept internal (`TESTFLIGHT_EXTERNAL=0`).
+- A TestFlight build comes from `scripts/upload-testflight.sh`, which
+  archives `project-watch.yml`. Its two identifiers, the Watch app and its
+  complication, were registered for build 87, each with the App Group the
+  iPhone app already uses, and their signing files are on the release Mac.
+  Every TestFlight build goes to external testers by default; build 87
+  went through Apple's beta review that way. A build made with
+  `TESTFLIGHT_WATCH=0` leaves the Watch app out, and testers' Watches may
+  lose the app when they install it. The default has not yet made a build:
+  the first one is the next TestFlight upload.
+- The release Mac's command-line build signs through Xcode's account and
+  has failed with "No Accounts" each time signing needed something new
+  from Apple (a capability, an entitlement, these identifiers), while the
+  Xcode app itself stayed signed in. Signing that doesn't depend on that
+  account is not built.
 - Open for P6: whether the Watch also runs a strength workout session
   during lifting, which keeps the app in front on a wrist raise and records
   heart rate to Apple Health. It needs a Health permission on the Watch and

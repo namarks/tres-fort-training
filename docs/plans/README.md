@@ -234,10 +234,11 @@ integration or social breadth.
   gated on a member who runs with an Apple Watch. P0's wrist layouts are in
   the repository, and so is P4: the Watch app with Today on the wrist, the
   complication and its build in CI, and P5: the set on the wrist with Log,
-  the crown and the rest, and Start from the wrist. A lifting workout on a
-  real Watch (P6) waits for a member with one and a TestFlight build. The
-  Watch app has its own project spec and stays out of TestFlight and App
-  Store builds until the owner says it ships.
+  the crown and the rest, and Start from the wrist. TestFlight build 1.2
+  (87), uploaded 2026-11-24, is the first that carries the Watch app. A
+  lifting workout on a real Watch (P6) waits for a member with one. The
+  Watch app has its own project spec: every TestFlight build carries it
+  from now on, and App Store builds never do.
 - [Capture every sport properly](sport-activities/plan.md) — **active**;
   soccer, tennis, climbing, swims and every other sport land as that sport
   from Apple Health, intervals.icu, `.fit` files or hand entry, with

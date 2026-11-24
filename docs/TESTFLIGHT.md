@@ -41,6 +41,10 @@ idempotent, so a re-run only does what is still missing.
 
 - `TESTFLIGHT_EXTERNAL=0 npm run ios:testflight` keeps a build internal-only,
   for example a build that shows an integration before its launch date.
+- Every TestFlight build carries the Apple Watch app and its complication
+  (`ios/project-watch.yml`), so a tester's Watch keeps the app from build
+  to build. `TESTFLIGHT_WATCH=0 npm run ios:testflight` leaves it out; an
+  App Store candidate (`APP_STORE_BUILD=1`) never carries it.
 - If the upload succeeds but distribution does not finish, the script exits
   `3` and prints the re-run command. Do not upload again.
 
