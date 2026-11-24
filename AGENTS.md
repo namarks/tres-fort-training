@@ -75,10 +75,10 @@ which includes `project.yml`: generate with
 `xcodegen generate --spec project-watch.yml` and run the **TresFortWatch**
 scheme on a Watch simulator (`-watch-day-fixture today` shows a fictional
 day, `-watch-workout-fixture ready` a fictional workout). A TestFlight
-build carries it only when asked (`TESTFLIGHT_WATCH=1 npm run
-ios:testflight` archives `project-watch.yml`); a default TestFlight build
-(`project.yml`) and App Store builds never do, and the upload script
-refuses an archive that holds a Watch app nobody asked for.
+build carries it (`npm run ios:testflight` archives `project-watch.yml`)
+unless `TESTFLIGHT_WATCH=0` leaves it out; App Store builds never do, and
+the upload script refuses an archive whose Watch app doesn't match what
+the build should hold.
 
 ## Workout contract
 

@@ -237,8 +237,8 @@ integration or social breadth.
   the crown and the rest, and Start from the wrist. TestFlight build 1.2
   (87), uploaded 2026-11-24, is the first that carries the Watch app. A
   lifting workout on a real Watch (P6) waits for a member with one. The
-  Watch app has its own project spec: a TestFlight build carries it only
-  when asked, and App Store builds never do.
+  Watch app has its own project spec: every TestFlight build carries it
+  from now on, and App Store builds never do.
 - [Capture every sport properly](sport-activities/plan.md) — **active**;
   soccer, tennis, climbing, swims and every other sport land as that sport
   from Apple Health, intervals.icu, `.fit` files or hand entry, with

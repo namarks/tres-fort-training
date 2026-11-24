@@ -27,12 +27,13 @@
 # is rejected even when set to 0; remove it from old release commands.
 # The archive's UIDeviceFamily is verified before anything is exported.
 #
-# TESTFLIGHT_WATCH=1 archives project-watch.yml, which embeds the Apple Watch
-# app and its complication in the iPhone app (docs/plans/apple-watch). It is
-# opt-in: a default build carries no Watch app, and the App Store candidate
-# never does. Either way the archive is checked before anything is exported:
-# a Watch build must hold the Watch app and its complication at this build's
-# version, and any other build must hold no Watch app.
+# A TestFlight build archives project-watch.yml, which embeds the Apple Watch
+# app and its complication in the iPhone app (docs/plans/apple-watch), so a
+# tester's Watch keeps the app from build to build. TESTFLIGHT_WATCH=0 leaves
+# it out, and the App Store candidate never carries it. Either way the
+# archive is checked before anything is exported: a Watch build must hold the
+# Watch app and its complication at this build's version, and any other build
+# must hold no Watch app.
 #
 # After a successful upload, the build goes to every external TestFlight group
 # (scripts/testflight-distribute.mjs: What to Test notes, group, beta review),
@@ -45,7 +46,7 @@
 #   Internal testers only:  TESTFLIGHT_EXTERNAL=0 ./scripts/upload-testflight.sh
 #   CI:     BUILD_NUMBER=$GITHUB_RUN_NUMBER ./scripts/upload-testflight.sh
 #   App Store candidate:  APP_STORE_BUILD=1 ./scripts/upload-testflight.sh
-#   With the Watch app:  TESTFLIGHT_WATCH=1 ./scripts/upload-testflight.sh
+#   Without the Watch app:  TESTFLIGHT_WATCH=0 ./scripts/upload-testflight.sh
 #
 # Requires: xcodegen, an ASC API key at ~/.appstoreconnect/private_keys/AuthKey_<ID>.p8
 set -euo pipefail
@@ -75,9 +76,19 @@ case "${app_store_build}" in
     ;;
 esac
 
-watch_build="${TESTFLIGHT_WATCH-0}"
+# TestFlight builds carry the Watch app unless told not to; the App Store
+# candidate never does, so asking for both is refused rather than ignored.
+if [ "${app_store_build}" = "1" ]; then
+  watch_build="${TESTFLIGHT_WATCH-0}"
+else
+  watch_build="${TESTFLIGHT_WATCH-1}"
+fi
 case "${watch_build}" in
-  0) ;;
+  0)
+    if [ "${app_store_build}" != "1" ]; then
+      echo "TESTFLIGHT_WATCH=0: archiving the TestFlight build without the Apple Watch app"
+    fi
+    ;;
   1)
     if [ "${app_store_build}" = "1" ]; then
       echo 'TESTFLIGHT_WATCH=1 cannot be combined with APP_STORE_BUILD=1: the App Store candidate carries no Apple Watch app.' >&2
@@ -164,13 +175,14 @@ if [ "${app_store_build}" = "1" ]; then
   done
 fi
 
-# The Watch app ships only when asked for. App Store Connect also rejects a
-# Watch app or complication whose version differs from the iPhone app's.
+# A TestFlight build carries the Watch app unless TESTFLIGHT_WATCH=0; the App
+# Store candidate never does. App Store Connect also rejects a Watch app or
+# complication whose version differs from the iPhone app's.
 readonly ARCHIVED_WATCH_APP="${ARCHIVED_APP}/Watch/TresFortWatch.app"
 if [ "${watch_build}" = "1" ]; then
   for bundle in "${ARCHIVED_WATCH_APP}" "${ARCHIVED_WATCH_APP}/PlugIns/TresFortWatchWidgets.appex"; do
     if [ ! -d "${bundle}" ]; then
-      echo "TESTFLIGHT_WATCH=1 but the archive has no ${bundle}; not exporting." >&2
+      echo "This build carries the Apple Watch app, but the archive has no ${bundle}; not exporting." >&2
       exit 1
     fi
     bundle_build=$(plutil -extract CFBundleVersion raw -o - "${bundle}/Info.plist" | tr -d '[:space:]')
@@ -181,7 +193,7 @@ if [ "${watch_build}" = "1" ]; then
     fi
   done
 elif [ -e "${ARCHIVED_APP}/Watch" ]; then
-  echo "The archive carries an Apple Watch app that was not asked for (TESTFLIGHT_WATCH=1); not exporting." >&2
+  echo "The archive carries an Apple Watch app this build must not hold (App Store candidate or TESTFLIGHT_WATCH=0); not exporting." >&2
   exit 1
 fi
 
