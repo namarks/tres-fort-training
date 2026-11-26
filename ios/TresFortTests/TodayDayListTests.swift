@@ -133,4 +133,104 @@ final class TodayDayListTests: XCTestCase {
         XCTAssertFalse(roundTrip.startsNow)
         XCTAssertEqual(roundTrip, later)
     }
+
+    // MARK: finished activities off the plan (P33)
+
+    private func activity(_ id: String, kind: String = "run", name: String? = "Run", sport: String? = nil,
+                          date: String = "2026-11-20", seconds: Int? = 2_100, meters: Double? = 5_600,
+                          deleted: Bool = false, start: Int? = nil,
+                          attribution: String? = nil) -> ExternalActivity {
+        var row = ExternalActivity(
+            id: id, source: "intervals", external_id: id, date: date, kind: kind, name: name,
+            moving_time_sec: seconds, elapsed_time_sec: nil, distance_m: meters, average_watts: nil,
+            weighted_avg_watts: nil, average_hr: nil, max_hr: nil, training_load: nil,
+            intensity: nil, calories: nil, elevation_gain_m: nil, synced_at: 1, deleted_at: deleted ? 2 : nil)
+        row.sport = sport
+        row.start_date_local_ms = start
+        row.source_attribution = attribution
+        return row
+    }
+
+    private func logged(_ id: String, type: String = "pilates", title: String? = nil,
+                        minutes: Int? = 45) -> ActivityRow {
+        ActivityRow(id: id, user_id: "user", date: "2026-11-20", type: type, title: title,
+                    duration_minutes: minutes, notes: nil, logged_at: 1, source: "ios", deleted_at: nil)
+    }
+
+    private func runWorkout(_ id: String, name: String) -> Workout {
+        Workout(id: id, name: name, day_label: nil, order_index: 0,
+                exercises: [slot(RunPlan.exerciseID, name: "Outdoor run", modality: "timed")])
+    }
+
+    private func done(_ rows: [DailyWorkoutAgenda.Item], activities: [ExternalActivity] = [],
+                      logged: [ActivityRow] = []) -> [ActivityHistory.Entry] {
+        TodayDoneActivities.entries(rows: rows, activities: activities, logged: logged,
+                                    today: "2026-11-20", unit: .miles)
+    }
+
+    func testARunRecordedOffThePlanShowsAsDoneBesideTheDaysOwnRows() {
+        // Nick's Thursday: core planned, a run recorded with nothing planned for it.
+        let core = workout("core", name: "Core")
+        let rows = TodayDayList.rows(items(primary: core))
+        let entries = done(rows, activities: [activity("i1")])
+        XCTAssertEqual(entries.map(\.title), ["Run"])
+        XCTAssertEqual(entries.first?.focus, .activity("i1"), "tapping it opens that run's own record")
+        XCTAssertTrue(TodayDoneActivities.detail(entries[0]).hasPrefix("Done · 3.5 mi · 35m"),
+                      TodayDoneActivities.detail(entries[0]))
+        XCTAssertEqual(TodayDayList.nextID(rows), rows[0].id, "core still leads: the run doesn't change the plan")
+    }
+
+    func testMergedCopiesOtherDatesAndDeletedRowsStayOut() {
+        let entries = done([], activities: [
+            activity("shown"),
+            activity("merged", deleted: true),
+            activity("yesterday", date: "2026-11-19"),
+        ])
+        XCTAssertEqual(entries.map(\.focus), [.activity("shown")])
+    }
+
+    func testAPlannedActivityKeepsTheWorkoutThatLoggedIt() {
+        let soccer = workout("soccer", name: "Soccer")
+        let match = activity("match", kind: "other", name: "Evening Soccer", sport: "soccer", meters: nil)
+        let rows = TodayDayList.rows(items(primary: soccer, logged: ["soccer"]))
+        XCTAssertEqual(rows.first?.status, "logged")
+        XCTAssertEqual(done(rows, activities: [match], logged: [logged("p1", title: "Soccer")]).count, 0,
+                       "Soccer's row already says Logged; the match isn't listed twice")
+        XCTAssertEqual(done(rows, activities: [match, activity("run")]).map(\.focus), [.activity("run")])
+    }
+
+    func testAnActivitySetAsideAsNotTodayStillShowsWhatWasDone() {
+        let soccer = workout("soccer", name: "Soccer")
+        let match = activity("match", kind: "other", name: "Evening Soccer", sport: "soccer", meters: nil)
+        let rows = TodayDayList.rows(items(
+            primary: nil, extras: [soccer],
+            sessions: [session("aside", workout: "soccer", slot: 1, status: "skipped")]))
+        XCTAssertEqual(rows.first?.status, "skipped")
+        XCTAssertEqual(done(rows, activities: [match]).map(\.focus), [.activity("match")],
+                       "the row reads Not today, so the match it didn't log shows on its own")
+    }
+
+    func testAFinishedRunWorkoutKeepsItsRunAndASecondRunStillShows() {
+        let tempo = runWorkout("tempo", name: "Tempo run")
+        let rows = TodayDayList.rows(items(
+            primary: tempo, sessions: [session("t", workout: "tempo", slot: 0, status: "completed")]))
+        let planned = activity("planned", name: "Tempo run", start: 1_000)
+        let extra = activity("extra", name: "Shakeout", seconds: 900, meters: 2_000, start: 2_000)
+        XCTAssertEqual(done(rows, activities: [planned, extra]).map(\.focus), [.activity("extra")])
+
+        // Still to do, the planned run claims nothing.
+        let open = TodayDayList.rows(items(primary: tempo))
+        XCTAssertEqual(done(open, activities: [planned]).map(\.focus), [.activity("planned")])
+    }
+
+    func testDoneActivitiesReadInTheOrderTheyHappenedWithTheirAttribution() {
+        let morning = activity("am", name: "Morning ride", start: 1_000, attribution: "Garmin Forerunner 945")
+        let evening = activity("pm", name: "Evening run", start: 5_000)
+        let entries = done([], activities: [evening, morning], logged: [logged("pilates")])
+        XCTAssertEqual(entries.map(\.title), ["Morning ride", "Evening run", "Pilates"],
+                       "earliest first; an activity logged by hand has no start and comes last")
+        XCTAssertEqual(entries[0].attribution, "Garmin Forerunner 945")
+        XCTAssertEqual(entries[2].focus, .logged("pilates"))
+        XCTAssertEqual(TodayDoneActivities.detail(entries[2]), "Done · 45m")
+    }
 }

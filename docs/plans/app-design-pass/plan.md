@@ -1,6 +1,6 @@
 # App design pass
 
-Slug: app-design-pass · Status: active · Updated: 2026-11-22 · Theme: member-experience
+Slug: app-design-pass · Status: active · Updated: 2026-11-26 · Theme: member-experience
 
 ## Goal
 
@@ -819,6 +819,32 @@ line of their own. P30 builds that.
     Exact-head review and required CI remain delivery gates; device
     acceptance follows a separately authorized build.
 
+- [ ] **P33 — Training done off the plan shows on Today**
+  - On 2026-11-26 the owner recorded an unplanned run in the app and Today
+    didn't show it: the day list held only the planned Core, and the week
+    chart already counted the day. Diagnostics showed the run saved and
+    merged into its intervals.icu copy, as dedup does; Today simply never
+    listed finished activities that no planned row stands for.
+  - `TodayDoneActivities` picks today's synced activities (recorded, Apple
+    Health, `.fit`, intervals.icu, Garmin and WHOOP as the app already
+    holds them) and activities logged by hand, minus those a planned
+    activity's row already counts as logged ("Soccer") and the run that
+    carried out a finished run workout. It reuses `ActivityHistory`'s
+    entries, so names, figures and provider attribution read as on the
+    Activity tab. No backend change.
+  - Each shows as a done row after the day's own rows and before Add to
+    today ("Run · Done · 3.5 mi · 35m · 10:00 /mi", the attribution under
+    it), in the order they happened, so the navy Up next row stays first.
+    A rest day's card and the finished-day recap show the same check lines.
+    Tapping one opens its record (`DayAgendaView` focused on it).
+  - The Watch's day is unchanged; it still shows only planned rows.
+    Freestyle and a workout whose details can't be read keep their cards
+    without these lines.
+  - Unit tests in `TodayDayListTests` cover the owner's Thursday, merged
+    and deleted copies, a planned activity keeping its match, a finished
+    run workout keeping its run, order and attribution. Needs a simulator
+    capture and the owner's look on a TestFlight build like P5.
+
 ## Execution frontier
 
 - P5
@@ -849,6 +875,7 @@ line of their own. P30 builds that.
 - P30
 - P31
 - P32
+- P33
 
 ## Dependencies
 
@@ -858,10 +885,10 @@ line of their own. P30 builds that.
 
 ## Next step
 
-**Now (@owner):** Review P32's synthetic captures and merge PR #36 once its
-exact head has a clean Codex review and all four required checks are green.
-PR #35 is merged; its coach choices and Advanced route are reconciled with
-the responsive grid in PR #36. Re-run the exact-head gate after this merge.
+**Now (@owner):** Review and merge P33's PR once its exact head has a
+clean Codex review and all four required checks are green; then, on the
+next TestFlight build, check that a run recorded off the plan shows on
+Today as done under the day's rows and opens its record.
 
 **Then (@agent):** Run the release check on P30's branch for the Today
 journeys (Details, Change for today and Not today now open from the

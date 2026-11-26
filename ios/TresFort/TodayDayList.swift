@@ -103,6 +103,61 @@ enum TodayDayList {
     }
 }
 
+/// What today already holds that no planned row stands for (app-design-pass
+/// P33): a run recorded off the plan, a ride or match a provider synced, an
+/// activity logged by hand. Each shows on Today as done, after the day's own
+/// rows, so a day's training is all in one place. A synced workout that a
+/// planned activity's row shows as logged ("Soccer"), and the run
+/// that carried out a finished run workout, stay with their rows.
+enum TodayDoneActivities {
+    static func entries(rows: [DailyWorkoutAgenda.Item], activities: [ExternalActivity],
+                        logged: [ActivityRow], today: String,
+                        unit: RunDistanceUnit) -> [ActivityHistory.Entry] {
+        let synced = activities.filter { !$0.isDeleted && $0.date == today }
+        let byHand = logged.filter { $0.deleted_at == nil && $0.date == today }
+        var claimed: Set<String> = []
+        for row in rows {
+            guard let workout = row.workout else { continue }
+            if row.isActivity {
+                // Only a row that reads Logged stands for what logged it; one
+                // set aside as Not today leaves a match done anyway on show.
+                guard row.isDone else { continue }
+                for activity in synced where PlannedActivity.matches(workout.name, synced: activity) {
+                    claimed.insert("activity:" + activity.id)
+                }
+                for entry in byHand where PlannedActivity.matches(workout.name, manual: entry) {
+                    claimed.insert("logged:" + entry.id)
+                }
+            } else if row.status == "completed", PlannedRunCreation.isRun(workout),
+                      let run = PlannedRunRecord.matchingRun(
+                        workoutName: workout.name,
+                        among: synced.filter { !claimed.contains("activity:" + $0.id) }) {
+                claimed.insert("activity:" + run.id)
+            }
+        }
+        let history = ActivityHistory(sessions: [], activities: synced, logged: byHand, today: today,
+                                      unit: unit, setCount: { _ in 0 }, workout: { _ in nil })
+        // In the order they happened, as the day's own rows read; the
+        // history lists newest first, with unknown starts last.
+        let known = history.entries.filter { $0.startMs != nil }.reversed()
+        let unknown = history.entries.filter { $0.startMs == nil }
+        return (Array(known) + unknown).filter { !claimed.contains($0.id) }
+    }
+
+    /// "Done · 3.5 mi · 35m · 10:00 /mi", or "Done" when nothing is known.
+    static func detail(_ entry: ActivityHistory.Entry) -> String {
+        (["Done"] + entry.details).joined(separator: " · ")
+    }
+
+    /// "Run, done. 3.5 mi. 35m. 10:00 /mi", with its attribution last.
+    static func spoken(_ entry: ActivityHistory.Entry) -> String {
+        var parts: [String] = ["\(entry.title), done"]
+        parts.append(contentsOf: entry.details)
+        if let attribution = entry.attribution, !attribution.isEmpty { parts.append(attribution) }
+        return parts.joined(separator: ". ")
+    }
+}
+
 /// What a row of Today's list can do, decided by `TodayView`, which owns
 /// starting, logging and the sheets.
 struct TodayRowActions {
@@ -120,6 +175,10 @@ struct TodayDayListView: View {
     let actions: (DailyWorkoutAgenda.Item) -> TodayRowActions
     let canAdd: Bool
     let onAdd: () -> Void
+    /// Today's finished activities no row stands for (P33), and what
+    /// tapping one opens.
+    var done: [ActivityHistory.Entry] = []
+    var onOpenDone: (ActivityHistory.Entry) -> Void = { _ in }
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     private static let badgeSize: CGFloat = 30
     private let unit = RunDistanceUnit.preferred()
@@ -137,7 +196,11 @@ struct TodayDayListView: View {
                     row(item, ruled: ruled)
                 }
             }
-            addRow(ruled: rows.last.map { $0.id != nextID } ?? false)
+            ForEach(Array(done.enumerated()), id: \.element.id) { index, entry in
+                let ruled = index > 0 || (rows.last.map { $0.id != nextID } ?? false)
+                doneRow(entry, ruled: ruled)
+            }
+            addRow(ruled: done.isEmpty ? (rows.last.map { $0.id != nextID } ?? false) : true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.surface)
@@ -252,6 +315,53 @@ struct TodayDayListView: View {
         .onTapGesture(perform: action.more)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("today.agenda.\(item.id)")
+    }
+
+    /// A finished activity off the plan: a check, its name and what was
+    /// done, and the provider's attribution (a Garmin activity always
+    /// names its device). Tapping it opens its record.
+    private func doneRow(_ entry: ActivityHistory.Entry, ruled: Bool) -> some View {
+        Button { onOpenDone(entry) } label: {
+            HStack(alignment: .center, spacing: 12) {
+                if !dynamicTypeSize.isAccessibilitySize {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.title3).foregroundStyle(Theme.done)
+                        .frame(width: Self.badgeSize, height: Self.badgeSize)
+                        .accessibilityHidden(true)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(entry.title).font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Theme.muted)
+                        .lineLimit(stacksRows ? nil : 2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(TodayDoneActivities.detail(entry))
+                        .font(.footnote.monospacedDigit()).foregroundStyle(Theme.muted)
+                        .lineLimit(stacksRows ? nil : 2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("today.done.detail.\(entry.id)")
+                    if let attribution = entry.attribution, !attribution.isEmpty {
+                        Text(attribution).font(.caption).foregroundStyle(Theme.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.bold)).foregroundStyle(Theme.muted)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .accessibilityHidden(true)
+            }
+            .padding(.horizontal, 14).padding(.vertical, stacksRows ? 10 : 4)
+            .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .overlay(alignment: .top) {
+            if ruled { Rectangle().fill(Theme.surface2).frame(height: 1).padding(.leading, dynamicTypeSize.isAccessibilitySize ? 14 : 14 + Self.badgeSize + 12) }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(TodayDoneActivities.spoken(entry))
+        .accessibilityHint("Opens its record")
+        .accessibilityIdentifier("today.done.\(entry.id)")
     }
 
     private func addRow(ruled: Bool) -> some View {
