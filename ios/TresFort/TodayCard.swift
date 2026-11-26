@@ -164,6 +164,8 @@ enum TodayLineup {
 struct TodayDoneLine: View {
     let title: String
     let detail: String
+    /// A third line, such as a provider's attribution ("Garmin Forerunner 945").
+    var note: String? = nil
     var actionTitle: String? = nil
     var action: (() -> Void)? = nil
     var detailIdentifier: String? = nil
@@ -180,9 +182,12 @@ struct TodayDoneLine: View {
                 Text(title).font(.headline).foregroundStyle(Theme.text).lineLimit(1)
                 Text(detail).font(.footnote.monospacedDigit()).foregroundStyle(Theme.muted).lineLimit(1)
                     .accessibilityIdentifier(detailIdentifier ?? "")
+                if let note, !note.isEmpty {
+                    Text(note).font(.caption).foregroundStyle(Theme.muted).lineLimit(1)
+                }
             }
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("\(title), done. \(detail)")
+            .accessibilityLabel("\(title), done. \(detail)" + (note.map { ". \($0)" } ?? ""))
             Spacer(minLength: 8)
             if let actionTitle, let action {
                 Button(action: action) {

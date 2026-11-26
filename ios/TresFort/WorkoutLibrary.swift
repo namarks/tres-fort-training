@@ -109,15 +109,24 @@ enum PlannedActivity {
     /// name, or, for a name that is a sport ("Soccer"), is that sport: a
     /// watch calls the match "Evening Soccer" or nothing at all.
     static func isLogged(_ name: String, manual: [ActivityRow], synced: [ExternalActivity]) -> Bool {
+        manual.contains { matches(name, manual: $0) } || synced.contains { matches(name, synced: $0) }
+    }
+
+    /// An activity logged by hand stands for the planned activity `name`.
+    static func matches(_ name: String, manual row: ActivityRow) -> Bool {
         let key = normalized(name)
         guard !key.isEmpty else { return false }
         let sportID = Self.sport(named: name)?.id
-        return manual.contains { normalized($0.title ?? "") == key || (sportID != nil && $0.type == sportID) }
-            || synced.contains {
-                // A synced workout without a named sport still carries its
-                // coarse kind: a ride is a ride.
-                normalized($0.name ?? "") == key || (sportID != nil && ($0.sport ?? $0.kind) == sportID)
-            }
+        return normalized(row.title ?? "") == key || (sportID != nil && row.type == sportID)
+    }
+
+    /// A synced workout stands for the planned activity `name`. One
+    /// without a named sport still carries its coarse kind: a ride is a ride.
+    static func matches(_ name: String, synced activity: ExternalActivity) -> Bool {
+        let key = normalized(name)
+        guard !key.isEmpty else { return false }
+        let sportID = Self.sport(named: name)?.id
+        return normalized(activity.name ?? "") == key || (sportID != nil && (activity.sport ?? activity.kind) == sportID)
     }
 
     /// An existing workout already called this, so a second isn't made.

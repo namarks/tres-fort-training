@@ -228,6 +228,8 @@ struct TodayView: View {
     /// The day whose workout the editor sheet is editing.
     @State private var previewTarget: IdentifiedString?
     @State private var unresolvedDate: IdentifiedString?
+    /// A finished activity off the plan, opened from Today (P33).
+    @State private var doneEntry: ActivityHistory.Entry?
     /// Keeps a double tap from starting twice while iOS is presenting the
     /// one-time notification permission prompt before a new workout.
     @State private var isPreparingWorkoutStart = false
@@ -453,6 +455,16 @@ struct TodayView: View {
                         .navigationBarTitleDisplayMode(.inline)
                         .toolbar { ToolbarItem(placement: .cancellationAction) {
                             Button("Done") { unresolvedDate = nil }
+                        } }
+                }
+            }
+            .sheet(item: $doneEntry) { entry in
+                NavigationStack {
+                    DayAgendaView(sync: sync, dateString: entry.date, focus: entry.focus)
+                        .navigationTitle(entry.title)
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar { ToolbarItem(placement: .cancellationAction) {
+                            Button("Done") { doneEntry = nil }
                         } }
                 }
             }
@@ -783,7 +795,8 @@ struct TodayView: View {
                             TodayDayHeading(sync: sync, dateString: sync.todayString)
                             TodayDayListView(rows: dayListRows, actions: rowActions,
                                              canAdd: canOfferBuildWorkout && sync.canAddAnotherWorkout,
-                                             onAdd: { showAddWorkout = true })
+                                             onAdd: { showAddWorkout = true },
+                                             done: todayDone, onOpenDone: { doneEntry = $0 })
                                 .modifier(TodayDaySwipe(state: daySwipe, canMove: canMoveDay, apply: applyDayMove, move: moveDay))
                             // A workout whose add request is still out.
                             AddAnotherWorkoutLine(sync: sync, retryOnly: true, ruled: false)
@@ -810,6 +823,7 @@ struct TodayView: View {
             WorkoutDoneView(sync: sync, onOpenCalendar: { showCalendar = true }, onOpenActivity: onOpenActivity,
                             extras: todayExtras, isLogged: plannedActivityLogged,
                             onLogActivity: onLogPlannedActivity,
+                            done: todayDone, onOpenDone: { doneEntry = $0 },
                             daySwipe: TodayDaySwipe(state: daySwipe, canMove: canMoveDay, apply: applyDayMove, move: moveDay)) { somethingElse }
         } else {
             ScrollView {
@@ -947,6 +961,7 @@ struct TodayView: View {
             // Nothing to start or log: a plain card, and no navy.
             VStack(alignment: .leading, spacing: 0) {
                 doneExtraLines(todayArrangement(main: nil))
+                doneActivityLines(dividers: true)
                 Text("Rest day").font(.title2.weight(.bold)).foregroundStyle(Theme.text)
                 Text("Nothing planned. Train anyway, or take the day off.")
                     .font(.subheadline).foregroundStyle(Theme.muted).padding(.top, 4)
@@ -982,6 +997,26 @@ struct TodayView: View {
     // MARK: today's day as one list (app-design-pass P30)
 
     private var dayListRows: [DailyWorkoutAgenda.Item] { TodayDayList.rows(sync.dailyWorkoutAgenda) }
+
+    /// Today's finished activities that no row stands for (P33): a run
+    /// recorded off the plan, a synced ride, a match logged by hand.
+    private var todayDone: [ActivityHistory.Entry] {
+        let today = sync.todayString
+        return TodayDoneActivities.entries(rows: dayListRows, activities: sync.activities(on: today),
+                                           logged: sync.manualActivities(on: today), today: today,
+                                           unit: RunDistanceUnit.preferred())
+    }
+
+    /// The same activities as check lines on a card that isn't the list.
+    @ViewBuilder private func doneActivityLines(dividers: Bool) -> some View {
+        ForEach(todayDone) { entry in
+            TodayDoneLine(title: entry.title, detail: TodayDoneActivities.detail(entry),
+                          note: entry.attribution, actionTitle: "View", action: { doneEntry = entry },
+                          detailIdentifier: "today.done.detail.\(entry.id)",
+                          actionIdentifier: "today.done.\(entry.id)",
+                          dividerBelow: dividers)
+        }
+    }
 
     /// Today shows the day as one list whenever it holds something: the
     /// main workout, add-ons or workouts added for later. A freestyle
@@ -1547,6 +1582,9 @@ private struct WorkoutDoneView<QuickStarts: View>: View {
     let extras: [Workout]
     let isLogged: (Workout) -> Bool
     let onLogActivity: ((String) -> Void)?
+    /// Today's finished activities off the plan (P33), and opening one.
+    var done: [ActivityHistory.Entry] = []
+    var onOpenDone: (ActivityHistory.Entry) -> Void = { _ in }
     /// Swiping the done card moves to other days, as on today's own card.
     let daySwipe: TodayDaySwipe
     /// A run or an activity can still follow a finished workout, at the
@@ -1595,6 +1633,17 @@ private struct WorkoutDoneView<QuickStarts: View>: View {
         return "\(sets.count) working \(sets.count == 1 ? "set" : "sets") · \(exerciseCount) \(exerciseCount == 1 ? "exercise" : "exercises")"
     }
 
+    /// Activities finished off the plan, under the workout like its add-ons.
+    @ViewBuilder private var doneLines: some View {
+        ForEach(done) { entry in
+            TodayDoneLine(title: entry.title, detail: TodayDoneActivities.detail(entry),
+                          note: entry.attribution, actionTitle: "View", action: { onOpenDone(entry) },
+                          detailIdentifier: "today.done.detail.\(entry.id)",
+                          actionIdentifier: "today.done.\(entry.id)",
+                          dividerBelow: false)
+        }
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
@@ -1620,6 +1669,7 @@ private struct WorkoutDoneView<QuickStarts: View>: View {
                                                       detailIdentifier: "today.extra.logged.\(workout.id)",
                                                       dividerBelow: false)
                                     }
+                                    doneLines
                                 }
                                 .todayDoneBand()
                                 TodayNextActivity(workout: lead, onLog: onLogActivity)
@@ -1670,6 +1720,7 @@ private struct WorkoutDoneView<QuickStarts: View>: View {
                                                       detailIdentifier: "today.extra.logged.\(workout.id)",
                                                       dividerBelow: false)
                                     }
+                                    doneLines
                                 }
                                 .padding(.horizontal, 20).padding(.top, 20).padding(.bottom, 8)
                                 VStack(alignment: .leading, spacing: 0) {
