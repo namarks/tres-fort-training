@@ -107,7 +107,7 @@ enum TodayDayList {
 /// P33): a run recorded off the plan, a ride or match a provider synced, an
 /// activity logged by hand. Each shows on Today as done, after the day's own
 /// rows, so a day's training is all in one place. A synced workout that a
-/// planned activity's row already counts as logged ("Soccer"), and the run
+/// planned activity's row shows as logged ("Soccer"), and the run
 /// that carried out a finished run workout, stay with their rows.
 enum TodayDoneActivities {
     static func entries(rows: [DailyWorkoutAgenda.Item], activities: [ExternalActivity],
@@ -119,6 +119,9 @@ enum TodayDoneActivities {
         for row in rows {
             guard let workout = row.workout else { continue }
             if row.isActivity {
+                // Only a row that reads Logged stands for what logged it; one
+                // set aside as Not today leaves a match done anyway on show.
+                guard row.isDone else { continue }
                 for activity in synced where PlannedActivity.matches(workout.name, synced: activity) {
                     claimed.insert("activity:" + activity.id)
                 }

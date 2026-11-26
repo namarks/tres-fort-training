@@ -199,6 +199,17 @@ final class TodayDayListTests: XCTestCase {
         XCTAssertEqual(done(rows, activities: [match, activity("run")]).map(\.focus), [.activity("run")])
     }
 
+    func testAnActivitySetAsideAsNotTodayStillShowsWhatWasDone() {
+        let soccer = workout("soccer", name: "Soccer")
+        let match = activity("match", kind: "other", name: "Evening Soccer", sport: "soccer", meters: nil)
+        let rows = TodayDayList.rows(items(
+            primary: nil, extras: [soccer],
+            sessions: [session("aside", workout: "soccer", slot: 1, status: "skipped")]))
+        XCTAssertEqual(rows.first?.status, "skipped")
+        XCTAssertEqual(done(rows, activities: [match]).map(\.focus), [.activity("match")],
+                       "the row reads Not today, so the match it didn't log shows on its own")
+    }
+
     func testAFinishedRunWorkoutKeepsItsRunAndASecondRunStillShows() {
         let tempo = runWorkout("tempo", name: "Tempo run")
         let rows = TodayDayList.rows(items(
