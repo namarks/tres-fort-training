@@ -931,6 +931,13 @@ private actor SetAsyncLatch {
     }
 }
 
+/// Which overlapping state refresh callers have returned.
+@MainActor
+private final class SetLoadReturns {
+    var superseded = false
+    var joined = false
+}
+
 @MainActor
 private final class RestNotificationCenterStub: RestNotificationCenterProviding {
     var status: UNAuthorizationStatus = .authorized
@@ -9222,6 +9229,71 @@ final class SetOutboxTests: XCTestCase {
         await older.value
         await postMutation.value
 
+        XCTAssertEqual(api.stateCalls, 2)
+        XCTAssertEqual(model.todaySession?.status, "completed")
+    }
+
+    /// A workout record link opened at launch refreshes while launch recovery
+    /// starts its own post-mutation refresh. The newer request stops the older
+    /// pull before it applies; neither the superseded caller nor a caller that
+    /// joined its pull may return until the newer pull has applied.
+    func testSupersededRefreshWaitsForTheNewerPull() async {
+        let defaults = defaults()
+        let ex = exercise()
+        let api = SetWriteAPIStub()
+        let firstEntered = SetAsyncLatch()
+        let releaseFirst = SetAsyncLatch()
+        let secondEntered = SetAsyncLatch()
+        let releaseSecond = SetAsyncLatch()
+        api.stateHandler = { [self] _ in
+            if api.stateCalls == 1 {
+                await firstEntered.open()
+                await releaseFirst.wait()
+                return state(
+                    session: session(status: "planned"),
+                    sets: [], exercise: ex)
+            }
+            await secondEntered.open()
+            await releaseSecond.wait()
+            return state(
+                session: session(status: "completed"),
+                sets: [], exercise: ex)
+        }
+        let model = SyncModel(
+            auth: retainedAuth(defaults: defaults),
+            setWriteAPI: api,
+            defaults: defaults,
+            now: { self.fixedDate })
+        let returned = SetLoadReturns()
+
+        let superseded = Task {
+            await model.loadAfterMutation()
+            returned.superseded = true
+        }
+        await firstEntered.wait()
+        let joined = Task {
+            await model.load()
+            returned.joined = true
+        }
+        await Task.yield()
+        let newer = Task { await model.loadAfterMutation() }
+        await Task.yield()
+        XCTAssertEqual(api.stateCalls, 1)
+
+        await releaseFirst.open()
+        await secondEntered.wait()
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(api.stateCalls, 2)
+        XCTAssertFalse(returned.superseded, "A superseded refresh returned before the newer pull applied")
+        XCTAssertFalse(returned.joined, "A caller that joined the superseded pull returned before the newer pull applied")
+        XCTAssertNil(model.todaySession, "The superseded pull must not apply its older state")
+
+        await releaseSecond.open()
+        await superseded.value
+        XCTAssertEqual(model.todaySession?.status, "completed")
+        XCTAssertFalse(model.isUsingCachedState)
+        await joined.value
+        await newer.value
         XCTAssertEqual(api.stateCalls, 2)
         XCTAssertEqual(model.todaySession?.status, "completed")
     }

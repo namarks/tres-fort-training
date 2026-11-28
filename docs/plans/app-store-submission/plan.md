@@ -174,7 +174,11 @@ needs these changes in the App Store build:
   merged `4306841` then hit the REST trip test's five-second deadline, followed
   by D1 cleanup errors. That suite now seeds one isolated plan and gives creation
   validation and edit/delete checks separate test budgets, keeping every assertion.
-  The next TestFlight
+  The 2026-11-27 nightly on `dcb9a6a` failed iPhone shard 1 on the workout
+  record handoff journey, twice: a launch refresh superseded the handoff's
+  refresh and the handoff reported a failed load. The refresh coalescer now
+  waits for the newer pull (see [workout library](../workout-library/plan.md)
+  notes). The next TestFlight
   upload waits for a clean full release check on the exact merged commit;
   local focused checks and PR build/unit checks do not replace it.
 - **Still open:** run the waived device checks on the live build.

@@ -944,6 +944,20 @@ applies to this work, with all required checks tied to the exact head.
   overlapping-refresh regression before changing the coalescer or claiming a
   fix. Keep account/session/attempt/set checks fail-closed and retain the
   unavailable-record assertion; a retry pass is not first-attempt evidence.
+  **2026-11-27:** the nightly release check on `dcb9a6a` failed
+  `testWorkoutRecordHandoffChecksExactTargetAccountAttemptAndSet` on both
+  attempts, on a different link each time (the deleted set, then the stale
+  attempt), neither reaching its expected screen. Cause: the handoff's
+  post-mutation refresh can be superseded by launch recovery's
+  (`recoverWorkoutWrites`); the superseded pull stops without applying state,
+  its caller returned anyway, and the handoff read the cached state as a
+  failed load. `SyncModel` now makes a superseded caller, and any caller that
+  joined its pull, wait for the newer pull.
+  `SetOutboxTests.testSupersededRefreshWaitsForTheNewerPull` is the
+  deterministic overlapping-refresh regression (it fails on the old
+  coalescer). The fail-closed checks and the unavailable-record assertion are
+  unchanged. First-attempt evidence is a full release check passing this
+  journey without a retry.
 
 - The September 18 follow-up selects P0.5(a)/(b) as the first SensAI-inspired
   implementation candidates, followed by P0.5(c). The owner subsequently

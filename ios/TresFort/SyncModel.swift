@@ -633,13 +633,16 @@ final class SyncModel: ObservableObject {
 
     private func load(requiringFreshness requiredFreshness: UInt64) async {
         while let activeTask = stateLoadTask {
-            let canJoin = stateLoadKey.map {
-                $0.bearer == currentJWT
-                    && $0.freshnessGeneration >= requiredFreshness
-                    && $0.featureSessionEpoch == auth.featureSessionEpoch
-            } ?? false
+            let joined = stateLoadKey.flatMap { key in
+                key.bearer == currentJWT
+                    && key.freshnessGeneration >= requiredFreshness
+                    && key.featureSessionEpoch == auth.featureSessionEpoch ? key : nil
+            }
             await activeTask.value
-            if canJoin { return }
+            if let joined {
+                await followSupersedingLoad(after: joined)
+                return
+            }
         }
         guard auth.featureSessionEpoch == featureSessionEpoch,
               let jwt = currentJWT else { return }
@@ -657,6 +660,20 @@ final class SyncModel: ObservableObject {
         }
         stateLoadTask = task
         await task.value
+        await followSupersedingLoad(after: key)
+    }
+
+    /// A pull stops without applying state once a newer post-mutation request
+    /// advances the freshness generation. That newer request also started
+    /// after this caller's mutation, so wait for it rather than return with
+    /// the older state: a link opened at launch would otherwise report a
+    /// failed load while the launch recovery pull replaces its own.
+    private func followSupersedingLoad(after key: StateLoadKey) async {
+        guard stateFreshnessGeneration != key.freshnessGeneration,
+              key.featureSessionEpoch == featureSessionEpoch,
+              key.featureSessionEpoch == auth.featureSessionEpoch,
+              key.bearer == currentJWT else { return }
+        await load(requiringFreshness: stateFreshnessGeneration)
     }
 
     private func finishStateLoad(taskID: UUID) {
